@@ -8,7 +8,6 @@ import 'package:home_inventory/home_inventory.dart';
 
 void main() {
   setUpAll(() {
-    // 让纯 Dart VM 侧也能用 sqflite；生产代码仍走默认工厂。
     sqfliteFfiInit();
   });
 
@@ -17,7 +16,7 @@ void main() {
   late InventoryDatabase db;
   late List<InventoryDatabase> opened;
 
-  InventoryDatabase newDb({int version = 2, String? path}) {
+  InventoryDatabase newDb({int version = 3, String? path}) {
     final instance = InventoryDatabase(
       databaseFactory: databaseFactoryFfi,
       databasePath: path ?? dbPath,
@@ -35,7 +34,6 @@ void main() {
   });
 
   tearDown(() async {
-    // 先关闭本测试打开的所有连接，再删目录：Windows 上文件被占用时删不掉。
     for (final instance in opened) {
       await instance.close();
     }
@@ -44,193 +42,184 @@ void main() {
     }
   });
 
-  Item sample(String name, String location) => Item(
-        name: name,
-        location: location,
-        createdAt: 1700000000000,
-        updatedAt: 1700000000000,
-      );
+  /// 录入一件物品到一个位置，返回关联结果。
+  Future<UpsertResult> put(String item, String location) async {
+    final locationId = await db.addLocation(location);
+    return db.upsertItemLocation(item, locationId);
+  }
 
-  // ---- 第一阶段原有四个验收点 ----
+  // ---- 基础：空库 / 重开 ----
 
-  test('空库查询返回空列表', () async {
-    expect(await db.getAll(), isEmpty);
+  test('空库查询：无物品、无位置、无关联', () async {
+    expect(await db.getAllItems(), isEmpty);
+    expect(await db.getAllLocations(), isEmpty);
+    expect(await db.countActiveAssociations(), 0);
+    expect(await db.findByName('梯子'), isNull);
   });
 
-  test('重开临时文件库后仍能查到', () async {
-    final id = await db.insert(sample('梯子', '阳台'));
-    expect(id, greaterThan(0));
+  test('重开临时文件库后仍能查到（且确认 dispose 了连接）', () async {
+    await put('梯子', '阳台');
     expect(db.isOpen, isTrue);
 
     await db.close();
-    // 证据 1：旧实例的底层连接确实被 dispose，而不是仍持有连接。
     expect(db.isOpen, isFalse);
 
-    // 证据 2：重开拿到的是全新实例，不是复用旧对象。
     final reopened = newDb();
     expect(identical(reopened, db), isFalse);
-    expect(reopened.isOpen, isFalse); // 尚未 open
+    expect(reopened.isOpen, isFalse);
 
-    final items = await reopened.getAll();
+    final found = await reopened.findByName('梯子');
     expect(reopened.isOpen, isTrue);
-    expect(items, hasLength(1));
-    expect(items.first.id, id);
-    expect(items.first.name, '梯子');
-    expect(items.first.location, '阳台');
+    expect(found, isNotNull);
+    expect(found!.item.name, '梯子');
+    expect(found.locations.map((e) => e.name), contains('阳台'));
   });
 
-  test('软删除后默认查不到', () async {
-    final id = await db.insert(sample('梯子', '阳台'));
-    expect(await db.softDelete(id), 1);
+  // ---- 三张表：多对多 ----
 
-    expect(await db.getAll(), isEmpty);
+  test('一物放多处：同一物品关联多个位置，全量列出', () async {
+    final balcony = await db.addLocation('阳台');
+    final storage = await db.addLocation('储物间');
+    await db.upsertItemLocation('梯子', balcony);
+    await db.upsertItemLocation('梯子', storage);
 
-    final all = await db.getAll(includeDeleted: true);
-    expect(all, hasLength(1));
-    expect(all.first.id, id);
-    expect(all.first.isDeleted, isTrue);
+    final found = await db.findByName('梯子');
+    expect(found, isNotNull);
+    expect(found!.locations.map((e) => e.name), containsAll(<String>['阳台', '储物间']));
+    expect(await db.countActiveAssociations(), 2);
+    // 物品表只此一件，位置表两处。
+    expect(await db.getAllItems(), hasLength(1));
+    expect(await db.getAllLocations(), hasLength(2));
   });
 
-  test('同名两条记录删一条，剩下那条 id 与位置都正确', () async {
-    final idA = await db.insert(sample('梯子', '阳台'));
-    final idB = await db.insert(sample('梯子', '储物间'));
-    expect(idA, isNot(idB));
+  test('一处放多物：多个物品共享一个位置', () async {
+    final balcony = await db.addLocation('阳台');
+    await db.upsertItemLocation('梯子', balcony);
+    await db.upsertItemLocation('园艺剪', balcony);
 
-    expect(await db.softDelete(idA), 1);
-
-    final items = await db.getAll();
-    expect(items, hasLength(1));
-    expect(items.single.id, idB);
-    expect(items.single.name, '梯子');
-    expect(items.single.location, '储物间');
-
-    final all = await db.getAll(includeDeleted: true);
-    expect(all, hasLength(2));
+    expect((await db.findByName('梯子'))!.locations.single.name, '阳台');
+    expect((await db.findByName('园艺剪'))!.locations.single.name, '阳台');
+    expect(await db.getAllLocations(), hasLength(1));
   });
 
-  test('软删除后同名再插入，getAll 不混入已删旧记录', () async {
-    final oldId = await db.insert(sample('梯子', '阳台'));
-    expect(await db.softDelete(oldId), 1);
-    final newId = await db.insert(sample('梯子', '储物间'));
-    expect(newId, isNot(oldId));
+  // ---- 幂等 / 并发 ----
 
-    final items = await db.getAll();
-    expect(items, hasLength(1));
-    expect(items.single.id, newId);
-    expect(items.single.location, '储物间');
-    expect(items.single.isDeleted, isFalse);
+  test('连点两下只产生一条关联，第二次 created=false', () async {
+    final first = await put('梯子', '阳台');
+    expect(first.created, isTrue);
 
-    final all = await db.getAll(includeDeleted: true);
-    expect(all, hasLength(2));
-    expect(all.map((e) => e.id), containsAll(<int>[oldId, newId]));
-    expect(all.firstWhere((e) => e.id == oldId).isDeleted, isTrue);
+    final second = await put('梯子', '阳台');
+    expect(second.created, isFalse);
+    expect(second.itemId, first.itemId);
+    expect(second.locationId, first.locationId);
+
+    expect(await db.countActiveAssociations(), 1);
+    expect(await db.getAllItems(), hasLength(1));
   });
 
-  test('getById 默认过滤软删除，includeDeleted 可取回', () async {
-    final id = await db.insert(sample('扳手', '工具箱'));
-    expect((await db.getById(id))?.name, '扳手');
-
-    expect(await db.softDelete(id), 1);
-    expect(await db.getById(id), isNull);
-    expect((await db.getById(id, includeDeleted: true))?.id, id);
-    expect(await db.getById(99999), isNull);
+  test('并发重复插入同一(物品,位置)只留一条', () async {
+    final locationId = await db.addLocation('阳台');
+    // 同时发起 8 个相同录入：三个表的唯一约束 + 事务串行化保证幂等。
+    final results = await Future.wait<UpsertResult>(
+      List<Future<UpsertResult>>.generate(
+        8,
+        (_) => db.upsertItemLocation('梯子', locationId),
+      ),
+    );
+    expect(results.where((r) => r.created).length, 1);
+    expect(await db.countActiveAssociations(), 1);
+    expect(await db.getAllItems(), hasLength(1));
+    expect(await db.getAllLocations(), hasLength(1));
   });
 
   // ---- 参数校验 ----
 
-  test('insert 拒绝空名称与空位置', () async {
+  test('空名称被拒绝', () async {
+    final locationId = await db.addLocation('阳台');
     expect(
-      db.insert(sample('', '阳台')),
+      db.upsertItemLocation('', locationId),
       throwsA(isA<ArgumentError>()),
     );
     expect(
-      db.insert(sample('梯子', '   ')),
+      db.upsertItemLocation('   ', locationId),
       throwsA(isA<ArgumentError>()),
     );
-    expect(await db.getAll(), isEmpty);
+    expect(await db.countActiveAssociations(), 0);
   });
 
-  test('insert 裁剪首尾空白，规范化后再入库', () async {
-    final id = await db.insert(sample('  梯子  ', '  阳台 '));
-    final item = await db.getById(id);
-    expect(item?.name, '梯子');
-    expect(item?.location, '阳台');
+  test('超长位置被拒绝（阈值 100）', () async {
+    final tooLong = '位' * (InventoryDatabase.maxNameLength + 1);
+    expect(db.addLocation(tooLong), throwsA(isA<ArgumentError>()));
+    expect(await db.getAllLocations(), isEmpty);
   });
 
-  // ---- 事务幂等：连点两下不出重复 ----
-
-  test('upsert 连点两下只产生一条记录，第二次返回 created=false', () async {
-    final first = await db.upsert(sample('梯子', '阳台'));
-    expect(first.created, isTrue);
-
-    final second = await db.upsert(sample('梯子', '阳台'));
-    expect(second.created, isFalse);
-    expect(second.id, first.id);
-
-    final items = await db.getAll();
-    expect(items, hasLength(1));
-    expect(items.single.id, first.id);
-    expect(items.single.location, '阳台');
+  test('trim 首尾空白后入库与查询一致', () async {
+    final locationId = await db.addLocation('  阳台  ');
+    expect((await db.getLocationById(locationId))!.name, '阳台');
+    await db.upsertItemLocation('  梯子  ', locationId);
+    // 两边都带空白查询，trim 后命中。
+    final found = await db.findByName('  梯子  ');
+    expect(found, isNotNull);
+    expect(found!.item.name, '梯子');
+    expect((await db.getAllLocations()).single.name, '阳台');
   });
 
-  test('upsert 同名不同位置是两条合法记录', () async {
-    final a = await db.upsert(sample('梯子', '阳台'));
-    final b = await db.upsert(sample('梯子', '储物间'));
-    expect(b.id, isNot(a.id));
-    expect(await db.getAll(), hasLength(2));
+  // ---- 精确匹配 ----
+
+  test('精确名称：查「梯」找不到「梯子」', () async {
+    await put('梯子', '阳台');
+    expect(await db.findByName('梯'), isNull);
+    expect(await db.findByName('梯子'), isNotNull);
   });
 
-  test('upsert 空白裁剪后视为同一条（绕过唯一约束的写法被堵住）', () async {
-    final a = await db.upsert(sample('梯子', '阳台'));
-    final b = await db.upsert(sample('  梯子  ', ' 阳台 '));
-    expect(b.created, isFalse);
-    expect(b.id, a.id);
-    expect(await db.getAll(), hasLength(1));
+  // ---- 软删除 ----
+
+  test('位置软删除后不再出现在查询里', () async {
+    final balconyId = await db.addLocation('阳台');
+    await db.upsertItemLocation('梯子', balconyId);
+
+    final db2 = db; // 通过原始 SQL 软删位置，验证查询侧过滤。
+    final database = await db2.open();
+    await database.update(
+      InventoryDatabase.tableLocations,
+      <String, Object?>{InventoryDatabase.columnIsDeleted: 1},
+      where: '${InventoryDatabase.columnId} = ?',
+      whereArgs: <Object?>[balconyId],
+    );
+
+    expect(await db.getAllLocations(), isEmpty);
+    final found = await db.findByName('梯子');
+    expect(found!.locations, isEmpty);
   });
 
-  test('软删除后同名同位置 upsert 生成新记录，不复活旧行', () async {
-    final old = await db.upsert(sample('梯子', '阳台'));
-    expect(await db.softDelete(old.id), 1);
+  // ---- 数据库层兜底：唯一约束 ----
 
-    final fresh = await db.upsert(sample('梯子', '阳台'));
-    expect(fresh.created, isTrue);
-    expect(fresh.id, isNot(old.id));
-
-    final items = await db.getAll();
-    expect(items, hasLength(1));
-    expect(items.single.id, fresh.id);
-    expect(items.single.isDeleted, isFalse);
-
-    final all = await db.getAll(includeDeleted: true);
-    expect(all, hasLength(2));
-    expect(all.firstWhere((e) => e.id == old.id).isDeleted, isTrue);
-  });
-
-  // ---- 数据库层兜底 ----
-
-  test('部分唯一索引兜底：绕过 upsert 直接 insert 重复记录被拒', () async {
-    await db.insert(sample('扳手', '工具箱'));
+  test('绕过幂等方法直接插重复关联被唯一索引拒绝', () async {
+    final locationId = await db.addLocation('阳台');
+    final itemId = (await db.upsertItemLocation('梯子', locationId)).itemId;
+    final database = await db.open();
     expect(
-      db.insert(sample('扳手', '工具箱')),
+      database.insert(
+        InventoryDatabase.tableItemLocations,
+        ItemLocation(
+          itemId: itemId,
+          locationId: locationId,
+          createdAt: 1,
+          updatedAt: 1,
+        ).toMap(),
+      ),
       throwsA(isA<DatabaseException>()),
     );
-
-    // 已软删的旧行不占用唯一位，仍可插入同名同位置。
-    final all = await db.getAll(includeDeleted: true);
-    final first = all.single;
-    expect(await db.softDelete(first.id!), 1);
-    final newId = await db.insert(sample('扳手', '工具箱'));
-    expect(newId, isNot(first.id));
   });
 
-  // ---- 升级迁移：异常路径 ----
+  // ---- 升级迁移：v2 单表 → v3 三张表 ----
 
-  test('v1 库升级到 v2 时补建唯一索引', () async {
-    final v1Path = p.join(tempDir.path, 'v1.db');
-    final v1db = await databaseFactoryFfi.openDatabase(
-      v1Path,
+  test('v2 单表库升级到 v3，旧数据迁成物品+位置+关联', () async {
+    final v2Path = p.join(tempDir.path, 'v2.db');
+    final v2db = await databaseFactoryFfi.openDatabase(
+      v2Path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: 2,
         onCreate: (database, version) async {
           await database.execute('''
             CREATE TABLE items (
@@ -242,17 +231,19 @@ void main() {
               updated_at INTEGER NOT NULL
             )
           ''');
+          await database.execute(
+            'INSERT INTO items(name, location, created_at, updated_at) '
+            "VALUES('螺丝刀', '工具箱', 1, 1)",
+          );
         },
       ),
     );
-    await v1db.close(); // 必须关闭，否则 v2 打开会卡在旧连接上
+    await v2db.close(); // 必须关闭，否则 v3 打开会卡在旧连接上。
 
-    final upgraded = newDb(version: 2, path: v1Path);
-    final id = await upgraded.insert(sample('螺丝刀', '工具箱'));
-    expect(id, greaterThan(0));
-    expect(
-      upgraded.insert(sample('螺丝刀', '工具箱')),
-      throwsA(isA<DatabaseException>()),
-    );
+    final upgraded = newDb(version: 3, path: v2Path);
+    final found = await upgraded.findByName('螺丝刀');
+    expect(found, isNotNull);
+    expect(found!.locations.single.name, '工具箱');
+    expect(await upgraded.countActiveAssociations(), 1);
   });
 }

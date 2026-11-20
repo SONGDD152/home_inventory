@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 
 import 'item.dart';
 import 'inventory_repository.dart';
+import 'normalize.dart';
 
 /// 家庭仓储数据访问层（三张表：物品 / 位置 / 关联）。
 ///
@@ -18,7 +19,8 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 3,
+    this.version = 4,
+    this.migrationFailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath;
 
@@ -45,6 +47,10 @@ class InventoryDatabase implements InventoryRepository {
   final DatabaseFactory? _injectedFactory;
   final String? _injectedPath;
   final int version;
+
+  /// 仅供测试的失败注入点：在 v4 清洗的清表之后、重建之前调用。
+  /// 生产恒为 null；测试注入抛异常以验证 onUpgrade 事务整体回滚。
+  final void Function()? migrationFailureHook;
 
   Database? _db;
 
@@ -131,44 +137,119 @@ class InventoryDatabase implements InventoryRepository {
     );
   }
 
-  /// v1/v2 是单表 items(name, location, ...)。v3 改三张表：
-  /// 把旧的每条 (name, location) 迁成一件物品 + 一个位置 + 一条关联。
+  /// v1/v2 是单表 items(name, location, ...)；v3 改三张表；v4 起所有名称走
+  /// [normalizeName] 单一入口。升级时按顺序补齐缺失的版本。
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion >= 3) return;
+    if (oldVersion < 3) {
+      // v1/v2 单表 → v3 三张表：每条旧 (name, location) 转成物品 + 位置 + 关联。
+      List<Map<String, Object?>> legacyRows = const <Map<String, Object?>>[];
+      try {
+        legacyRows = await db.query(tableItems);
+      } catch (_) {
+        // 旧表不存在时按空库处理。
+      }
 
-    List<Map<String, Object?>> legacyRows = const <Map<String, Object?>>[];
-    try {
-      legacyRows = await db.query(tableItems);
-    } catch (_) {
-      // 旧表不存在时按空库处理。
+      await db.execute('DROP TABLE IF EXISTS $tableItemLocations');
+      await db.execute('DROP TABLE IF EXISTS $tableLocations');
+      await db.execute('DROP TABLE IF EXISTS $tableItems');
+      await _onCreate(db, 3);
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final row in legacyRows) {
+        final name = row['name'] as String?;
+        final location = row['location'] as String?;
+        if (name == null || location == null) continue;
+        final itemName = normalizeName(name);
+        final locationName = normalizeName(location);
+        if (itemName.isEmpty || locationName.isEmpty) continue;
+        final itemId = await _findOrCreateItem(db, itemName, now);
+        final locationId = await _findOrCreateLocation(db, locationName, now);
+        await _link(db, itemId, locationId, now);
+      }
     }
 
-    await db.execute('DROP TABLE IF EXISTS $tableItemLocations');
-    await db.execute('DROP TABLE IF EXISTS $tableLocations');
-    await db.execute('DROP TABLE IF EXISTS $tableItems');
-    await _onCreate(db, newVersion);
+    if (oldVersion < 4 && newVersion >= 4) {
+      await _normalizeLegacyNames(db);
+    }
+  }
+
+  /// v3 → v4：历史数据名称归一化清洗。
+  ///
+  /// 旧版本存的是原始输入（如「梯子 」「ＬＡＤＤＥＲ」），v4 起写入/查询都走
+  /// [normalizeName]。若不清洗，历史记录用新逻辑查不到、会被重复插入。
+  ///
+  /// 单人家庭仓储数据量小，采用"读出有效数据 → 归一化 → 重建"：归一化后同名
+  /// 自动合并、重复关联由 [_link] 幂等消除。全过程在 sqflite 升级事务内完成，
+  /// 任一步失败整体回滚。软删除记录与时间戳不迁移（V1 无删除入口）。
+  Future<void> _normalizeLegacyNames(DatabaseExecutor db) async {
+    final itemRows = await db.query(
+      tableItems,
+      columns: <String>[columnName],
+      where: '$columnIsDeleted = 0',
+    );
+    final locationRows = await db.query(
+      tableLocations,
+      columns: <String>[columnName],
+      where: '$columnIsDeleted = 0',
+    );
+    final assocRows = await db.rawQuery(
+      'SELECT i.$columnName AS item_name, l.$columnName AS loc_name '
+      'FROM $tableItemLocations AS a '
+      'INNER JOIN $tableItems AS i ON a.$columnItemId = i.$columnId '
+      'INNER JOIN $tableLocations AS l ON a.$columnLocationId = l.$columnId '
+      'WHERE a.$columnIsDeleted = 0 '
+      'AND i.$columnIsDeleted = 0 AND l.$columnIsDeleted = 0',
+    );
+
+    final itemNames = <String>{
+      for (final row in itemRows) normalizeName(row[columnName] as String),
+    }..remove('');
+    final locationNames = <String>{
+      for (final row in locationRows) normalizeName(row[columnName] as String),
+    }..remove('');
+
+    await db.delete(tableItemLocations);
+    await db.delete(tableItems);
+    await db.delete(tableLocations);
+
+    // 测试失败注入：此刻旧数据已清空、新数据未写入，若抛异常必须整段回滚。
+    final hook = migrationFailureHook;
+    if (hook != null) hook();
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    for (final row in legacyRows) {
-      final name = row['name'] as String?;
-      final location = row['location'] as String?;
-      if (name == null || location == null) continue;
-      final itemId = await _findOrCreateItem(db, name.trim(), now);
-      final locationId = await _findOrCreateLocation(db, location.trim(), now);
+    final itemIds = <String, int>{};
+    for (final name in itemNames) {
+      itemIds[name] = await db.insert(
+        tableItems,
+        Item(name: name, createdAt: now, updatedAt: now).toMap(),
+      );
+    }
+    final locationIds = <String, int>{};
+    for (final name in locationNames) {
+      locationIds[name] = await db.insert(
+        tableLocations,
+        Location(name: name, createdAt: now, updatedAt: now).toMap(),
+      );
+    }
+    for (final row in assocRows) {
+      final itemId = itemIds[normalizeName(row['item_name'] as String)];
+      final locationId = locationIds[normalizeName(row['loc_name'] as String)];
+      if (itemId == null || locationId == null) continue;
       await _link(db, itemId, locationId, now);
     }
   }
 
-  /// 校验并规范化名称：trim、非空、长度上限。
+  /// 校验并归一化名称：走共用 [normalizeName] 单一入口（trim + 全角转半角 + 大小写不敏感），
+  /// 再做非空、长度校验。存库路径与去重比较都用本方法的返回值，保证同源。
   String _normalizeName(String value, String field) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) {
+    final normalized = normalizeName(value);
+    if (normalized.isEmpty) {
       throw ArgumentError.value(value, field, '$field 不能为空');
     }
-    if (trimmed.length > maxNameLength) {
+    if (normalized.length > maxNameLength) {
       throw ArgumentError.value(value, field, '$field 不能超过 $maxNameLength 个字符');
     }
-    return trimmed;
+    return normalized;
   }
 
   Future<int> _findOrCreateItem(DatabaseExecutor db, String name, int now) async {
@@ -302,9 +383,9 @@ class InventoryDatabase implements InventoryRepository {
   }
 
   /// 按精确名称查询，返回该物品及其全部未删除位置（同名多位置全量）。
-  /// 名称 trim；空名或非精确（如「梯」查「梯子」）都查不到。
+  /// 名称走共用 [normalizeName] 归一化（与存库同源）；空名或非精确（如「梯」查「梯子」）都查不到。
   Future<ItemWithLocations?> findByName(String name) async {
-    final key = name.trim();
+    final key = normalizeName(name);
     if (key.isEmpty) return null;
     final db = await open();
     final itemRows = await db.query(

@@ -276,15 +276,39 @@ void main() {
     expect(find.text(notUnderstood), findsNothing);
   });
 
-  testWidgets('N6 倒装与介词判没听懂且不建位置', (tester) async {
+  testWidgets('N6 V2倒装与介词口语现在录入成功且位置不重复', (tester) async {
+    // 契约变更 CR-V2-R1：V1 这两句判没听懂、零写入；V2 方案 C 认倒装与介词变体。
     await pumpApp(tester);
-    await submit(tester, '我把梯子放阳台了');
-    expect(find.text(notUnderstood), findsOneWidget);
-    expect(repo.locationCount, 0);
 
+    await submit(tester, '我把梯子放阳台了');
+    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
+    expect(find.text(notUnderstood), findsNothing);
+    expect(repo.locationCount, 1);
+    expect(repo.linkCount, 1);
+
+    // 第二句同物同位的口语变体（放到=放），应走「已经记过」分支，不重复建位置/关联。
     await submit(tester, '梯子放到阳台');
-    expect(find.text(notUnderstood), findsOneWidget);
-    expect(repo.locationCount, 0);
-    expect(repo.linkCount, 0);
+    expect(find.text(alreadyRecorded('梯子', '阳台')), findsOneWidget);
+    expect(find.text(notUnderstood), findsNothing);
+    expect(repo.locationCount, 1);
+    expect(repo.linkCount, 1);
+  });
+
+  testWidgets('N7 语序非法输入判没听懂且零写入（叠用倒装/多动词）',
+      (tester) async {
+    // 审查需改点1：规则层能确定非法的语序必须拦住，且不产生任何脏数据。
+    await pumpApp(tester);
+
+    for (final phrase in const <String>[
+      '我把把梯子放阳台', // 叠用倒装
+      '梯子搁阳台放厨房', // 多动词连写
+      '梯子和阳台', // 无放置动词
+    ]) {
+      await submit(tester, phrase);
+      expect(find.text(notUnderstood), findsOneWidget, reason: phrase);
+      expect(repo.locationCount, 0, reason: phrase);
+      expect(repo.linkCount, 0, reason: phrase);
+    }
+    expect(await repo.getAllLocations(), isEmpty);
   });
 }

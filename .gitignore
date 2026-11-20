@@ -1,0 +1,8 @@
+# Flutter/Dart 工具与构建产物，不进仓库
+.dart_tool/
+build/
+coverage/
+.pub-cache/
+.idea/
+.vscode/
+*.log

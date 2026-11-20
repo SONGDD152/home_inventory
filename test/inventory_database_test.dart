@@ -5,7 +5,6 @@ import 'package:path/path.dart' as p;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:home_inventory/home_inventory.dart';
-import 'package:home_inventory/data/phrase_parser.dart';
 
 void main() {
   setUpAll(() {

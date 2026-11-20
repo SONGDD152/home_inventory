@@ -6,6 +6,9 @@ import 'package:home_inventory/home_inventory.dart';
 
 /// 纯内存仓储：用于 widget 测试，操作是内存级的，pump 一帧即可落地。
 /// 数据层的真实数据库行为由 inventory_database_test.dart 用真实 sqlite 覆盖。
+///
+/// Step 0（第 4 块测试基建）：三处 key 生成已改用生产共用 normalizeName，
+/// 与仓储边界同源；不再各自 trim()，杜绝两套归一化标准。
 class InMemoryRepository implements InventoryRepository {
   final List<Location> _locations = <Location>[];
   final List<Item> _items = <Item>[];
@@ -19,7 +22,7 @@ class InMemoryRepository implements InventoryRepository {
 
   @override
   Future<int> addLocation(String name) async {
-    final key = name.trim();
+    final key = normalizeName(name);
     final existing = _locations.where((l) => l.name == key).toList();
     if (existing.isNotEmpty) return existing.first.id!;
     final id = ++_locationId;
@@ -31,7 +34,7 @@ class InMemoryRepository implements InventoryRepository {
 
   @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId) async {
-    final key = itemName.trim();
+    final key = normalizeName(itemName);
     var item = _items.where((i) => i.name == key).toList();
     final int itemId;
     if (item.isEmpty) {
@@ -60,7 +63,7 @@ class InMemoryRepository implements InventoryRepository {
 
   @override
   Future<ItemWithLocations?> findByName(String name) async {
-    final key = name.trim();
+    final key = normalizeName(name);
     final item = _items.where((i) => i.name == key).toList();
     if (item.isEmpty) return null;
     final locationIds = _links
@@ -74,13 +77,36 @@ class InMemoryRepository implements InventoryRepository {
   }
 
   int get linkCount => _links.length;
+  int get locationCount => _locations.length;
 }
 
 void main() {
   late InMemoryRepository repo;
 
+  // 冻结文案（测试按模板生成期望值，不写死样例值）。
+  const notUnderstood =
+      '没听懂，请这样说："XX放YY"记位置，或"XX在哪"查位置。';
+  String notFound(String item) => '没有找到「$item」的记录。';
+  String recorded(String item, String location) =>
+      '已记下：「$item」放在「$location」。';
+  String alreadyRecorded(String item, String location) =>
+      '「$item」已经在「$location」了。';
+  String locationAdded(String location) => '已添加位置：「$location」。';
+  const emptyLocation = '位置名称不能为空。';
+
   setUp(() {
     repo = InMemoryRepository();
+  });
+
+  // Step 0 等价断言：直接证明内存仓储的归一化与生产共用 helper 一致，
+  // 不经过 UI。N2/N4 依赖的前提由此从「推断」变为「实测」。
+  test('Step0 归一化等价：全角/带空格输入经内存仓储落成归一化名', () async {
+    final id = await repo.addLocation('　ＡＢＣ　');
+    final locations = await repo.getAllLocations();
+    expect(locations, hasLength(1));
+    expect(locations.single.name, normalizeName('　ＡＢＣ　'));
+    expect(locations.single.name, 'abc');
+    expect(locations.single.id, id);
   });
 
   Future<void> pumpApp(WidgetTester tester) {
@@ -94,87 +120,171 @@ void main() {
     await tester.pump(const Duration(milliseconds: 20));
   }
 
+  Future<void> submit(WidgetTester tester, String phrase) async {
+    await tester.enterText(find.byKey(const Key('phrase_field')), phrase);
+    await tester.tap(find.byKey(const Key('submit_button')));
+    await settle(tester);
+  }
+
   Future<void> addLocation(WidgetTester tester, String name) async {
     await tester.enterText(find.byKey(const Key('new_location_field')), name);
     await tester.tap(find.byKey(const Key('add_location_button')));
     await settle(tester);
   }
 
-  Future<void> record(WidgetTester tester, String item) async {
-    await tester.enterText(find.byKey(const Key('name_field')), item);
-    await tester.tap(find.byKey(const Key('save_button')));
-    await settle(tester);
-  }
-
-  Future<void> search(WidgetTester tester, String name) async {
-    await tester.enterText(find.byKey(const Key('query_field')), name);
-    await tester.tap(find.byKey(const Key('query_button')));
-    await settle(tester);
-  }
+  // ============ 6 条原有回归用例（保留意图，改为单句式驱动 + 冻结文案）============
 
   testWidgets('新增位置→录入→按精确名称能查到', (tester) async {
     await pumpApp(tester);
     await addLocation(tester, '阳台');
-    await record(tester, '梯子');
+    expect(find.text(locationAdded('阳台')), findsOneWidget);
 
-    expect(find.textContaining('已记下：梯子'), findsOneWidget);
+    await submit(tester, '梯子放阳台');
+    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
 
-    await search(tester, '梯子');
-
-    expect(find.text('「梯子」放在：'), findsOneWidget);
+    await submit(tester, '梯子在哪');
+    expect(find.text('「梯子」在：阳台（共1处）。'), findsOneWidget);
     expect(find.byKey(const Key('result_location_1')), findsOneWidget);
-    expect(find.textContaining('没找到'), findsNothing);
+    expect(find.textContaining('没有找到'), findsNothing);
   });
 
   testWidgets('连点两下记下只产生一条关联', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '阳台');
-    await record(tester, '梯子');
-    await record(tester, '梯子');
+    await submit(tester, '梯子放阳台');
+    // 第一次：断言「已记下」确实出现过（建立对比基线）。
+    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
 
+    await submit(tester, '梯子放阳台');
+    // 第二次：走幂等分支，只显示「已记过」；第一次的「已记下」被覆盖，
+    // 不得两条并存——否则文案分支判定错误（DeepSeek 第92轮圈点）。
     expect(repo.linkCount, 1);
-    expect(find.text('这条已经记过了'), findsOneWidget);
+    expect(repo.locationCount, 1);
+    expect(find.text(alreadyRecorded('梯子', '阳台')), findsOneWidget);
+    expect(find.text(recorded('梯子', '阳台')), findsNothing);
   });
 
-  testWidgets('空库查询显示没找到且不报错', (tester) async {
+  testWidgets('空库查询显示没有记录且不报错', (tester) async {
     await pumpApp(tester);
-    await search(tester, '梯子');
+    await submit(tester, '梯子在哪');
 
-    expect(find.text('没找到「梯子」'), findsOneWidget);
+    expect(find.text(notFound('梯子')), findsOneWidget);
   });
 
-  testWidgets('物品名为空时给出提示且不写库', (tester) async {
+  testWidgets('空句式输入走没听懂且不写库', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '阳台');
+    await submit(tester, '');
 
-    await tester.tap(find.byKey(const Key('save_button')));
-    await settle(tester);
-    expect(find.text('请填写物品名称'), findsOneWidget);
+    // 用例 4 替代关系：原「请填写物品名称」被「没听懂」取代（非漏删）。
+    expect(find.text(notUnderstood), findsOneWidget);
+    expect(find.text('请填写物品名称'), findsNothing);
     expect(repo.linkCount, 0);
   });
 
   testWidgets('同名多位置全量列出', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '阳台');
-    await record(tester, '梯子');
-    await addLocation(tester, '储物间');
-    await record(tester, '梯子');
+    await submit(tester, '梯子放阳台');
+    await submit(tester, '梯子放储物间');
 
-    await search(tester, '梯子');
-
-    expect(find.text('「梯子」放在：'), findsOneWidget);
+    await submit(tester, '梯子在哪');
+    expect(find.text('「梯子」在：阳台、储物间（共2处）。'), findsOneWidget);
     expect(find.byKey(const Key('result_location_1')), findsOneWidget);
     expect(find.byKey(const Key('result_location_2')), findsOneWidget);
   });
 
   testWidgets('精确名称不通配：查「梯」找不到「梯子」', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '阳台');
-    await record(tester, '梯子');
+    await submit(tester, '梯子放阳台');
 
-    await search(tester, '梯');
+    await submit(tester, '梯在哪');
+    expect(find.text(notFound('梯')), findsOneWidget);
+    expect(find.textContaining('「梯子」在：'), findsNothing);
+  });
 
-    expect(find.text('没找到「梯」'), findsOneWidget);
-    expect(find.text('「梯子」放在：'), findsNothing);
+  // ============ 6 条新增用例（自动新建 / 归一化驱动 / 幂等 / 同源 / 提示分开）============
+
+  testWidgets('N1 句式录入新位置自动新建并关联', (tester) async {
+    await pumpApp(tester);
+    // 前置：库里没有任何位置（未点 add_location_button）。
+    expect(repo.locationCount, 0);
+
+    await submit(tester, '梯子放阳台');
+
+    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
+    expect(repo.locationCount, 1);
+    expect(repo.linkCount, 1);
+    final locations = await repo.getAllLocations();
+    expect(locations.single.name, '阳台');
+  });
+
+  testWidgets('N2 自动新建由归一化结果驱动（全角+空格）', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子放　ＡＢＣ　');
+
+    final locations = await repo.getAllLocations();
+    expect(locations.single.name, 'abc'); // 全角转半角 + lower + trim
+    expect(repo.locationCount, 1);
+  });
+
+  testWidgets('N2b 添加位置名为空走冻结文案，非没听懂', (tester) async {
+    await pumpApp(tester);
+    await addLocation(tester, '   ');
+
+    // D2 边界：添加位置框空名 →「位置名称不能为空」，且不得显示「没听懂」。
+    expect(find.text(emptyLocation), findsOneWidget);
+    expect(find.text(notUnderstood), findsNothing);
+    expect(repo.locationCount, 0);
+  });
+
+  testWidgets('N3 重复录入同一新位置幂等、无 UI 旁路', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子放阳台');
+    await submit(tester, '梯子放阳台');
+
+    expect(repo.locationCount, 1);
+    expect(repo.linkCount, 1);
+  });
+
+  testWidgets('N4 显式添加位置与句式录入同源：位置表、关联表各恰好1条', (tester) async {
+    await pumpApp(tester);
+    // 显式入口添加全角位置名 → 归一化落库。
+    await addLocation(tester, '　ＡＢＣ　');
+    expect(find.text(locationAdded('abc')), findsOneWidget);
+
+    // 句式录入到同一位置（归一化后同为 abc）。
+    await submit(tester, '梯子放abc');
+
+    // 两处分别断言，精确同源。
+    final locations = await repo.getAllLocations();
+    expect(locations, hasLength(1)); // 位置表恰好 1 条
+    expect(locations.single.name, 'abc');
+    expect(repo.linkCount, 1); // 关联表恰好 1 条
+  });
+
+  testWidgets('N5 两种提示分开且没听懂零写入', (tester) async {
+    await pumpApp(tester);
+    // 句式不合规 → 没听懂，且无任何写入。
+    await submit(tester, '梯子呢');
+    expect(find.text(notUnderstood), findsOneWidget);
+    expect(repo.linkCount, 0);
+    expect(repo.locationCount, 0);
+    final locations = await repo.getAllLocations();
+    expect(locations, isEmpty);
+
+    // 句式合法但查不到 → 没有记录（与没听懂不混）。
+    await submit(tester, '梯子在哪');
+    expect(find.text(notFound('梯子')), findsOneWidget);
+    expect(find.text(notUnderstood), findsNothing);
+  });
+
+  testWidgets('N6 倒装与介词判没听懂且不建位置', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '我把梯子放阳台了');
+    expect(find.text(notUnderstood), findsOneWidget);
+    expect(repo.locationCount, 0);
+
+    await submit(tester, '梯子放到阳台');
+    expect(find.text(notUnderstood), findsOneWidget);
+    expect(repo.locationCount, 0);
+    expect(repo.linkCount, 0);
   });
 }

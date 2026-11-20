@@ -16,13 +16,25 @@ import 'normalize.dart';
 ///
 /// 这里不解析自然语言；「梯子在哪」的拆分由上层完成，本层只接收精确字段值。
 class InventoryDatabase implements InventoryRepository {
+  /// 生产构造：不暴露任何测试钩子，生产入口 main.dart 用此构造。
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
     this.version = 4,
-    this.migrationFailureHook,
   })  : _injectedFactory = databaseFactory,
-        _injectedPath = databasePath;
+        _injectedPath = databasePath,
+        _migrationFailureHook = null;
+
+  /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
+  /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
+  InventoryDatabase.forTesting({
+    DatabaseFactory? databaseFactory,
+    String? databasePath,
+    this.version = 4,
+    void Function()? migrationFailureHook,
+  })  : _injectedFactory = databaseFactory,
+        _injectedPath = databasePath,
+        _migrationFailureHook = migrationFailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -49,8 +61,8 @@ class InventoryDatabase implements InventoryRepository {
   final int version;
 
   /// 仅供测试的失败注入点：在 v4 清洗的清表之后、重建之前调用。
-  /// 生产恒为 null；测试注入抛异常以验证 onUpgrade 事务整体回滚。
-  final void Function()? migrationFailureHook;
+  /// 私有字段，仅 [InventoryDatabase.forTesting] 可注入，生产构造恒为 null。
+  final void Function()? _migrationFailureHook;
 
   Database? _db;
 
@@ -213,7 +225,7 @@ class InventoryDatabase implements InventoryRepository {
     await db.delete(tableLocations);
 
     // 测试失败注入：此刻旧数据已清空、新数据未写入，若抛异常必须整段回滚。
-    final hook = migrationFailureHook;
+    final hook = _migrationFailureHook;
     if (hook != null) hook();
 
     final now = DateTime.now().millisecondsSinceEpoch;

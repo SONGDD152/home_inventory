@@ -498,7 +498,7 @@ void main() {
     await v3db.close();
 
     // 带失败钩子打开 v4：清表后抛异常，onUpgrade 事务应整体回滚
-    final failing = InventoryDatabase(
+    final failing = InventoryDatabase.forTesting(
       databaseFactory: databaseFactoryFfi,
       databasePath: v3Path,
       version: 4,

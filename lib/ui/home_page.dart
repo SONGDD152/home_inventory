@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/phrase_parser.dart';
+import '../data/speech_input.dart';
 
 /// 家庭仓储 APP 第一版界面：单页，单句式输入框（录入 + 查询共用）。
 ///
@@ -17,10 +18,19 @@ import '../data/phrase_parser.dart';
 ///
 /// [repository] 由外部注入，便于测试注入内存实现（见 InventoryRepository）。
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.repository, this.title = '家庭仓储'});
+  const HomePage({
+    super.key,
+    required this.repository,
+    this.title = '家庭仓储',
+    SpeechInput? speechInput,
+  }) : speechInput = speechInput;
 
   final InventoryRepository repository;
   final String title;
+
+  /// V2 语音按钮：可选注入。为 null 时在 state 内懒创建生产实现
+  /// （不点按钮绝不构造插件，保护 widget 测试不触碰平台通道）。
+  final SpeechInput? speechInput;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -29,6 +39,9 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final TextEditingController _phraseController = TextEditingController();
   final TextEditingController _newLocationController = TextEditingController();
+
+  SpeechInput? _speech;
+  bool _listening = false;
 
   String? _notice;
   ItemWithLocations? _result;
@@ -39,6 +52,10 @@ class _HomePageState extends State<HomePage> {
       '没听懂，请这样说："XX放YY"记位置，或"XX在哪"查位置。';
   static const String _emptyLocation = '位置名称不能为空。';
 
+  // V2 语音新增文案（与七处冻结文案并列，不覆盖、不改写）。
+  static const String _speechUnavailable = '语音不可用，请用键盘输入。';
+  static const String _speechNoResult = '没听清，请再说一遍。';
+
   static String _notFound(String item) => '没有找到「$item」的记录。';
   static String _recorded(String item, String location) =>
       '已记下：「$item」放在「$location」。';
@@ -48,9 +65,55 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _speech?.cancel();
     _phraseController.dispose();
     _newLocationController.dispose();
     super.dispose();
+  }
+
+  SpeechInput get _speechInput => _speech ??= widget.speechInput ?? PluginSpeechInput();
+
+  /// V2 语音按钮：点一下开始听，再点取消；拿到结果只填入输入框，不自动提交。
+  Future<void> _onVoicePressed() async {
+    if (_busy) return;
+    if (_listening) {
+      await _speechInput.cancel();
+      if (!mounted) return;
+      setState(() => _listening = false);
+      return;
+    }
+
+    setState(() => _listening = true);
+    SpeechResult result;
+    try {
+      result = await _speechInput.listen();
+    } catch (_) {
+      // 任何平台异常统一落到"不可用"，不出现失败/错误字样。
+      result = const SpeechUnavailable();
+    }
+    if (!mounted) return;
+
+    if (result is SpeechText) {
+      // 原文填入，不 trim/lower/任何预处理；归一化仍由 parsePhrase/仓储负责。
+      _phraseController.text = result.text;
+      setState(() {
+        _listening = false;
+        _notice = null;
+        _result = null;
+      });
+    } else if (result is SpeechUnavailable) {
+      setState(() {
+        _listening = false;
+        _notice = _speechUnavailable;
+        _result = null;
+      });
+    } else {
+      setState(() {
+        _listening = false;
+        _notice = _speechNoResult;
+        _result = null;
+      });
+    }
   }
 
   /// 添加位置显式入口（D1 保留）。独立文本框、不经 parsePhrase。
@@ -186,10 +249,17 @@ class _HomePageState extends State<HomePage> {
             TextField(
               key: const Key('phrase_field'),
               controller: _phraseController,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: '说一句',
                 hintText: '例如：梯子放阳台',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  key: const Key('voice_button'),
+                  tooltip: '语音输入',
+                  icon: Icon(_listening ? Icons.mic : Icons.mic_none),
+                  color: _listening ? Colors.green : null,
+                  onPressed: _busy ? null : _onVoicePressed,
+                ),
               ),
               onSubmitted: (_) => _busy ? null : _submitPhrase(),
             ),

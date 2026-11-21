@@ -55,6 +55,29 @@ bool _endsWithParticle(String text) {
   return _trailingParticles.contains(text.substring(text.length - 1));
 }
 
+/// 组合式「查<物品>在哪儿」：后缀命中后，物品名头部可能还挂着查询词
+/// （查一下/查查/有没有/找，以及口语的裸「查」），逐层剥掉。
+/// 裸「查」仅在剩余长度 >2 时剥（「查表」这类两字物品名不误剥）。
+String _stripLeadingQueryWords(String item) {
+  var result = item;
+  var changed = true;
+  while (changed && result.isNotEmpty) {
+    changed = false;
+    for (final prefix in _queryPrefixes) {
+      if (result.startsWith(prefix) && result.length > prefix.length) {
+        result = result.substring(prefix.length).trim();
+        changed = true;
+        break;
+      }
+    }
+    if (!changed && result.length > 2 && result.startsWith('查')) {
+      result = result.substring(1).trim();
+      changed = true;
+    }
+  }
+  return result;
+}
+
 bool _isPreposition(String text) {
   if (text.isEmpty) return false;
   return _prepositions.contains(text.substring(0, 1));
@@ -120,10 +143,11 @@ ParseUpsert? _parseRecord(String text) {
 
 /// 解析查询句式（V3 扩展：后缀在哪/哪里、前缀找/有没有、显式「查：」）。
 ParseQuery? _parseQuery(String text) {
-  // 后缀式：梯子在哪 / 梯子哪里
+  // 后缀式：梯子在哪 / 梯子哪里 / 组合式「查梯子在哪儿」
   for (final suffix in _querySuffixes) {
     if (text.endsWith(suffix)) {
-      final item = text.substring(0, text.length - suffix.length).trim();
+      final item =
+          _stripLeadingQueryWords(text.substring(0, text.length - suffix.length).trim());
       if (item.isNotEmpty) return ParseQuery(item: normalizeName(item));
     }
   }

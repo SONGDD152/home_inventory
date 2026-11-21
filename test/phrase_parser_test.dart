@@ -277,13 +277,38 @@ void main() {
     });
 
     test('歧义边界：含动词/前缀词的物品名在「在哪」查询句里正常解析', () {
-      // 后缀查询先命中，物品名里的「存/收/找」不干扰 —— 与录入句式歧义形成对照，
-      // 证明限制只在「<物品>放<位置>」录入式，查询侧不受影响。
-      for (final phrase in <String>['存钱罐在哪', '收纳箱在哪', '找东西在哪']) {
+      // 后缀查询先命中；物品名里的「存/收」不是查询词，不干扰。
+      for (final phrase in <String>['存钱罐在哪', '收纳箱在哪']) {
         expect(parsePhrase(phrase), isA<ParseQuery>(), reason: phrase);
       }
       expect((parsePhrase('存钱罐在哪') as ParseQuery).item, '存钱罐');
-      expect((parsePhrase('找东西在哪') as ParseQuery).item, '找东西');
+    });
+
+    // 2026-11-21 真机实测修复：「查梯子在哪儿」曾解析成查「查梯子」。
+    // 组合式（查询词+后缀同时出现）现在剥掉头部查询词，按真实语义查物品本身。
+    test('组合式：查梯子在哪儿/查梯子在哪里 -> Query(梯子)', () {
+      for (final phrase in <String>['查梯子在哪儿', '查梯子在哪里', '查梯子在哪']) {
+        final r = parsePhrase(phrase);
+        expect(r, isA<ParseQuery>(), reason: phrase);
+        expect((r as ParseQuery).item, '梯子', reason: phrase);
+      }
+    });
+
+    test('组合式：找/有没有/查一下 与后缀连用 -> 剥头部查询词', () {
+      expect((parsePhrase('找梯子在哪儿') as ParseQuery).item, '梯子');
+      expect((parsePhrase('有没有梯子在哪儿') as ParseQuery).item, '梯子');
+      expect((parsePhrase('查一下充电器在哪') as ParseQuery).item, '充电器');
+      expect((parsePhrase('查查螺丝在哪里') as ParseQuery).item, '螺丝');
+      // 旧锁定「找东西在哪 -> 查找东西」按组合式新语义更新为查「东西」。
+      expect((parsePhrase('找东西在哪') as ParseQuery).item, '东西');
+    });
+
+    test('组合式守卫：两字物品名「查表」不被误剥裸查', () {
+      expect((parsePhrase('查表在哪') as ParseQuery).item, '查表');
+    });
+
+    test('裸查单独开头仍不作为查询前缀：查梯子 -> 未识别（规格不变）', () {
+      expect(parsePhrase('查梯子'), isA<ParseUnrecognized>());
     });
   });
 }

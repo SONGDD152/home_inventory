@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/phrase_parser.dart';
+import 'item_list_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
@@ -172,7 +173,21 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: <Widget>[
+          IconButton(
+            key: const Key('open_item_list'),
+            tooltip: '物品明细',
+            icon: const Icon(Icons.list),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ItemListPage(repository: widget.repository),
+              ),
+            ),
+          ),
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(

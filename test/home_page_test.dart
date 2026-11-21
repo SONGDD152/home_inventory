@@ -107,6 +107,48 @@ class InMemoryRepository implements InventoryRepository {
     return ItemWithLocations(item: item.first, locations: locations);
   }
 
+  @override
+  Future<List<ItemWithLocations>> getAllItemsWithLocations() async {
+    final items = _items
+        .where((i) => !i.isDeleted)
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    return <ItemWithLocations>[
+      for (final item in items)
+        ItemWithLocations(
+          item: item,
+          locations: _locations
+              .where((l) =>
+                  !l.isDeleted &&
+                  _links.any((link) =>
+                      !link.isDeleted &&
+                      link.itemId == item.id &&
+                      link.locationId == l.id))
+              .toList(growable: false),
+        ),
+    ];
+  }
+
+  Map<String, Object?>? lastExportedBackup;
+  Map<String, Object?>? lastRestoredBackup;
+
+  @override
+  Future<Map<String, Object?>> exportBackup() async {
+    lastExportedBackup = <String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': 5,
+      'items': _items.map((i) => i.toMap()).toList(),
+      'locations': _locations.map((l) => l.toMap()).toList(),
+      'item_locations': _links.map((l) => l.toMap()).toList(),
+    };
+    return lastExportedBackup!;
+  }
+
+  @override
+  Future<void> restoreBackup(Map<String, Object?> data) async {
+    lastRestoredBackup = data;
+  }
+
   int get linkCount => _links.length;
   int get locationCount => _locations.length;
 }
@@ -155,6 +197,25 @@ void main() {
     await tester.tap(find.byKey(const Key('submit_button')));
     await settle(tester);
   }
+
+  testWidgets('首页右上角入口 → 物品明细页（标题与搜索框就位）', (tester) async {
+    await pumpApp(tester);
+    await settle(tester);
+
+    expect(find.byKey(const Key('open_item_list')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('open_item_list')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('物品明细'), findsOneWidget);
+    expect(find.byKey(const Key('detail_search')), findsOneWidget);
+    expect(find.textContaining('还没有记录'), findsOneWidget,
+        reason: '空库空态');
+
+    // 返回首页仍正常。
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('phrase_field')), findsOneWidget);
+  });
 
   Future<void> addLocation(WidgetTester tester, String name) async {
     await tester.enterText(find.byKey(const Key('new_location_field')), name);

@@ -526,6 +526,121 @@ class InventoryDatabase implements InventoryRepository {
     return rows.map(Item.fromMap).toList(growable: false);
   }
 
+  /// 物品明细页：全部未删除物品 + 各自全部未删除位置，按物品名排序。
+  /// 两次查询在事务外完成（只读聚合，无一致性要求高于 findByName 的场景）。
+  @override
+  Future<List<ItemWithLocations>> getAllItemsWithLocations() async {
+    final db = await open();
+    final itemRows = await db.query(
+      tableItems,
+      where: '$columnIsDeleted = 0',
+      orderBy: '$columnName ASC',
+    );
+
+    // 一次取全部有效关联+位置，按 item_id 分组，避免 N+1 查询。
+    final assocRows = await db.rawQuery(
+      'SELECT assoc.$columnItemId AS assoc_item_id, '
+      'loc.$columnId AS loc_id, loc.$columnName AS loc_name, '
+      'loc.$columnIsDeleted AS loc_deleted, '
+      'loc.$columnCreatedAt AS loc_created, '
+      'loc.$columnUpdatedAt AS loc_updated, '
+      'loc.$columnRemark AS loc_remark '
+      'FROM $tableItemLocations AS assoc '
+      'INNER JOIN $tableLocations AS loc ON assoc.$columnLocationId = loc.$columnId '
+      'WHERE assoc.$columnIsDeleted = 0 AND loc.$columnIsDeleted = 0 '
+      'ORDER BY loc.$columnName ASC',
+    );
+
+    final byItem = <int, List<Location>>{};
+    for (final row in assocRows) {
+      byItem
+          .putIfAbsent(row['assoc_item_id'] as int, () => <Location>[])
+          .add(
+            Location(
+              id: row['loc_id'] as int,
+              name: row['loc_name'] as String,
+              isDeleted: (row['loc_deleted'] as int) == 1,
+              createdAt: (row['loc_created'] as num).toInt(),
+              updatedAt: (row['loc_updated'] as num).toInt(),
+              remark: row['loc_remark'] as String?,
+            ),
+          );
+    }
+
+    return <ItemWithLocations>[
+      for (final itemRow in itemRows)
+        ItemWithLocations(
+          item: Item.fromMap(itemRow),
+          locations: byItem[itemRow[columnId] as int] ?? const <Location>[],
+        ),
+    ];
+  }
+
+  /// 备份导出：三张表全量行（含软删行，保证还原保真），外加库名、schema 版本、导出时间。
+  /// 纯读取，不改库。
+  @override
+  Future<Map<String, Object?>> exportBackup() async {
+    final db = await open();
+    return <String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': version,
+      'exportedAt': DateTime.now().millisecondsSinceEpoch,
+      tableItems: await db.query(tableItems, orderBy: '$columnId ASC'),
+      tableLocations: await db.query(tableLocations, orderBy: '$columnId ASC'),
+      tableItemLocations:
+          await db.query(tableItemLocations, orderBy: '$columnId ASC'),
+    };
+  }
+
+  /// 备份恢复：事务内清空三表后按备份重插（保留原 id）。
+  /// 校验备份归属与版本（版本高于当前库则拒绝），任何一步失败整体回滚。
+  @override
+  Future<void> restoreBackup(Map<String, Object?> data) async {
+    if (data['app'] != 'home_inventory') {
+      throw ArgumentError.value(data, 'data', '不是本应用的备份文件');
+    }
+    final backupVersion = (data['schemaVersion'] as num?)?.toInt();
+    if (backupVersion == null || backupVersion > version) {
+      throw ArgumentError.value(
+        backupVersion,
+        'schemaVersion',
+        '备份版本高于当前应用支持的数据库版本（$version）',
+      );
+    }
+    final itemMaps = _rowsOf(data, tableItems);
+    final locationMaps = _rowsOf(data, tableLocations);
+    final assocMaps = _rowsOf(data, tableItemLocations);
+
+    final db = await open();
+    await db.transaction<void>((txn) async {
+      await txn.delete(tableItemLocations);
+      await txn.delete(tableLocations);
+      await txn.delete(tableItems);
+      for (final row in itemMaps) {
+        await txn.insert(tableItems, Item.fromMap(row).toMap());
+      }
+      for (final row in locationMaps) {
+        await txn.insert(tableLocations, Location.fromMap(row).toMap());
+      }
+      for (final row in assocMaps) {
+        await txn.insert(tableItemLocations, ItemLocation.fromMap(row).toMap());
+      }
+    });
+  }
+
+  List<Map<String, Object?>> _rowsOf(Map<String, Object?> data, String key) {
+    final raw = data[key];
+    if (raw is! List) {
+      throw ArgumentError.value(data, key, '备份缺少 $key 数据');
+    }
+    return raw
+        .whereType<Map>()
+        .map((row) => <String, Object?>{
+              for (final e in row.entries) '${e.key}': e.value,
+            })
+        .toList(growable: false);
+  }
+
   /// 调试/验收用：统计未删除关联数。
   Future<int> countActiveAssociations() async {
     final db = await open();

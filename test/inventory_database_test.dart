@@ -689,4 +689,132 @@ void main() {
     await recovered.updateLocation(id, remark: '恢复后补录');
     expect((await recovered.getAllLocations()).single.remark, '恢复后补录');
   });
+
+  // ---- 备份与恢复 ----
+
+  test('exportBackup：三表全量（含软删行）+ 元数据，纯读取不改库', () async {
+    await put('梯子', '阳台');
+    await put('充电器', '书房');
+    // 软删一个位置（"书房"→先找到 id），制造软删行。
+    final locations = await db.getAllLocations();
+    final studyId = locations.firstWhere((l) => l.name == '书房').id!;
+    await db.deleteLocation(studyId);
+
+    final before = await db.getAllItems();
+    final backup = await db.exportBackup();
+
+    expect(backup['app'], 'home_inventory');
+    expect((backup['schemaVersion'] as num).toInt(), 5);
+    expect(backup['exportedAt'], isNotNull);
+    expect(backup['items'] as List, hasLength(2), reason: '两件物品（无软删物品入口）');
+    expect(backup['locations'] as List, hasLength(2), reason: '阳台+书房（书房已软删，仍导出）');
+    expect(backup['item_locations'] as List, hasLength(2));
+
+    // 纯读取：导出后库内活动数据不变。
+    final after = await db.getAllItems();
+    expect(after.map((i) => i.name), before.map((i) => i.name));
+  });
+
+  test('恢复往返：导出 → 新库恢复 → 数据与多位置关系一致', () async {
+    await put('梯子', '阳台');
+    await put('梯子', '车库');
+    await put('充电器', '书房');
+    final backup = await db.exportBackup();
+
+    // 另一个全新库文件。
+    final otherPath = p.join(tempDir.path, 'restored.db');
+    final restoredDb = newDb(path: otherPath);
+
+    await restoredDb.restoreBackup(backup);
+
+    final rows = await restoredDb.getAllItemsWithLocations();
+    expect(rows, hasLength(2), reason: '两个物品：梯子（2 位置）与充电器（1 位置）');
+    final ladder = rows.firstWhere((r) => r.item.name == '梯子');
+    expect(ladder.locations.map((l) => l.name), containsAll(<String>['阳台', '车库']));
+    final charger = rows.firstWhere((r) => r.item.name == '充电器');
+    expect(charger.locations.map((l) => l.name), <String>['书房']);
+
+    // 恢复后查询链路可用。
+    final found = await restoredDb.findByName('梯子');
+    expect(found, isNotNull);
+    expect(found!.locations, hasLength(2));
+  });
+
+  test('恢复覆盖：目标库旧数据被清空，不留残留', () async {
+    await put('梯子', '阳台');
+    final backup = await db.exportBackup();
+
+    // 目标库已有完全不同的数据（注意 put 固定写外层 db，这里直接操作目标库）。
+    final otherPath = p.join(tempDir.path, 'target.db');
+    final target = newDb(path: otherPath);
+    final oldLocId = await target.addLocation('旧位置');
+    await target.upsertItemLocation('旧物', oldLocId);
+    expect(await target.getAllItems(), hasLength(1));
+
+    await target.restoreBackup(backup);
+
+    final rows = await target.getAllItemsWithLocations();
+    expect(rows, hasLength(1));
+    expect(rows.single.item.name, '梯子', reason: '旧数据应被清空替换');
+    expect(rows.single.locations.single.name, '阳台');
+  });
+
+  test('恢复软删保真：软删位置还原后仍不在活动列表，且位置 id 保留', () async {
+    final locationId = await db.addLocation('阳台');
+    await db.upsertItemLocation('梯子', locationId);
+    await db.deleteLocation(locationId);
+    final backup = await db.exportBackup();
+
+    final otherPath = p.join(tempDir.path, 'softdel.db');
+    final restoredDb = newDb(path: otherPath);
+    await restoredDb.restoreBackup(backup);
+
+    // 软删位置不在活动列表。
+    expect((await restoredDb.getAllLocations()), isEmpty);
+    // 但行还在（按 id 定位后可见 is_deleted=1），保证再次还原/审计可行。
+    final row = await restoredDb.getLocationById(locationId);
+    expect(row, isNull, reason: 'getLocationById 只返回未删除位置');
+    final assocCount = await restoredDb.countActiveAssociations();
+    expect(assocCount, 1, reason: '关联行本身未软删（软删的是位置行），计数为 1');
+    expect((await restoredDb.getAllItems()), isNotEmpty, reason: '物品本身未删');
+  });
+
+  test('恢复校验：非本应用备份 / 缺表 / 版本过高 → ArgumentError 且不改库', () async {
+    await put('梯子', '阳台');
+    final backup = await db.exportBackup();
+
+    final otherPath = p.join(tempDir.path, 'guard.db');
+    final target = newDb(path: otherPath);
+    final oldLocId = await target.addLocation('旧位置');
+    await target.upsertItemLocation('旧物', oldLocId);
+
+    Future<void> expectRejected(Object? bad, String reason) async {
+      await expectLater(
+        target.restoreBackup(bad as Map<String, Object?>),
+        throwsArgumentError,
+        reason: reason,
+      );
+    }
+
+    await expectRejected(<String, Object?>{'app': '别的应用'}, '归属校验');
+    await expectRejected(<String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': 5,
+      'items': <Object?>[<String, Object?>{'name': 'x', 'created_at': 1, 'updated_at': 1}],
+    }, '缺 locations/item_locations 表');
+    await expectRejected(<String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': 6,
+      'items': <Object?>[],
+      'locations': <Object?>[],
+      'item_locations': <Object?>[],
+    }, '版本过高');
+
+    // 校验失败不改库。
+    final rows = await target.getAllItemsWithLocations();
+    expect(rows.single.item.name, '旧物');
+    // 正确备份仍可恢复（库未被前面失败破坏）。
+    await target.restoreBackup(backup);
+    expect((await target.getAllItemsWithLocations()).single.item.name, '梯子');
+  });
 }

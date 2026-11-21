@@ -22,4 +22,14 @@ abstract class InventoryRepository {
       {String? rawText});
 
   Future<ItemWithLocations?> findByName(String name);
+
+  /// 物品明细页：全部未删除物品及各自全部未删除位置，按物品名排序。
+  Future<List<ItemWithLocations>> getAllItemsWithLocations();
+
+  /// 备份导出：三张表全量行（含软删），JSON 可序列化结构。
+  Future<Map<String, Object?>> exportBackup();
+
+  /// 备份恢复：事务内清空三表后按备份重插（保留原 id）。
+  /// 非 `home_inventory` 备份或版本高于当前库时抛 ArgumentError。
+  Future<void> restoreBackup(Map<String, Object?> data);
 }

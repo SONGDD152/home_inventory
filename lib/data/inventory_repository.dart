@@ -8,9 +8,18 @@ import 'item.dart';
 abstract class InventoryRepository {
   Future<List<Location>> getAllLocations();
 
-  Future<int> addLocation(String name);
+  /// V3：新增位置，可选备注。
+  Future<int> addLocation(String name, {String? remark});
 
-  Future<UpsertResult> upsertItemLocation(String itemName, int locationId);
+  /// V3：编辑位置名称/备注。
+  Future<void> updateLocation(int id, {String? name, String? remark});
+
+  /// V3：软删除位置。
+  Future<void> deleteLocation(int id);
+
+  /// V3：新增/命中一条物品-位置记录，可选保存原文 rawText。
+  Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
+      {String? rawText});
 
   Future<ItemWithLocations?> findByName(String name);
 }

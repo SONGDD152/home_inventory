@@ -50,6 +50,9 @@ class Item {
 }
 
 /// 位置记录。
+///
+/// V3 交互说明新增 [remark]（位置备注，可选）。列可空以兼容 v4 旧库：
+/// 旧行无 remark 列时按 null 读取，不阻断历史数据。
 class Location {
   const Location({
     this.id,
@@ -57,6 +60,7 @@ class Location {
     this.isDeleted = false,
     required this.createdAt,
     required this.updatedAt,
+    this.remark,
   });
 
   final int? id;
@@ -64,6 +68,7 @@ class Location {
   final bool isDeleted;
   final int createdAt;
   final int updatedAt;
+  final String? remark;
 
   Map<String, Object?> toMap() => <String, Object?>{
         if (id != null) 'id': id,
@@ -71,6 +76,8 @@ class Location {
         'is_deleted': isDeleted ? 1 : 0,
         'created_at': createdAt,
         'updated_at': updatedAt,
+        // null 时省略列：兼容尚未 ALTER 加列的 v3/v4 旧库直接插入。
+        if (remark != null) 'remark': remark,
       };
 
   factory Location.fromMap(Map<String, Object?> map) => Location(
@@ -79,10 +86,15 @@ class Location {
         isDeleted: (map['is_deleted'] as int?) == 1,
         createdAt: (map['created_at'] as num).toInt(),
         updatedAt: (map['updated_at'] as num).toInt(),
+        remark: map['remark'] as String?,
       );
 }
 
 /// 物品—位置关联行（多对多的中间表）。
+///
+/// V3 交互说明把它对应为 ItemRecord：一条关联即一次「物品放在位置」的记录。
+/// [rawText] 保存触发该记录的原始语句（语音转文字原文），[tags] 为可选标签
+/// （JSON 数组字符串，数据层不解析标签语义）。两列可空以兼容 v4 旧库。
 class ItemLocation {
   const ItemLocation({
     this.id,
@@ -91,6 +103,8 @@ class ItemLocation {
     this.isDeleted = false,
     required this.createdAt,
     required this.updatedAt,
+    this.rawText,
+    this.tags,
   });
 
   final int? id;
@@ -99,6 +113,8 @@ class ItemLocation {
   final bool isDeleted;
   final int createdAt;
   final int updatedAt;
+  final String? rawText;
+  final String? tags;
 
   Map<String, Object?> toMap() => <String, Object?>{
         if (id != null) 'id': id,
@@ -107,6 +123,9 @@ class ItemLocation {
         'is_deleted': isDeleted ? 1 : 0,
         'created_at': createdAt,
         'updated_at': updatedAt,
+        // null 时省略列：兼容尚未 ALTER 加列的 v3/v4 旧库直接插入。
+        if (rawText != null) 'raw_text': rawText,
+        if (tags != null) 'tags': tags,
       };
 
   factory ItemLocation.fromMap(Map<String, Object?> map) => ItemLocation(
@@ -116,6 +135,8 @@ class ItemLocation {
         isDeleted: (map['is_deleted'] as int?) == 1,
         createdAt: (map['created_at'] as num).toInt(),
         updatedAt: (map['updated_at'] as num).toInt(),
+        rawText: map['raw_text'] as String?,
+        tags: map['tags'] as String?,
       );
 }
 

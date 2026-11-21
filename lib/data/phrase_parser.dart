@@ -26,17 +26,28 @@ class ParseUnrecognized extends ParseResult {
 }
 
 const List<String> _trailingParticles = <String>['了', '呢', '吧'];
-const String _querySuffix = '在哪';
 
-/// V2 R1（方案 C）：放置动词词干。原 V1 仅认「放」，现扩展为四个高频动词。
-const List<String> _placeVerbs = <String>['放', '搁', '塞', '摆'];
+/// 查询触发词（后缀）。按长度降序匹配，长的优先（「在哪里」先于「哪里」）。
+const List<String> _querySuffixes = <String>['在哪里', '在哪儿', '在哪', '哪里'];
+
+/// V3 交互说明：查询触发词（前缀）。「找梯子」「有没有梯子」。
+/// 按长度降序匹配。
+const List<String> _queryPrefixes = <String>['有没有', '查一下', '查查', '找'];
+
+/// V3 交互说明：显式意图前缀。normalizeName 会把全角冒号转半角，
+/// 故这里用半角冒号匹配归一化后的文本（「记：」「查：」同样命中）。
+const String _recordPrefix = '记:';
+const String _queryPrefixMark = '查:';
+
+/// 放置动词词干。V1 认「放」；V2 扩「搁/塞/摆」；
+/// V3 交互说明再扩「收/存/归」（收阳台/存阳台/归阳台）。
+const List<String> _placeVerbs = <String>['放', '搁', '塞', '摆', '收', '存', '归'];
 
 /// 动词词干后可紧跟的介词。整体上「放到/放在/搁到/塞往…」视为一个动词短语，
-/// 介词并入动词吞掉，位置取介词之后的干净片段——不再用「位置以介词开头就拒绝」
-/// 的黑名单（那个黑名单是穷举，且会把口语变体全挡掉）。
+/// 介词并入动词吞掉，位置取介词之后的干净片段。
 const List<String> _prepositions = <String>['到', '在', '往', '向', '给', '至'];
 
-/// 倒装「把」字句的显式主语（可省略）。「把梯子放阳台」/「我把梯子放阳台」都认。
+/// 倒装「把」字句的显式主语（可省略）。
 const List<String> _baSubjects = <String>['我', '你', '他'];
 
 bool _endsWithParticle(String text) {
@@ -49,21 +60,14 @@ bool _isPreposition(String text) {
   return _prepositions.contains(text.substring(0, 1));
 }
 
-/// V2 审查需改点1（折中方案）：倒装剥离后的语序有效性校验。
-///
-/// 只拦规则层面能「确定非法」的语序：
-///  - 放置动词出现次数必须恰好为 1：多动词连写（梯子放阳台放厨房）
-///    或无动词（梯子在阳台）一律未识别；
-///  - 倒装只剥一层：剥后核心句仍以「把」开头（我把把梯子放阳台）
-///    判未识别，避免叠用倒装蒙混。
-///
-/// 明确「不拦」并在 CHANGELOG 如实列为已知限制：
-///  - 单动词语义颠倒（阳台放梯子）：它与合法的「梯子放阳台」语法结构完全相同，
-///    纯规则无词典、又不查已录入数据（纯函数不碰 DB），无从判断谁对谁错；
-///  - 错位「把」字（阳台把梯子放厨房）：它与合法物品名「门把手放阳台」
-///    语法结构相同，拦它必然误伤 C6 的规避命名，代价更大。
+/// 剥句尾语气词（只剥一层）。
+String _stripTrailingParticle(String text) {
+  if (_endsWithParticle(text)) return text.substring(0, text.length - 1).trim();
+  return text;
+}
+
+/// 语序有效性校验（同 V2）：动词数恰好 1、不叠用倒装。
 bool _isValidWordOrder(String core) {
-  // 已剥过一层倒装；核心句又以「把」开头说明是叠用倒装，判未识别。
   if (core.startsWith('把')) return false;
   var verbCount = 0;
   for (var i = 0; i < core.length; i++) {
@@ -72,12 +76,9 @@ bool _isValidWordOrder(String core) {
   return verbCount == 1;
 }
 
-/// 剥离倒装前置的「把」字（可带一个显式主语）。返回剥后的核心句式。
-/// 「我把梯子放阳台」→「梯子放阳台」；「把梯子放阳台」→「梯子放阳台」。
+/// 剥离倒装前置的「把」字（可带一个显式主语）。
 String _stripBaPrefix(String text) {
-  if (text.startsWith('把')) {
-    return text.substring(1).trim();
-  }
+  if (text.startsWith('把')) return text.substring(1).trim();
   if (text.length >= 2 &&
       _baSubjects.contains(text.substring(0, 1)) &&
       text.substring(1, 2) == '把') {
@@ -86,38 +87,11 @@ String _stripBaPrefix(String text) {
   return text;
 }
 
-/// 把一句中文口语解析成结构化意图。
-///
-/// 纯函数：只接收一个 String，只调用 [normalizeName]，不碰仓储、数据库、UI。
-/// 归一化在入口（统一 text）与出口（item/location 字段）各强制执行一次，
-/// 输出字段不依赖「入口已归一」的隐含前提，normalizeName 幂等故无副作用。
-/// 句尾语气词只剥一层；剥完仍以语气词结尾（叠用）判未识别，不循环剥。
-/// V2 R1（方案 C）：认「放/搁/塞/摆」四类动词、动词后的介词变体（放到/放在…）、
-/// 以及「把」字倒装句。查询句式 <物品>在哪 与三项归一化口径保持不变。
-ParseResult parsePhrase(String input) {
-  var text = normalizeName(input);
-  if (text.isEmpty) return const ParseUnrecognized();
-
-  if (_endsWithParticle(text)) {
-    text = text.substring(0, text.length - 1).trim();
-  }
-  if (text.isEmpty || _endsWithParticle(text)) {
-    return const ParseUnrecognized();
-  }
-
-  if (text.endsWith(_querySuffix)) {
-    final item = text.substring(0, text.length - _querySuffix.length).trim();
-    if (item.isEmpty) return const ParseUnrecognized();
-    // 出口兜底：输出字段强制再过一次共用 normalizeName，不依赖
-    // 「text 已在入口归一化」这一隐含前提。normalizeName 幂等，重复无副作用。
-    return ParseQuery(item: normalizeName(item));
-  }
-
-  // 录入句式：先剥倒装的「把」，再校验语序（动词数/叠用倒装），最后找放置动词。
+/// 解析录入句式（核心，V1/V2 逻辑原样保留）。
+/// 返回 null 表示不符合录入句式。
+ParseUpsert? _parseRecord(String text) {
   final core = _stripBaPrefix(text);
-  if (core.isEmpty || !_isValidWordOrder(core)) {
-    return const ParseUnrecognized();
-  }
+  if (core.isEmpty || !_isValidWordOrder(core)) return null;
 
   int? verbIndex;
   for (var i = 0; i < core.length; i++) {
@@ -127,24 +101,82 @@ ParseResult parsePhrase(String input) {
     }
   }
   if (verbIndex == null || verbIndex == 0 || verbIndex == core.length - 1) {
-    return const ParseUnrecognized();
+    return null;
   }
 
   final item = core.substring(0, verbIndex).trim();
   var location = core.substring(verbIndex + 1).trim();
-  // 动词后的介词并入动词吞掉：放到阳台 -> 位置「阳台」，不带介词前缀。
   if (_isPreposition(location)) {
     location = location.substring(1).trim();
   }
-  // 吞掉一个介词后若仍以介词开头、或物品/位置为空，判未识别（保守防污染）。
-  // 位置里含多个动词的情况已由前面的 _isValidWordOrder（全句动词数恰好 1）覆盖，
-  // 无需再单独扫位置段。
   if (item.isEmpty || location.isEmpty || _isPreposition(location)) {
-    return const ParseUnrecognized();
+    return null;
   }
-
   return ParseUpsert(
     item: normalizeName(item),
     location: normalizeName(location),
   );
+}
+
+/// 解析查询句式（V3 扩展：后缀在哪/哪里、前缀找/有没有、显式「查：」）。
+ParseQuery? _parseQuery(String text) {
+  // 后缀式：梯子在哪 / 梯子哪里
+  for (final suffix in _querySuffixes) {
+    if (text.endsWith(suffix)) {
+      final item = text.substring(0, text.length - suffix.length).trim();
+      if (item.isNotEmpty) return ParseQuery(item: normalizeName(item));
+    }
+  }
+  // 前缀式：找梯子 / 有没有梯子
+  for (final prefix in _queryPrefixes) {
+    if (text.startsWith(prefix)) {
+      final item = text.substring(prefix.length).trim();
+      if (item.isNotEmpty) return ParseQuery(item: normalizeName(item));
+    }
+  }
+  return null;
+}
+
+/// 把一句中文口语解析成结构化意图。
+///
+/// 纯函数：只接收一个 String，只调用 [normalizeName]，不碰仓储、数据库、UI。
+/// 归一化在入口与出口各强制执行一次，出口字段不依赖「入口已归一」的隐含前提。
+///
+/// V3 交互说明：在 V1/V2 基础上扩展
+///  * 放置动词：放/搁/塞/摆/收/存/归；
+///  * 查询词：在哪/哪里/在哪儿/在哪里、找/有没有、显式「查：」；
+///  * 显式前缀「记：」「查：」。
+/// 所有 V1/V2 语序防线（语气词只剥一层、倒装只剥一层、动词数恰好 1、
+/// 介词吞并防污染）保持不变。
+ParseResult parsePhrase(String input) {
+  var text = normalizeName(input);
+  if (text.isEmpty) return const ParseUnrecognized();
+
+  // V3 显式前缀：「记：」强制录入，「查：」强制查询。
+  if (text.startsWith(_recordPrefix)) {
+    final rest = _stripTrailingParticle(
+        text.substring(_recordPrefix.length).trim());
+    if (rest.isEmpty) return const ParseUnrecognized();
+    final parsed = _parseRecord(rest);
+    return parsed ?? const ParseUnrecognized();
+  }
+  if (text.startsWith(_queryPrefixMark)) {
+    final rest =
+        text.substring(_queryPrefixMark.length).trim();
+    if (rest.isEmpty) return const ParseUnrecognized();
+    return ParseQuery(item: normalizeName(_stripTrailingParticle(rest)));
+  }
+
+  if (_endsWithParticle(text)) {
+    text = text.substring(0, text.length - 1).trim();
+  }
+  if (text.isEmpty || _endsWithParticle(text)) {
+    return const ParseUnrecognized();
+  }
+
+  // 查询优先（后缀式与前缀式），命中即返回。
+  final query = _parseQuery(text);
+  if (query != null) return query;
+
+  return _parseRecord(text) ?? const ParseUnrecognized();
 }

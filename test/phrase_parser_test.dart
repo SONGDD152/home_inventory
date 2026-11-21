@@ -204,5 +204,86 @@ void main() {
       expect(ok.item, '门把手');
       expect(ok.location, '阳台');
     });
+
+    // ---- V3 交互说明：扩展触发词 ----
+
+    test('V3 新动词 收/存/归：梯子收阳台、梯子存阳台、梯子归阳台 -> Upsert', () {
+      for (final phrase in <String>['梯子收阳台', '梯子存阳台', '梯子归阳台']) {
+        final ok = parsePhrase(phrase);
+        expect(ok, isA<ParseUpsert>(), reason: phrase);
+        final upsert = ok as ParseUpsert;
+        expect(upsert.item, '梯子');
+        expect(upsert.location, '阳台');
+      }
+    });
+
+    test('V3 查询后缀 哪里/在哪儿/在哪里 -> Query(梯子)', () {
+      for (final phrase in <String>[
+        '梯子在哪里',
+        '梯子在哪儿',
+        '梯子哪里'
+      ]) {
+        final ok = parsePhrase(phrase);
+        expect(ok, isA<ParseQuery>(), reason: phrase);
+        expect((ok as ParseQuery).item, '梯子');
+      }
+    });
+
+    test('V3 查询前缀 找/有没有 -> Query(梯子)', () {
+      for (final phrase in <String>['找梯子', '有没有梯子']) {
+        final ok = parsePhrase(phrase);
+        expect(ok, isA<ParseQuery>(), reason: phrase);
+        expect((ok as ParseQuery).item, '梯子');
+      }
+    });
+
+    test('V3 显式前缀 记：/查： -> Upsert/Query', () {
+      final rec = parsePhrase('记：梯子放阳台');
+      expect(rec, isA<ParseUpsert>());
+      expect((rec as ParseUpsert).item, '梯子');
+      expect(rec.location, '阳台');
+
+      final qry = parsePhrase('查：梯子');
+      expect(qry, isA<ParseQuery>());
+      expect((qry as ParseQuery).item, '梯子');
+    });
+
+    test('V3 全角冒号前缀同认：记：/查：', () {
+      expect(parsePhrase('记：螺丝放厨房'), isA<ParseUpsert>());
+      expect((parsePhrase('查：螺丝') as ParseQuery).item, '螺丝');
+    });
+
+    // 技术审核条件②：扩展触发词后，「找/存/收」出现在物品名里的歧义锁定。
+    // 与 C6/D4/D5 同思路：固定当前表现、落档已知限制，不代表认可该结果正确。
+    test('歧义锁定：物品名以「找」开头 + 录入 → 被查询前缀误吞', () {
+      // 「找找放阳台」本意物品「找找」，但查询前缀「找」先命中，
+      // 结果变成 Query(item=找放阳台)。已知限制，V2 口语扩展时再处理。
+      final r = parsePhrase('找找放阳台');
+      expect(r, isA<ParseQuery>(), reason: '找前缀优先于录入句式');
+      expect((r as ParseQuery).item, '找放阳台');
+    });
+
+    test('歧义锁定：物品名以放置动词「存/收/归」开头 + 录入 → 未识别', () {
+      // 动词数须恰好 1；「存钱罐放阳台」含「存」+「放」两个动词，
+      // 判未识别，避免把「钱罐放阳台」整串当位置污染。
+      for (final phrase in <String>[
+        '存钱罐放阳台',
+        '收纳箱放阳台',
+        '收衣服放阳台',
+        '归置架放阳台',
+      ]) {
+        expect(parsePhrase(phrase), isA<ParseUnrecognized>(), reason: phrase);
+      }
+    });
+
+    test('歧义边界：含动词/前缀词的物品名在「在哪」查询句里正常解析', () {
+      // 后缀查询先命中，物品名里的「存/收/找」不干扰 —— 与录入句式歧义形成对照，
+      // 证明限制只在「<物品>放<位置>」录入式，查询侧不受影响。
+      for (final phrase in <String>['存钱罐在哪', '收纳箱在哪', '找东西在哪']) {
+        expect(parsePhrase(phrase), isA<ParseQuery>(), reason: phrase);
+      }
+      expect((parsePhrase('存钱罐在哪') as ParseQuery).item, '存钱罐');
+      expect((parsePhrase('找东西在哪') as ParseQuery).item, '找东西');
+    });
   });
 }

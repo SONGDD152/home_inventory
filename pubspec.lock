@@ -86,13 +86,16 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_lints:
+    dependency: "direct dev"
+    description:
+      name: flutter_lints
+      sha256: "3105dc8492f6183fb076ccf1f351ac3d60564bff92e20bfc4af9cc1651f4e7e1"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "6.0.0"
   flutter_test:
     dependency: "direct dev"
-    description: flutter
-    source: sdk
-    version: "0.0.0"
-  flutter_web_plugins:
-    dependency: transitive
     description: flutter
     source: sdk
     version: "0.0.0"
@@ -112,14 +115,6 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "2.2.0"
-  json_annotation:
-    dependency: transitive
-    description:
-      name: json_annotation
-      sha256: "2a743920d81b7910627f68ee2c9ac1fc0bfee32b9fc3403587d7c6791ca12f80"
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "4.12.0"
   leak_tracker:
     dependency: transitive
     description:
@@ -144,6 +139,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "3.0.2"
+  lints:
+    dependency: transitive
+    description:
+      name: lints
+      sha256: "12f842a479589fea194fe5c5a3095abc7be0c1f2ddfa9a0e76aed1dbd26a87df"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "6.1.0"
   listen:
     dependency: transitive
     description:
@@ -253,30 +256,6 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "1.10.2"
-  speech_to_text:
-    dependency: "direct main"
-    description:
-      name: speech_to_text
-      sha256: f2fabd017b5cb07f4e06d496b2d4b957e39534bc848f92b1e6acac80a10f4967
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "7.5.0"
-  speech_to_text_platform_interface:
-    dependency: transitive
-    description:
-      name: speech_to_text_platform_interface
-      sha256: "7e447356be3074c471223c9d179ef3f822475350b67ca923ec71ab3bf2ede214"
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "2.5.0"
-  speech_to_text_windows:
-    dependency: transitive
-    description:
-      name: speech_to_text_windows
-      sha256: "2d1d10565b23262386b453b33656299608dc7a66784453735d6c1318f13f44d7"
-      url: "https://pub.flutter-io.cn"
-    source: hosted
-    version: "1.0.1"
   sqflite:
     dependency: "direct main"
     description:

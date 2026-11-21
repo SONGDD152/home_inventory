@@ -1,6 +1,4 @@
 // ignore_for_file: deprecated_member_use
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -23,19 +21,50 @@ class InMemoryRepository implements InventoryRepository {
       List<Location>.unmodifiable(_locations);
 
   @override
-  Future<int> addLocation(String name) async {
+  Future<int> addLocation(String name, {String? remark}) async {
     final key = normalizeName(name);
     final existing = _locations.where((l) => l.name == key).toList();
     if (existing.isNotEmpty) return existing.first.id!;
     final id = ++_locationId;
     _locations.add(
-      Location(id: id, name: key, createdAt: 1, updatedAt: 1),
+      Location(id: id, name: key, createdAt: 1, updatedAt: 1, remark: remark),
     );
     return id;
   }
 
   @override
-  Future<UpsertResult> upsertItemLocation(String itemName, int locationId) async {
+  Future<void> updateLocation(int id, {String? name, String? remark}) async {
+    final idx = _locations.indexWhere((l) => l.id == id);
+    if (idx < 0) return;
+    final old = _locations[idx];
+    _locations[idx] = Location(
+      id: old.id,
+      name: name == null ? old.name : normalizeName(name),
+      isDeleted: old.isDeleted,
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+      remark: remark ?? old.remark,
+    );
+  }
+
+  @override
+  Future<void> deleteLocation(int id) async {
+    final idx = _locations.indexWhere((l) => l.id == id);
+    if (idx < 0) return;
+    final old = _locations[idx];
+    _locations[idx] = Location(
+      id: old.id,
+      name: old.name,
+      isDeleted: true,
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+      remark: old.remark,
+    );
+  }
+
+  @override
+  Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
+      {String? rawText}) async {
     final key = normalizeName(itemName);
     var item = _items.where((i) => i.name == key).toList();
     final int itemId;
@@ -82,67 +111,13 @@ class InMemoryRepository implements InventoryRepository {
   int get locationCount => _locations.length;
 }
 
-/// V2 语音按钮测试替身：返回预设结果，绝不触碰真实平台通道。
-/// cancelCount 记录取消次数，供"再次点击结束听"等断言。
-class FakeSpeechInput implements SpeechInput {
-  FakeSpeechInput({this.result = const SpeechNoResult()});
-
-  SpeechResult result;
-  int listenCount = 0;
-  int cancelCount = 0;
-
-  @override
-  Future<SpeechResult> listen() async {
-    listenCount++;
-    return result;
-  }
-
-  @override
-  Future<void> cancel() async {
-    cancelCount++;
-  }
-
-  @override
-  bool get isListening => false;
-}
-
-/// 挂起型语音替身：listen() 返回一个受控 future，用于覆盖"识别中 dispose"。
-/// 只有测试显式 complete 才会返回，能精确模拟平台异步悬挂。
-class PendingSpeechInput implements SpeechInput {
-  final Completer<SpeechResult> _completer = Completer<SpeechResult>();
-  int listenCount = 0;
-  int cancelCount = 0;
-
-  void complete(SpeechResult result) {
-    if (!_completer.isCompleted) _completer.complete(result);
-  }
-
-  @override
-  Future<SpeechResult> listen() {
-    listenCount++;
-    return _completer.future;
-  }
-
-  @override
-  Future<void> cancel() async {
-    // 只记录调用，不完成 future：用于模拟"取消后平台仍可能迟到回调"的边界，
-    // 由测试手动 complete 来控制回调时机。
-    cancelCount++;
-  }
-
-  @override
-  bool get isListening => !_completer.isCompleted;
-}
-
 void main() {
   late InMemoryRepository repo;
 
-  // 冻结文案（测试按模板生成期望值，不写死样例值）。
-  const notUnderstood =
-      '没听懂，请这样说："XX放YY"记位置，或"XX在哪"查位置。';
-  String notFound(String item) => '没有找到「$item」的记录。';
-  String recorded(String item, String location) =>
-      '已记下：「$item」放在「$location」。';
+  // V3 交互说明文案（测试按模板生成期望值，不写死样例值）。
+  const notUnderstood = '没听懂，试试"XX放阳台"或"XX在哪"';
+  String notFound(String item) => '暂未记录该物品：$item。';
+  String recorded(String item, String location) => '已记下：$item → $location';
   String alreadyRecorded(String item, String location) =>
       '「$item」已经在「$location」了。';
   String locationAdded(String location) => '已添加位置：「$location」。';
@@ -176,6 +151,7 @@ void main() {
 
   Future<void> submit(WidgetTester tester, String phrase) async {
     await tester.enterText(find.byKey(const Key('phrase_field')), phrase);
+    await tester.pump(); // 让 onChanged 刷新「确定」按钮的禁用态
     await tester.tap(find.byKey(const Key('submit_button')));
     await settle(tester);
   }
@@ -199,7 +175,7 @@ void main() {
     await submit(tester, '梯子在哪');
     expect(find.text('「梯子」在：阳台（共1处）。'), findsOneWidget);
     expect(find.byKey(const Key('result_location_1')), findsOneWidget);
-    expect(find.textContaining('没有找到'), findsNothing);
+    expect(find.textContaining('暂未记录'), findsNothing);
   });
 
   testWidgets('连点两下记下只产生一条关联', (tester) async {
@@ -224,14 +200,15 @@ void main() {
     expect(find.text(notFound('梯子')), findsOneWidget);
   });
 
-  testWidgets('空句式输入走没听懂且不写库', (tester) async {
+  testWidgets('空输入时确定按钮禁用、零写入（文档验收场景5）', (tester) async {
     await pumpApp(tester);
-    await submit(tester, '');
-
-    // 用例 4 替代关系：原「请填写物品名称」被「没听懂」取代（非漏删）。
-    expect(find.text(notUnderstood), findsOneWidget);
-    expect(find.text('请填写物品名称'), findsNothing);
+    // 空输入：「确定」禁用，tap 无响应。
+    final button = tester.widget<FilledButton>(find.byKey(const Key('submit_button')));
+    expect(button.onPressed, isNull, reason: '空输入时确定须禁用');
+    await tester.tap(find.byKey(const Key('submit_button')));
+    await settle(tester);
     expect(repo.linkCount, 0);
+    expect(find.text(notUnderstood), findsNothing);
   });
 
   testWidgets('同名多位置全量列出', (tester) async {
@@ -366,119 +343,43 @@ void main() {
     expect(await repo.getAllLocations(), isEmpty);
   });
 
-  // ============ V2 语音按钮用例（注入 FakeSpeechInput，不碰平台）============
+  // ---- 文档验收场景（端到端 UI）----
 
-  Future<void> pumpWithSpeech(WidgetTester tester, SpeechInput speech) {
-    // UniqueKey 强制重建 State：否则连续 pump 同类 HomePage 会复用旧 State，
-    // _speech 缓存着上一个 Fake，导致换假实现不生效（V4 曾因此误报）。
-    return tester.pumpWidget(MaterialApp(
-      home: HomePage(
-          key: UniqueKey(), repository: repo, speechInput: speech),
-    ));
-  }
-
-  Future<void> tapVoice(WidgetTester tester) async {
-    await tester.tap(find.byKey(const Key('voice_button')));
-    await settle(tester);
-  }
-
-  testWidgets('V1 语音识别文字只填入输入框，不自动提交、零写入',
-      (tester) async {
-    final speech = FakeSpeechInput(result: const SpeechText('梯子放阳台'));
-    await pumpWithSpeech(tester, speech);
-
-    await tapVoice(tester);
-
-    expect(speech.listenCount, 1);
-    final field = tester.widget<TextField>(find.byKey(const Key('phrase_field')));
-    expect(field.controller!.text, '梯子放阳台');
-    // 关键：不自动提交——没有提示、没有入库。
-    expect(find.text(recorded('梯子', '阳台')), findsNothing);
-    expect(repo.locationCount, 0);
-    expect(repo.linkCount, 0);
-  });
-
-  testWidgets('V2 语音填入后点确定，走原 parsePhrase 链路正常录入', (tester) async {
-    final speech = FakeSpeechInput(result: const SpeechText('梯子放阳台'));
-    await pumpWithSpeech(tester, speech);
-
-    await tapVoice(tester);
-    await tester.tap(find.byKey(const Key('submit_button')));
-    await settle(tester);
-
-    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
-    expect(repo.locationCount, 1);
+  testWidgets('验收2：记：螺丝放厨房抽屉 → 正确入库并提示成功', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '记：螺丝放厨房抽屉');
+    expect(find.text(recorded('螺丝', '厨房抽屉')), findsOneWidget);
     expect(repo.linkCount, 1);
   });
 
-  testWidgets('V3 语音原文不被 UI 预处理，归一化仍由仓储边界完成', (tester) async {
-    // Fake 返回全角+首尾空格的原文；UI 须原样填入，点确定后落成规范名。
-    final speech = FakeSpeechInput(result: const SpeechText('　梯子放阳台　'));
-    await pumpWithSpeech(tester, speech);
-
-    await tapVoice(tester);
-    final field = tester.widget<TextField>(find.byKey(const Key('phrase_field')));
-    expect(field.controller!.text, '　梯子放阳台　');
-
-    await tester.tap(find.byKey(const Key('submit_button')));
-    await settle(tester);
-    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
-  });
-
-  testWidgets('V4 语音不可用提示与没听清提示分离，均零写入', (tester) async {
-    // 不可用。
-    var speech = FakeSpeechInput(result: const SpeechUnavailable());
-    await pumpWithSpeech(tester, speech);
-    await tapVoice(tester);
-    expect(find.text('语音不可用，请用键盘输入。'), findsOneWidget);
-    expect(find.text('没听清，请再说一遍。'), findsNothing);
-    expect(repo.locationCount, 0);
-
-    // 没听清（与不可用是不同提示）。
-    speech = FakeSpeechInput(result: const SpeechNoResult());
-    await pumpWithSpeech(tester, speech);
-    await tapVoice(tester);
-    expect(find.text('没听清，请再说一遍。'), findsOneWidget);
-    expect(find.text('语音不可用，请用键盘输入。'), findsNothing);
-    expect(repo.linkCount, 0);
-  });
-
-  testWidgets('V5 话筒按钮在页面上可见可点（不注入语音也渲染）', (tester) async {
-    // 按钮用默认实现也照常渲染；不点它就不触碰平台通道。
+  testWidgets('验收3：查：螺丝 → 返回厨房抽屉', (tester) async {
     await pumpApp(tester);
-    expect(find.byKey(const Key('voice_button')), findsOneWidget);
-    expect(find.byTooltip('语音输入'), findsOneWidget);
+    await submit(tester, '记：螺丝放厨房抽屉');
+    await submit(tester, '查：螺丝');
+    expect(find.textContaining('「螺丝」在：厨房抽屉'), findsOneWidget);
+    expect(find.text(notFound('螺丝')), findsNothing);
   });
 
-  testWidgets('V6 不注入语音也可手动输入（回归，默认实现不被触碰）', (tester) async {
+  testWidgets('验收4：添加新位置车库 → 可被后续记录引用', (tester) async {
     await pumpApp(tester);
-    await submit(tester, '梯子放阳台');
-    expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
+    await addLocation(tester, '车库');
+    expect(find.text(locationAdded('车库')), findsOneWidget);
+    await submit(tester, '电钻放车库');
+    expect(find.text(recorded('电钻', '车库')), findsOneWidget);
     expect(repo.linkCount, 1);
   });
 
-  testWidgets('V7 识别中 dispose 页面：cancel 被调用且 async 后不写库不异常',
-      (tester) async {
-    // DeepSeek 放行自查第4项：覆盖"正在听时退出页面"的生命周期边界。
-    final speech = PendingSpeechInput();
-    await pumpWithSpeech(tester, speech);
+  testWidgets('验收7：页面无 DIAG/DIAG6 调试标记与内部代号残留', (tester) async {
+    await pumpApp(tester);
+    expect(find.textContaining('DIAG'), findsNothing);
+    expect(find.textContaining('755b329'), findsNothing);
+    expect(find.textContaining('TRACE MARK'), findsNothing);
+  });
 
-    // 点话筒 → listen() 挂起，_listening=true（识别进行中）。
-    await tester.tap(find.byKey(const Key('voice_button')));
-    await settle(tester);
-    expect(speech.listenCount, 1, reason: '识别已启动且挂起中');
-
-    // 识别未完成时卸载页面 → dispose 必须调 cancel（否则平台语音悬挂）。
-    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
-    expect(speech.cancelCount, 1, reason: 'dispose 应取消进行中的识别');
-
-    // dispose 后平台才回调结果：mounted 护栏须拦住，不写库、不抛异常。
-    // 若 _onVoicePressed 缺 `if (!mounted) return`，这里会抛
-    // "setState() called after dispose" 令测试失败。
-    speech.complete(const SpeechText('梯子放阳台'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 20));
-    expect(repo.locationCount, 0);
-    expect(repo.linkCount, 0);
+  // 技术审核条件①：语音隐私弱提示常驻可见。
+  testWidgets('弱提示：语音由当前输入法处理 常驻显示', (tester) async {
+    await pumpApp(tester);
+    expect(find.byKey(const Key('voice_hint')), findsOneWidget);
+    expect(find.text('语音由当前输入法处理'), findsOneWidget);
   });
 }

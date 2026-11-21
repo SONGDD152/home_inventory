@@ -20,21 +20,25 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 4,
+    this.version = 5,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
-        _migrationFailureHook = null;
+        _migrationFailureHook = null,
+        _migrationV5FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
+  /// 两个钩子分别覆盖 v4 名称清洗与 v5 加列阶段的失败回滚。
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 4,
+    this.version = 5,
     void Function()? migrationFailureHook,
+    void Function()? migrationV5FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
-        _migrationFailureHook = migrationFailureHook;
+        _migrationFailureHook = migrationFailureHook,
+        _migrationV5FailureHook = migrationV5FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -47,6 +51,10 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnIsDeleted = 'is_deleted';
   static const String columnCreatedAt = 'created_at';
   static const String columnUpdatedAt = 'updated_at';
+  // V3 交互说明新增列（可空，兼容 v4 旧库）。
+  static const String columnRemark = 'remark';
+  static const String columnRawText = 'raw_text';
+  static const String columnTags = 'tags';
 
   /// 未删除记录的唯一约束：物品名唯一、位置名唯一、同一(物品,位置)关联唯一。
   static const String itemsUniqueIndex = 'idx_items_name_unique';
@@ -63,6 +71,11 @@ class InventoryDatabase implements InventoryRepository {
   /// 仅供测试的失败注入点：在 v4 清洗的清表之后、重建之前调用。
   /// 私有字段，仅 [InventoryDatabase.forTesting] 可注入，生产构造恒为 null。
   final void Function()? _migrationFailureHook;
+
+  /// 技术审核条件③：v5 加列事务的失败注入点，在 remark 加完、另两列之前调用，
+  /// 验证三段 ALTER 包在一个事务里、失败整体回滚不留半迁移态。
+  /// 私有字段，仅 [InventoryDatabase.forTesting] 可注入，生产构造恒为 null。
+  final void Function()? _migrationV5FailureHook;
 
   Database? _db;
 
@@ -113,7 +126,8 @@ class InventoryDatabase implements InventoryRepository {
         $columnName TEXT NOT NULL,
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
         $columnCreatedAt INTEGER NOT NULL,
-        $columnUpdatedAt INTEGER NOT NULL
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnRemark TEXT
       )
     ''');
     await db.execute('''
@@ -123,7 +137,9 @@ class InventoryDatabase implements InventoryRepository {
         $columnLocationId INTEGER NOT NULL,
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
         $columnCreatedAt INTEGER NOT NULL,
-        $columnUpdatedAt INTEGER NOT NULL
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnRawText TEXT,
+        $columnTags TEXT
       )
     ''');
     await _createIndexes(db);
@@ -183,6 +199,28 @@ class InventoryDatabase implements InventoryRepository {
     if (oldVersion < 4 && newVersion >= 4) {
       await _normalizeLegacyNames(db);
     }
+
+    // v4 → v5：V3 交互说明新增三列（位置备注 remark、记录原文 raw_text、
+    // 记录标签 tags）。用 ALTER TABLE ADD COLUMN，对已有数据零破坏、无需清表。
+    // 幂等保护：重复升级（如测试中手工指定版本）时先探测列是否已存在。
+    if (oldVersion < 5 && newVersion >= 5) {
+      await _addColumnIfMissing(db, tableLocations, columnRemark);
+      // 失败注入点：remark 已加、另两列未加时抛错。onUpgrade 在 sqflite 升级
+      // 事务内，异常必须让三段 ALTER 整体回滚、版本退回 4（见回滚测试）。
+      final v5Hook = _migrationV5FailureHook;
+      if (v5Hook != null) v5Hook();
+      await _addColumnIfMissing(db, tableItemLocations, columnRawText);
+      await _addColumnIfMissing(db, tableItemLocations, columnTags);
+    }
+  }
+
+  /// 若表中无此列则 ALTER ADD；列已存在则跳过（升级幂等）。
+  Future<void> _addColumnIfMissing(
+      DatabaseExecutor db, String table, String column) async {
+    final rows = await db.rawQuery('PRAGMA table_info($table)');
+    final exists = rows.any((row) => row['name'] == column);
+    if (exists) return;
+    await db.execute('ALTER TABLE $table ADD COLUMN $column TEXT');
   }
 
   /// v3 → v4：历史数据名称归一化清洗。
@@ -279,7 +317,8 @@ class InventoryDatabase implements InventoryRepository {
     );
   }
 
-  Future<int> _findOrCreateLocation(DatabaseExecutor db, String name, int now) async {
+  Future<int> _findOrCreateLocation(DatabaseExecutor db, String name, int now,
+      {String? remark}) async {
     final rows = await db.query(
       tableLocations,
       columns: <String>[columnId],
@@ -290,11 +329,13 @@ class InventoryDatabase implements InventoryRepository {
     if (rows.isNotEmpty) return rows.first[columnId] as int;
     return db.insert(
       tableLocations,
-      Location(name: name, createdAt: now, updatedAt: now).toMap(),
+      Location(name: name, createdAt: now, updatedAt: now, remark: remark)
+          .toMap(),
     );
   }
 
-  Future<int> _link(DatabaseExecutor db, int itemId, int locationId, int now) async {
+  Future<int> _link(DatabaseExecutor db, int itemId, int locationId, int now,
+      {String? rawText}) async {
     final rows = await db.query(
       tableItemLocations,
       columns: <String>[columnId],
@@ -310,19 +351,55 @@ class InventoryDatabase implements InventoryRepository {
         locationId: locationId,
         createdAt: now,
         updatedAt: now,
+        rawText: rawText,
       ).toMap(),
     );
   }
 
   /// 新增一个可选位置（trim、非空、超长校验）。同名未删除位置幂等返回原 id。
-  Future<int> addLocation(String name) async {
+  /// V3：可选 [remark] 备注随新位置写入；命中已有位置时备注不变（幂等语义不变）。
+  @override
+  Future<int> addLocation(String name, {String? remark}) async {
     final valid = _normalizeName(name, '位置名称');
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
-    return db.transaction<int>((txn) => _findOrCreateLocation(txn, valid, now));
+    return db.transaction<int>(
+        (txn) => _findOrCreateLocation(txn, valid, now, remark: remark));
+  }
+
+  /// V3：编辑未删除位置的名称与备注。名称走共用归一化与校验。
+  /// 改名撞到另一个未删除位置（唯一索引）时抛 ArgumentError，由 UI 兜底提示。
+  @override
+  Future<void> updateLocation(int id, {String? name, String? remark}) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final updates = <String, Object?>{columnUpdatedAt: now};
+    if (name != null) updates[columnName] = _normalizeName(name, '位置名称');
+    if (remark != null) updates[columnRemark] = remark;
+    if (updates.length == 1) return; // 只有时间戳，无需更新。
+    await db.update(
+      tableLocations,
+      updates,
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  /// V3：软删除位置。删除后不再出现在位置列表与查询关联里（沿用 v4 软删策略）。
+  @override
+  Future<void> deleteLocation(int id) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.update(
+      tableLocations,
+      <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
   }
 
   /// 列出全部未删除位置，供界面选择。按名称排序。
+  @override
   Future<List<Location>> getAllLocations() async {
     final db = await open();
     final rows = await db.query(
@@ -350,7 +427,9 @@ class InventoryDatabase implements InventoryRepository {
   ///
   /// 查重与写入在同一事务内，命中已有 (物品,位置) 关联只刷新时间戳、返回原 id。
   /// 界面连点两下不会产生重复关联。名称做 trim 与长度校验。
-  Future<UpsertResult> upsertItemLocation(String itemName, int locationId) async {
+  @override
+  Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
+      {String? rawText}) async {
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
 
@@ -389,13 +468,14 @@ class InventoryDatabase implements InventoryRepository {
           created: false,
         );
       }
-      await _link(txn, itemId, locationId, now);
+      await _link(txn, itemId, locationId, now, rawText: rawText);
       return UpsertResult(itemId: itemId, locationId: locationId, created: true);
     });
   }
 
   /// 按精确名称查询，返回该物品及其全部未删除位置（同名多位置全量）。
   /// 名称走共用 [normalizeName] 归一化（与存库同源）；空名或非精确（如「梯」查「梯子」）都查不到。
+  @override
   Future<ItemWithLocations?> findByName(String name) async {
     final key = normalizeName(name);
     if (key.isEmpty) return null;

@@ -3,5 +3,4 @@ export 'data/inventory_repository.dart';
 export 'data/item.dart';
 export 'data/normalize.dart';
 export 'data/phrase_parser.dart';
-export 'data/speech_input.dart';
 export 'ui/home_page.dart';

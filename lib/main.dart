@@ -21,7 +21,7 @@ class HomeInventoryApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '家庭仓储',
+      title: '家庭仓储布局',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.green),
       home: HomePage(repository: database),
     );

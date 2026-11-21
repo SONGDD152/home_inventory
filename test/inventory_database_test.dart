@@ -16,8 +16,8 @@ void main() {
   late InventoryDatabase db;
   late List<InventoryDatabase> opened;
 
-  // 默认 version=4，与生产对齐；全新装库走 onCreate，显式低版本的迁移测试另行指定。
-  InventoryDatabase newDb({int version = 4, String? path}) {
+  // 默认 version=5，与生产对齐；全新装库走 onCreate，显式低版本的迁移测试另行指定。
+  InventoryDatabase newDb({int version = 5, String? path}) {
     final instance = InventoryDatabase(
       databaseFactory: databaseFactoryFfi,
       databasePath: path ?? dbPath,
@@ -530,7 +530,7 @@ void main() {
   // ---- 全新装库：onCreate 路径（不触发迁移）----
 
   test('全新装库走 onCreate：建表正常、归一化照常生效、不触发迁移', () async {
-    // newDb 默认 version=4，全新路径 -> onCreate，不经过 _onUpgrade
+    // newDb 默认 version=5，全新路径 -> onCreate，不经过 _onUpgrade
     expect(db.isOpen, isFalse);
     final locationId = await db.addLocation('　阳台　');
     await db.upsertItemLocation('ＬＡＤＤＥＲ ', locationId);
@@ -544,7 +544,149 @@ void main() {
 
     // 重开仍可读，证明是真正落盘的全新库
     await db.close();
-    final reopened = newDb(); // version=4
+    final reopened = newDb(); // version=5
     expect((await reopened.findByName('ladder')), isNotNull);
+  });
+
+  // ---- V3 交互说明：位置备注 / 记录原文 / 标签 ----
+
+  test('V3 位置备注 remark 存取与重开保留', () async {
+    final id = await db.addLocation('阳台', remark: '朝南，晾衣架');
+    final locs = await db.getAllLocations();
+    expect(locs.single.id, id);
+    expect(locs.single.remark, '朝南，晾衣架');
+
+    await db.close();
+    final reopened = newDb();
+    expect((await reopened.getAllLocations()).single.remark, '朝南，晾衣架');
+  });
+
+  test('V3 记录原文 rawText 落库（新建关联时写入）', () async {
+    final id = await db.addLocation('阳台');
+    await db.upsertItemLocation('梯子', id, rawText: '梯子放阳台');
+    // 通过 findByName 拿到的位置不含 raw_text，直查关联表验证落库。
+    final dbHandle = await db.open();
+    final rows = await dbHandle.query('item_locations');
+    expect(rows.single['raw_text'], '梯子放阳台');
+  });
+
+  test('V3 编辑位置名称与备注不丢关联', () async {
+    final id = await db.addLocation('阳台', remark: '旧备注');
+    await db.upsertItemLocation('梯子', id);
+    await db.updateLocation(id, name: '南阳台', remark: '新备注');
+
+    final loc = (await db.getAllLocations()).single;
+    expect(loc.name, '南阳台');
+    expect(loc.remark, '新备注');
+    expect((await db.findByName('梯子'))!.locations.single.name, '南阳台');
+  });
+
+  test('V3 软删除位置后不出现在列表与查询关联', () async {
+    final id = await db.addLocation('阳台');
+    await db.upsertItemLocation('梯子', id);
+    await db.deleteLocation(id);
+
+    expect(await db.getAllLocations(), isEmpty);
+    expect((await db.findByName('梯子'))!.locations, isEmpty);
+  });
+
+  test('v4 旧库升级到 v5：ALTER 补三列且不丢历史数据', () async {
+    // 造一个 v4 库（旧表结构，无 remark/raw_text/tags）。
+    final legacyPath = p.join(tempDir.path, 'v4_legacy.db');
+    final factory = databaseFactoryFfi;
+    final legacy = await factory.openDatabase(
+      legacyPath,
+      options: OpenDatabaseOptions(
+        version: 4,
+        onCreate: (d, v) async {
+          await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          final now = DateTime.now().millisecondsSinceEpoch;
+          await d.insert('locations', {'name': '阳台', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          await d.insert('item_locations', {'item_id': 1, 'location_id': 1, 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+        },
+      ),
+    );
+    await legacy.close();
+
+    // 用 v5 打开，触发 ALTER 补列。
+    final upgraded = InventoryDatabase(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 5,
+    );
+    opened.add(upgraded);
+    final found = await upgraded.findByName('梯子');
+    expect(found, isNotNull);
+    expect(found!.locations.single.name, '阳台');
+    // 新列可读（值为 null），且可继续写入备注。
+    expect((await upgraded.getAllLocations()).single.remark, isNull);
+    final id = found.locations.single.id!;
+    await upgraded.updateLocation(id, remark: '迁移后补录');
+    expect((await upgraded.getAllLocations()).single.remark, '迁移后补录');
+  });
+
+  test('v5 加列失败整体回滚：版本退回4、已加列撤销、旧数据不丢（技术审核条件③）',
+      () async {
+    // 造一个带数据的 v4 库（无 remark/raw_text/tags）。
+    final legacyPath = p.join(tempDir.path, 'v4_v5_rollback.db');
+    final factory = databaseFactoryFfi;
+    final legacy = await factory.openDatabase(
+      legacyPath,
+      options: OpenDatabaseOptions(
+        version: 4,
+        onCreate: (d, v) async {
+          await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          final now = DateTime.now().millisecondsSinceEpoch;
+          await d.insert('locations', {'name': '阳台', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          await d.insert('item_locations', {'item_id': 1, 'location_id': 1, 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+        },
+      ),
+    );
+    await legacy.close();
+
+    // remark 加完、另两列未加时注入失败 → onUpgrade 事务应整体回滚。
+    final failing = InventoryDatabase.forTesting(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 5,
+      migrationV5FailureHook: () =>
+          throw StateError('injected v5 migration failure'),
+    );
+    opened.add(failing);
+    await expectLater(failing.open(), throwsA(isA<StateError>()));
+
+    // 裸开库校验：版本、列、数据三者都回到迁移前。
+    final raw = await factory.openDatabase(legacyPath);
+    try {
+      expect(await raw.getVersion(), 4); // setVersion 也回滚
+      final locCols = await raw.rawQuery('PRAGMA table_info(locations)');
+      expect(locCols.any((c) => c['name'] == 'remark'), isFalse,
+          reason: 'remark 已加过也必须随事务回滚，不留半迁移态');
+      final assocCols = await raw.rawQuery('PRAGMA table_info(item_locations)');
+      expect(assocCols.any((c) => c['name'] == 'raw_text'), isFalse);
+      expect(assocCols.any((c) => c['name'] == 'tags'), isFalse);
+      expect(await raw.query('items'), hasLength(1));
+      expect((await raw.query('items')).first['name'], '梯子');
+    } finally {
+      await raw.close();
+    }
+
+    // 不带钩子的正常 v5 仍能成功补列，库未被搞坏。
+    final recovered = InventoryDatabase(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 5,
+    );
+    opened.add(recovered);
+    expect((await recovered.getAllLocations()).single.name, '阳台');
+    final id = (await recovered.getAllLocations()).single.id!;
+    await recovered.updateLocation(id, remark: '恢复后补录');
+    expect((await recovered.getAllLocations()).single.remark, '恢复后补录');
   });
 }

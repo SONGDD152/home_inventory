@@ -76,3 +76,27 @@
 **验证**：本地 + 推送目录（github_push_tmp）均 analyze `No issues found!` + test 91/91（本机口径，非 CI 证明）。推送目录清理了 4 个未跟踪的历史残留文件（lib 根级旧扁平结构，非本次改动）。CI（ci.yml）第 13 行含 `flutter analyze`——本次补强后 CI 的 analyze 步骤有 flutter_lints 规则且本地已验证全绿。
 
 **状态**：待项目经理最终放行 → git commit + push → 取新 CI run 取证。发版前项目经理仍须真机实测切换输入法 + 键盘语音记查回填。
+
+## 六、发版交付与真机缺陷修复闭环（2026-11-21，V3 正式封版）
+
+### 6.1 发版交付
+- release APK 构建成功：44.8MB（46,929,203 字节），2026-11-21 19:52，Gradle assembleRelease。
+- 在线下载页发布：`https://home-inventory-apk.app.workbuddy.host/?sharecode=WDA34IGGN6`（含下载按钮、版本信息、安装提示；托管平台特性：资源直链不带 sharecode 返回 403，下载按钮 href 已带 sharecode）。
+- APK 核验：下载页分发版本与新构建 sha256 一致（5655bb61…，修复前为 505cebb4…）。
+
+### 6.2 真机缺陷当日闭环
+- 现象：说「查梯子在哪儿」，反馈「暂未记录该物品：查梯子」——组合句式（查询词+后缀连用）时，头部查询词被吞进物品名。
+- 根因：后缀「在哪儿」命中后截出的物品名未剥头部查询词（裸「查」/找/查一下/查查/有没有）。
+- 修复（commit ad850bf）：`_stripLeadingQueryWords` 在后缀分支逐层剥头部查询词；守卫两处——两字物品名（如「查表」）不误剥裸查；单独「查XX」仍判未识别（规格不变）。同步更新旧锁定：「找东西在哪」由查「找东西」改为查「东西」。
+- 测试 91 → 95（+4 条组合式锁定）。CI run #44904033931 三步 success；线上 phrase_parser.dart / phrase_parser_test.dart 逐字节核验一致。
+- 项目经理真机复测通过（2026-11-21 20:44）。
+
+### 6.3 封版确认（项目经理，2026-11-21 20:48）
+- V3 重构全部功能验收通过（含组合句式缺陷修复）；release APK 及下载页可用于日常使用；技术审核 4 项条件全部闭环。
+- 项目看板状态：**V3 已发版 · 可日常使用**。
+- 遗留排期（项目经理确认）：解析歧义归入后续口语扩展迭代；CI checkout@v4 Node20→24 warning 下次调整 CI 时顺带处理。
+
+### 6.4 验证口径留档
+- CI run #44896582596（commit c894c6d）三步 success——V3 重构主链。
+- CI run #44904033931（commit ad850bf）三步 success——组合句式缺陷修复。
+- 测试 95/95 为本机 `flutter test --reporter expanded` 口径；CI 步骤级 success + 线上逐字节一致，不表述为「CI 证明 95/95」。

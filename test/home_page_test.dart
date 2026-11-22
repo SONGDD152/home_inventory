@@ -682,19 +682,34 @@ void main() {
     expect(find.byKey(const Key('phrase_field')), findsOneWidget);
   });
 
-  testWidgets('V3.4：三道杠可见性锁定（显式深色 + iconSize 28）',
+  testWidgets('V3.4.1：三道杠可见性锁定（深色 AppBar 底 + 亮色图标）',
       (tester) async {
     await pumpApp(tester);
 
+    // PM 修订方向：AppBar 反转——深绿底 + 白配绿对比拉满。
+    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold).first);
+    final appBar = scaffold.appBar as AppBar;
+    final theme = Theme.of(tester.element(find.byType(Scaffold).first));
+    expect(appBar.backgroundColor, theme.colorScheme.primary,
+        reason: 'AppBar 深色底（主题绿）');
+    expect(appBar.foregroundColor, theme.colorScheme.onPrimary,
+        reason: '标题亮色');
     final button = tester.widget<IconButton>(
       find.byKey(const Key('open_drawer')),
     );
-    expect(button.color, isNotNull, reason: '显式深色，浅背景下清晰可辨');
+    expect(button.color, theme.colorScheme.onPrimary,
+        reason: '三道杠亮色（onPrimary），深底上清晰可辨');
     expect(button.iconSize, 28, reason: '视觉尺寸较默认 24 增大');
     // 点击展开（功能链路继续有效）。
     await tester.tap(find.byKey(const Key('open_drawer')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('home_drawer')), findsOneWidget);
+  });
+
+  testWidgets('V3.4.1：首屏示例引导文案展示', (tester) async {
+    await pumpApp(tester);
+    expect(find.byKey(const Key('sample_hint')), findsOneWidget);
+    expect(find.text('试试说：梯子放阳台，或：梯子在哪'), findsOneWidget);
   });
 
   testWidgets('V3.4：键盘弹起态顶部三道杠不被裁切、仍可点击', (tester) async {

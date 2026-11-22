@@ -231,14 +231,18 @@ class _HomePageState extends State<HomePage> {
         title: Text(widget.title),
         // V3.3 导航收敛：入口统一为左上角三道杠；
         // V1 遗留的右上角列表图标已撤下（明细页经抽屉进入）。
-        // V3.4 可见性修复：真机浅背景下默认前景色偏淡，显式深色
-        //（与绿色主题同源的 colorScheme.primary）+ 视觉尺寸 28，
-        // 点击热区随 IconButton 默认≥48dp。
+        // V3.4 可见性修复：真机浅背景下默认前景色偏淡。
+        // V3.4.1 修订（PM 视觉方向调整）：AppBar 反转为深色底
+        //（colorScheme.primary 绿色）+ 亮色图标/标题（onPrimary），
+        // 白配绿对比拉满，一眼可见；下方内容区保持浅色，深色顶栏
+        // 压住视觉层次。
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
         leading: IconButton(
           key: const Key('open_drawer'),
           tooltip: '菜单',
           iconSize: 28,
-          color: Theme.of(context).colorScheme.primary,
+          color: Theme.of(context).colorScheme.onPrimary,
           icon: const Icon(Icons.menu),
           onPressed: _openDrawer,
         ),
@@ -272,6 +276,12 @@ class _HomePageState extends State<HomePage> {
             const Text('语音由系统输入法处理',
                 key: Key('voice_hint'),
                 style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 8),
+            // V3.4.1 修订（P1 首屏补内容）：轻量示例引导，让用户
+            // 一眼知道怎么用；与合规提示分开，纯静态展示。
+            const Text('试试说：梯子放阳台，或：梯子在哪',
+                key: Key('sample_hint'),
+                style: TextStyle(fontSize: 13, color: Colors.grey)),
             const SizedBox(height: 12),
             FilledButton(
               key: const Key('submit_button'),

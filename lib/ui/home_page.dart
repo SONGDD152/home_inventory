@@ -183,14 +183,24 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// V3.5：底栏切换一级模块。抽屉若已打开，先关闭再切换，
-  /// 避免抽屉内容残影（审核意见 7）。
+  /// V3.5：底栏切换一级模块。抽屉若已打开，仅切换内容不重复弹动画；
+  /// 关闭态则切换后自动弹出——修订单原文「点击一级按钮 → 左侧菜单
+  /// 仅展示该模块子菜单」，给占位模块即时可见反馈（真机缺陷修复：
+  /// 此前只切状态不弹抽屉，叠加 ☰ 不可见导致占位模块零反馈）。
   void _selectModule(int index) {
     final scaffold = _scaffoldKey.currentState;
-    if (scaffold?.isDrawerOpen ?? false) {
+    final drawerWasOpen = scaffold?.isDrawerOpen ?? false;
+    if (drawerWasOpen) {
       Navigator.of(context).pop();
     }
     setState(() => _moduleIndex = index);
+    if (!drawerWasOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scaffoldKey.currentState?.openDrawer();
+        }
+      });
+    }
   }
 
   /// 底栏一级模块图标（V3.5 方案简报）。
@@ -302,8 +312,10 @@ class _HomePageState extends State<HomePage> {
                 },
               ),
             ] else ...<Widget>[
-              for (final module in _HomeModule.values.skip(1))
-                _buildingTile(module),
+              // V3.5 补丁（PM 2026-11-22）：占位项收敛——选中哪个
+              // 非仓储模块，只渲染该模块自己的一条「建设中」占位项，
+              // 与决策点①A「各渲染一个」口径一致。
+              _buildingTile(_HomeModule.values[_moduleIndex]),
             ],
           ],
         ),
@@ -317,21 +329,21 @@ class _HomePageState extends State<HomePage> {
       key: _scaffoldKey,
       appBar: AppBar(
         title: Text(widget.title),
-        // V3.3 导航收敛：入口统一为左上角三道杠；
-        // V1 遗留的右上角列表图标已撤下（明细页经抽屉进入）。
-        // V3.4 可见性修复：真机浅背景下默认前景色偏淡。
-        // V3.4.1 修订（PM 视觉方向调整）：AppBar 反转为深色底
-        //（colorScheme.primary 绿色）+ 亮色图标/标题（onPrimary），
-        // 白配绿对比拉满，一眼可见；下方内容区保持浅色，深色顶栏
-        // 压住视觉层次。
         backgroundColor: Theme.of(context).colorScheme.primary,
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
+        // V3.3 导航收敛：入口统一为左上角三道杠；
+        // V1 遗留的右上角列表图标已撤下（明细页经抽屉进入）。
+        // V3.4.1：AppBar 反转为深色底 + 亮色标题（真机已验证生效）。
+        // V3.5.1 真机缺陷修复：V3.4/V3.4.1 两轮通过 IconButton.color
+        // 设色，widget 断言锁的是参数值，真机上 ☰ 均不渲染——
+        // 本轮把颜色/尺寸直接写死在 Icon 本体上，绕过 M3 样式
+        // 继承链；白色 + 深绿底对比最大。
         leading: IconButton(
           key: const Key('open_drawer'),
           tooltip: '菜单',
           iconSize: 28,
-          color: Theme.of(context).colorScheme.onPrimary,
-          icon: const Icon(Icons.menu),
+          color: Colors.white,
+          icon: const Icon(Icons.menu, size: 28, color: Colors.white),
           onPressed: _openDrawer,
         ),
       ),

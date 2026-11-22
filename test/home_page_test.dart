@@ -697,9 +697,14 @@ void main() {
     final button = tester.widget<IconButton>(
       find.byKey(const Key('open_drawer')),
     );
-    expect(button.color, theme.colorScheme.onPrimary,
-        reason: '三道杠亮色（onPrimary），深底上清晰可辨');
+    expect(button.color, Colors.white, reason: '按钮设色白色');
     expect(button.iconSize, 28, reason: '视觉尺寸较默认 24 增大');
+    // V3.5.1 真机缺陷修复：颜色直接写死在 Icon 本体（不再依赖
+    // M3 样式继承链），断言锁最终渲染的 Icon 而非仅参数值。
+    final icon = tester.widget<Icon>(find.byIcon(Icons.menu));
+    expect(icon.color, Colors.white,
+        reason: '白色图标在深绿底上对比最大，真机可见（两轮缺陷后改锁渲染本体）');
+    expect(icon.size, 28);
     // 点击展开（功能链路继续有效）。
     await tester.tap(find.byKey(const Key('open_drawer')));
     await tester.pumpAndSettle();
@@ -758,7 +763,7 @@ void main() {
         reason: '仓储模块不渲染占位项');
   });
 
-  testWidgets('V3.5：切至日程 → 抽屉子菜单切换为建设中占位（决策点①A）',
+  testWidgets('V3.5.1：切至日程 → 抽屉自动弹出并显示建设中占位（决策点①A）',
       (tester) async {
     await pumpApp(tester);
 
@@ -770,14 +775,20 @@ void main() {
     );
     expect(nav.currentIndex, 1, reason: '底栏高亮随点击切换');
 
-    await tester.tap(find.byKey(const Key('open_drawer')));
-    await tester.pumpAndSettle();
+    // V3.5.1 真机缺陷修复（修订单原文「点击一级按钮 → 左侧菜单
+    // 仅展示该模块子菜单」）：底栏点击后抽屉自动弹出，占位模块
+    // 有即时可见反馈（此前只切状态不弹抽屉，叠加 ☰ 不可见导致
+    // 真机点占位模块零反馈）。
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget,
+        reason: '点底栏一级按钮后抽屉自动展开');
 
     expect(find.text('日程模块'), findsOneWidget);
+    // V3.5 补丁（占位项收敛）：只渲染当前模块自己的一条占位项。
     expect(find.byKey(const Key('drawer_building_schedule')), findsOneWidget);
-    expect(find.byKey(const Key('drawer_building_knowledge')), findsOneWidget);
-    expect(find.byKey(const Key('drawer_building_dining')), findsOneWidget);
-    expect(find.byKey(const Key('drawer_building_wardrobe')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_knowledge')), findsNothing,
+        reason: '非选中模块不渲染占位项');
+    expect(find.byKey(const Key('drawer_building_dining')), findsNothing);
+    expect(find.byKey(const Key('drawer_building_wardrobe')), findsNothing);
     expect(find.byKey(const Key('drawer_locations')), findsNothing,
         reason: '非仓储模块不渲染仓储四项');
 
@@ -790,15 +801,57 @@ void main() {
         reason: '不进入任何子页');
   });
 
+  testWidgets('V3.5 补丁：切知识库/餐饮/衣橱 → 抽屉各只锁单条占位项',
+      (tester) async {
+    await pumpApp(tester);
+
+    final cases = <String, String>{
+      '知识库': 'knowledge',
+      '餐饮': 'dining',
+      '衣橱': 'wardrobe',
+    };
+    for (final entry in cases.entries) {
+      await tester.tap(find.text(entry.key));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('drawer_building_${entry.value}')), findsOneWidget,
+          reason: '${entry.key}抽屉仅显示自己的占位项');
+      // 其余三个占位项与仓储四项均不出现。
+      for (final other in cases.entries) {
+        if (other.value != entry.value) {
+          expect(find.byKey(Key('drawer_building_${other.value}')),
+              findsNothing);
+        }
+      }
+      expect(find.byKey(const Key('drawer_items')), findsNothing);
+
+      // 决策点③：点击不进页（SnackBar 提示行为已由日程组锁定；
+      // SnackBar 默认驻留 4 秒会跨组排队，故此处不重复断言提示）。
+      await tester.tap(find.byKey(Key('drawer_building_${entry.value}')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('detail_search')), findsNothing,
+          reason: '不进入任何子页');
+
+      // 关抽屉进入下一组。
+      tester
+          .state<ScaffoldState>(find.byType(Scaffold).first)
+          .closeDrawer();
+      await tester.pumpAndSettle();
+    }
+  });
+
   testWidgets('V3.5：切回仓储 → 抽屉恢复真实四项', (tester) async {
     await pumpApp(tester);
 
     await tester.tap(find.text('衣橱'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('仓储'));
-    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget,
+        reason: '切占位模块抽屉自动弹出');
 
-    await tester.tap(find.byKey(const Key('open_drawer')));
+    // 模拟用户关闭抽屉后再切回仓储。
+    tester.state<ScaffoldState>(find.byType(Scaffold).first).closeDrawer();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('仓储'));
     await tester.pumpAndSettle();
 
     expect(find.text('仓储模块'), findsOneWidget);

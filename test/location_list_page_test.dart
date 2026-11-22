@@ -165,6 +165,18 @@ void main() {
         reason: '删除后列表刷新为空态');
   });
 
+  testWidgets('删除：确认框含 V3.2 联动清理说明', (tester) async {
+    final repo = FakeLocationRepository(<Location>[_loc('车库', id: 2)]);
+    await _pumpPage(tester, repo: repo);
+
+    await tester.tap(find.byKey(const Key('location_delete_车库')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('一并移除'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('location_delete_cancel')));
+    await tester.pumpAndSettle();
+    expect(repo.deletes, isEmpty);
+  });
+
   testWidgets('校验拒绝：仓储抛 ArgumentError 提示失败且不炸页', (tester) async {
     final repo = ThrowingLocationRepo();
     await _pumpPage(tester, repo: repo);

@@ -63,6 +63,36 @@ class InMemoryRepository implements InventoryRepository {
   }
 
   @override
+  Future<void> updateItem(int id, String name) async {
+    final idx = _items.indexWhere((i) => i.id == id);
+    if (idx < 0) return;
+    final old = _items[idx];
+    _items[idx] = Item(
+      id: old.id,
+      name: normalizeName(name),
+      isDeleted: old.isDeleted,
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+    );
+  }
+
+  @override
+  Future<void> deleteItem(int id) async {
+    final idx = _items.indexWhere((i) => i.id == id);
+    if (idx < 0) return;
+    final old = _items[idx];
+    _items[idx] = Item(
+      id: old.id,
+      name: old.name,
+      isDeleted: true,
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+    );
+    // 真实库为物理 DELETE；内存版同步移除，语义等价。
+    _links.removeWhere((l) => l.itemId == id);
+  }
+
+  @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText}) async {
     final key = normalizeName(itemName);

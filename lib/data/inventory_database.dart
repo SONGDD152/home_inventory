@@ -356,6 +356,68 @@ class InventoryDatabase implements InventoryRepository {
     );
   }
 
+  /// V3.2：编辑未删除物品的名称。名称走共用归一化与校验（与位置侧同源）。
+  ///
+  /// 撞名检查只针对**未删除**物品（is_deleted=0，排除自身）——已删除物品
+  /// 允许同名复活：部分唯一索引只约束活跃行，复活会插入新行、新 id，
+  /// 历史软删行不受影响（技术审核确认点①的口径）。
+  /// 事务内「预检查 + 写入」：预检查命中抛 ArgumentError（友好中文），
+  /// 部分唯一索引兜底并发写。
+  @override
+  Future<void> updateItem(int id, String name) async {
+    final valid = _normalizeName(name, '物品名称');
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.transaction<void>((txn) async {
+      final rows = await txn.query(
+        tableItems,
+        columns: <String>[columnId],
+        where: '$columnName = ? AND $columnIsDeleted = 0 AND $columnId != ?',
+        whereArgs: <Object?>[valid, id],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        throw ArgumentError.value(name, 'name', '已存在同名物品');
+      }
+      await txn.update(
+        tableItems,
+        <String, Object?>{columnName: valid, columnUpdatedAt: now},
+        where: '$columnId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[id],
+      );
+    });
+  }
+
+  /// V3.2：删除物品（事务内）。
+  ///
+  /// 清理原则：软删留底仅在实体仍活跃时有意义；实体删除时其关联历史
+  /// 一并物理清除。因此：
+  ///  * 物品行软删（is_deleted=1 留底：备份恢复保真、允许同名复活走新行）；
+  ///  * 该物品**全部**关联行物理 DELETE——含活跃行与挪位软删历史行。
+  ///    物品已删，关联审计价值为零；物理清除的行导出备份自然不含，
+  ///    还原后同样不含，与「还原后状态一致」的保真原则不冲突。
+  /// 挪位（moveItem）软删留底的拍板语义不变，留底行的清理时机即此处。
+  /// 幂等：物品不存在或已删除时无操作。
+  @override
+  Future<void> deleteItem(int id) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.transaction<void>((txn) async {
+      final updated = await txn.update(
+        tableItems,
+        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+        where: '$columnId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[id],
+      );
+      if (updated == 0) return; // 不存在或已删除，幂等返回。
+      await txn.delete(
+        tableItemLocations,
+        where: '$columnItemId = ?',
+        whereArgs: <Object?>[id],
+      );
+    });
+  }
+
   /// 新增一个可选位置（trim、非空、超长校验）。同名未删除位置幂等返回原 id。
   /// V3：可选 [remark] 备注随新位置写入；命中已有位置时备注不变（幂等语义不变）。
   @override
@@ -385,17 +447,44 @@ class InventoryDatabase implements InventoryRepository {
     );
   }
 
-  /// V3：软删除位置。删除后不再出现在位置列表与查询关联里（沿用 v4 软删策略）。
+  /// V3.1：软删除位置。删除后不再出现在位置列表与查询关联里（沿用 v4 软删策略）。
+  ///
+  /// V3.2 联动修正（技术审核决策点②）：事务内按以下**固定顺序**处理关联表，
+  /// 顺序不能颠倒——颠倒会把刚软删的活跃关联一并物理清掉，"留底"失效：
+  ///  1. 先物理 DELETE 该位置的**软删历史**关联行（is_deleted=1 的僵尸行）；
+  ///  2. 再联动软删指向它的**活跃**关联行（is_deleted 0→1，留底）。
+  /// 修正后任何时刻「活跃关联」都与「位置活跃」显性一致，不再依赖查询
+  /// SQL 的 join 条件兜底。
+  ///
+  /// 「恢复/回显」语义（技术审核确认点②）：软删关联留底可回显的前提是
+  /// **复活同一行**（把该位置行 is_deleted 改回 0，id 不变，备份恢复即此
+  /// 语义）；**新建同名位置是新行、新 id**，旧软删关联不会跟随新 id 回显。
   @override
   Future<void> deleteLocation(int id) async {
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
-    await db.update(
-      tableLocations,
-      <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
-      where: '$columnId = ? AND $columnIsDeleted = 0',
-      whereArgs: <Object?>[id],
-    );
+    await db.transaction<void>((txn) async {
+      final updated = await txn.update(
+        tableLocations,
+        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+        where: '$columnId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[id],
+      );
+      if (updated == 0) return; // 不存在或已删除，幂等返回。
+      // ① 先物理清软删历史关联行（僵尸行只增不减的清理路径）。
+      await txn.delete(
+        tableItemLocations,
+        where: '$columnLocationId = ? AND $columnIsDeleted = 1',
+        whereArgs: <Object?>[id],
+      );
+      // ② 再联动软删活跃关联行（留底：位置复活同一行时关联可回显）。
+      await txn.update(
+        tableItemLocations,
+        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+        where: '$columnLocationId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[id],
+      );
+    });
   }
 
   /// 列出全部未删除位置，供界面选择。按名称排序。

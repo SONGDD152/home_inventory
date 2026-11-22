@@ -8,7 +8,8 @@ import '../data/item.dart';
 import '../data/normalize.dart';
 import 'backup_actions.dart';
 
-/// 物品明细页：只读浏览全部物品及其位置，支持按物品名/位置名过滤；
+/// 物品明细页：浏览全部物品及其位置，支持按物品名/位置名过滤；
+/// V3.2 起每条物品支持编辑（改名）与删除（二次确认，物理清除其位置记录）；
 /// 备份导出/恢复入口在**底部固定操作区**（不再放右上角图标，
 /// 避免边缘/安全区吞掉入口），完整说明见独立「数据备份与恢复」页。
 class ItemListPage extends StatefulWidget {
@@ -35,6 +36,7 @@ class _ItemListPageState extends State<ItemListPage> {
 
   List<ItemWithLocations>? _rows;
   String? _error;
+  bool _busy = false;
 
   @override
   void initState() {
@@ -133,6 +135,93 @@ class _ItemListPageState extends State<ItemListPage> {
   int _filteredRecordCount(List<ItemWithLocations> rows) =>
       rows.fold(0, (n, r) => n + r.locations.length);
 
+  // ---------- V3.2 编辑/删除 ----------
+
+  /// 操作统一兜底：校验类错误是 ArgumentError（Error 非 Exception），
+  /// 必须 on ArgumentError 单独 catch，文案展示 e.message（沿用惯例）。
+  Future<void> _guard(Future<void> Function() action) async {
+    setState(() => _busy = true);
+    try {
+      await action();
+      await _reload();
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('操作失败：${e.message ?? e}')),
+      );
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('操作失败：$e')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  Future<void> _editItem(ItemWithLocations row) async {
+    final controller = TextEditingController(text: row.item.name);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('编辑物品'),
+        content: TextField(
+          key: const Key('item_edit_name_field'),
+          controller: controller,
+          decoration: const InputDecoration(
+            labelText: '物品名称',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final name = controller.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('物品名称不能为空。')),
+      );
+      return;
+    }
+    await _guard(() => widget.repository.updateItem(row.item.id!, name));
+  }
+
+  Future<void> _deleteItem(ItemWithLocations row) async {
+    final n = row.locations.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除物品'),
+        content: Text('确定删除物品「${row.item.name}」吗？\n'
+            '将同时清除它在 $n 处的位置记录（含历史记录），此操作不可恢复。'),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('item_delete_cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('item_delete_confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _guard(() => widget.repository.deleteItem(row.item.id!));
+  }
+
   Widget _buildBody(List<ItemWithLocations> rows) {
     if (_error != null) {
       return Center(child: Text(_error!));
@@ -166,7 +255,24 @@ class _ItemListPageState extends State<ItemListPage> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
-          trailing: Text('${row.locations.length} 处'),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text('${row.locations.length} 处'),
+              IconButton(
+                key: Key('item_edit_${row.item.name}'),
+                tooltip: '编辑',
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: _busy ? null : () => _editItem(row),
+              ),
+              IconButton(
+                key: Key('item_delete_${row.item.name}'),
+                tooltip: '删除',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: _busy ? null : () => _deleteItem(row),
+              ),
+            ],
+          ),
         );
       },
     );

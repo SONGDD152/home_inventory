@@ -775,7 +775,16 @@ void main() {
     final row = await restoredDb.getLocationById(locationId);
     expect(row, isNull, reason: 'getLocationById 只返回未删除位置');
     final assocCount = await restoredDb.countActiveAssociations();
-    expect(assocCount, 1, reason: '关联行本身未软删（软删的是位置行），计数为 1');
+    // V3.2 联动修正（审核决策点②）：位置软删时活跃关联一并联动软删，
+    // 不再留「活跃关联指向已删位置」的脏状态——计数从旧行为的 1 变为 0。
+    expect(assocCount, 0, reason: 'V3.2 起关联随位置删除联动软删');
+    // 联动软删的关联行留底：导出里按 is_deleted=1 可见，复活同一行时可回显。
+    final assocRows = (backup['item_locations'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['location_id'] == locationId)
+        .toList();
+    expect(assocRows, hasLength(1));
+    expect(assocRows.single['is_deleted'], 1);
     expect((await restoredDb.getAllItems()), isNotEmpty, reason: '物品本身未删');
   });
 
@@ -886,5 +895,158 @@ void main() {
     );
     // 原数据不受影响。
     expect((await db.findByName('梯子'))!.locations.single.name, '阳台');
+  });
+
+  // ---- V3.2：updateItem / deleteItem / deleteLocation 联动 ----
+
+  test('V3.2 updateItem：改名生效，关联跟随不丢', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+
+    await db.updateItem(up.itemId, '折叠梯');
+
+    final found = await db.findByName('折叠梯');
+    expect(found, isNotNull, reason: '改名后按新名可查');
+    expect(found!.locations.single.name, '阳台', reason: '关联跟随 item_id');
+    expect(await db.findByName('梯子'), isNull, reason: '旧名不再命中');
+  });
+
+  test('V3.2 updateItem：归一化同源（全角/空白/大小写）', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+
+    await db.updateItem(up.itemId, '　ＬＡＤＤＥＲ　');
+
+    expect((await db.findByName('ladder'))!.item.name, 'ladder');
+  });
+
+  test('V3.2 updateItem：空名与超名被拒绝', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+
+    await expectLater(db.updateItem(up.itemId, '   '), throwsArgumentError);
+    await expectLater(
+      db.updateItem(up.itemId, '长' * 101),
+      throwsArgumentError,
+      reason: '超过 maxNameLength=100 拒绝',
+    );
+    expect((await db.findByName('梯子'))!.item.name, '梯子',
+        reason: '拒绝后名称不变');
+  });
+
+  test('V3.2 updateItem：撞活跃同名拒绝、改名回自身不误伤、已删同名允许', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+    final chargerId = await db.addLocation('书房');
+    final charger = await db.upsertItemLocation('充电器', chargerId);
+
+    // 撞另一个活跃物品名 → ArgumentError。
+    await expectLater(
+      db.updateItem(up.itemId, '充电器'),
+      throwsArgumentError,
+    );
+    // 改回自己的名字（排除自身）不报错。
+    await db.updateItem(up.itemId, '梯子');
+    // 先删充电器，再让梯子复用其名 → 允许（已删物品不算撞名）。
+    await db.deleteItem(charger.itemId);
+    await db.updateItem(up.itemId, '充电器');
+    expect((await db.findByName('充电器'))!.item.name, '充电器');
+  });
+
+  test('V3.2 deleteItem：物品行软删、关联物理清零（含挪位软删历史）、幂等', () async {
+    final balconyId = await db.addLocation('阳台');
+    final livingId = await db.addLocation('客厅');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+    // 挪位产生阳台软删历史行。
+    await db.moveItem('梯子', livingId);
+
+    await db.deleteItem(up.itemId);
+
+    // 查询与明细都不再出现。
+    expect(await db.findByName('梯子'), isNull);
+    expect(
+      (await db.getAllItemsWithLocations())
+          .where((r) => r.item.name == '梯子'),
+      isEmpty,
+    );
+    // 物品行软删留底；该物品关联行全部物理清除（导出不含任何梯子关联）。
+    final backup = await db.exportBackup();
+    final items = (backup['items'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['name'] == '梯子')
+        .toList();
+    expect(items, hasLength(1));
+    expect(items.single['is_deleted'], 1, reason: '物品行软删留底');
+    expect(
+      (backup['item_locations'] as List<Object?>)
+          .cast<Map<String, Object?>>()
+          .where((m) => m['item_id'] == up.itemId),
+      isEmpty,
+      reason: '关联行（活跃+挪位软删历史）物理清除',
+    );
+    // 幂等：重复删除不抛错。
+    await db.deleteItem(up.itemId);
+  });
+
+  test('V3.2 deleteItem：删除后同名复活走新行，备份往返状态一致', () async {
+    final balconyId = await db.addLocation('阳台');
+    final livingId = await db.addLocation('客厅');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+    await db.deleteItem(up.itemId);
+
+    // 同名复活：插入新行（部分唯一索引只约束活跃行）。
+    final revived = await db.upsertItemLocation('梯子', livingId);
+    expect(revived.itemId, isNot(up.itemId), reason: '复活是新行新 id');
+    expect((await db.findByName('梯子'))!.locations.single.name, '客厅');
+
+    // 备份往返：导出 → 新库恢复 → 状态一致（无僵尸关联）。
+    final backup = await db.exportBackup();
+    final target = newDb(path: p.join(tempDir.path, 'restore_v32.db'));
+    await target.restoreBackup(backup);
+    final restored = await target.getAllItemsWithLocations();
+    final ladder = restored.where((r) => r.item.name == '梯子').single;
+    expect(ladder.locations.single.name, '客厅');
+  });
+
+  test('V3.2 deleteLocation：活跃关联联动软删、软删历史物理清、同名位置可重建', () async {
+    final balconyId = await db.addLocation('阳台');
+    final livingId = await db.addLocation('客厅');
+    // 梯子活跃关联指向阳台。
+    final ladderUp = await db.upsertItemLocation('梯子', balconyId);
+    // 充电器先在阳台、挪去客厅 → 产生指向阳台的软删历史行。
+    await db.upsertItemLocation('充电器', balconyId);
+    await db.moveItem('充电器', livingId);
+
+    await db.deleteLocation(balconyId);
+
+    final backup = await db.exportBackup();
+    final assocOnBalcony = (backup['item_locations'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['location_id'] == balconyId)
+        .toList();
+    expect(assocOnBalcony, hasLength(1), reason: '软删历史行已物理清，只留 1 行');
+    expect(assocOnBalcony.single['is_deleted'], 1,
+        reason: '留底的是原活跃关联（梯子），复活同一行时可回显');
+    expect(assocOnBalcony.single['item_id'], ladderUp.itemId,
+        reason: '留底行属于梯子；充电器的软删历史行已被物理清除');
+    // 梯子无有效位置，充电器仍在客厅。
+    final details = await db.getAllItemsWithLocations();
+    expect(
+        details.where((r) => r.item.name == '梯子').single.locations, isEmpty);
+    expect(
+      details.where((r) => r.item.name == '充电器').single.locations.single.name,
+      '客厅',
+    );
+    // 同名位置可重建（新行新 id），旧软删关联不跟随新 id 回显。
+    final newBalconyId = await db.addLocation('阳台');
+    expect(newBalconyId, isNot(balconyId));
+    expect(
+      (await db.getAllItemsWithLocations())
+          .where((r) => r.item.name == '梯子')
+          .single
+          .locations,
+      isEmpty,
+      reason: '新建同名不复活旧关联（审核确认点②口径）',
+    );
   });
 }

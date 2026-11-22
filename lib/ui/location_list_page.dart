@@ -155,7 +155,8 @@ class _LocationListPageState extends State<LocationListPage> {
       builder: (context) => AlertDialog(
         title: const Text('删除位置'),
         content: Text('确定删除位置「${location.name}」吗？\n'
-            '物品记录不会被删除，但该位置将不再显示。'),
+            '物品记录不会被删除，但该位置将不再显示；\n'
+            '相关位置记录将一并移除（V3.2 联动清理）。'),
         actions: <Widget>[
           TextButton(
             key: const Key('location_delete_cancel'),

@@ -11,6 +11,13 @@ abstract class InventoryRepository {
   /// V3：新增位置，可选备注。
   Future<int> addLocation(String name, {String? remark});
 
+  /// V3.2：编辑物品名称（归一化+撞名校验，见 [InventoryDatabase.updateItem]）。
+  Future<void> updateItem(int id, String name);
+
+  /// V3.2：删除物品（物品行软删留底，其全部关联行物理清除），
+  /// 详见 [InventoryDatabase.deleteItem]。
+  Future<void> deleteItem(int id);
+
   /// V3：编辑位置名称/备注。
   Future<void> updateLocation(int id, {String? name, String? remark});
 

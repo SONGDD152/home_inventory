@@ -8,8 +8,8 @@ import 'package:home_inventory/data/inventory_repository.dart';
 import 'package:home_inventory/data/item.dart';
 import 'package:home_inventory/ui/item_list_page.dart';
 
-/// 内存假仓储：明细页只读，预置 ItemWithLocations 列表；
-/// 导出/恢复只记录调用，供断言。
+/// 内存假仓储：预置 ItemWithLocations 列表；导出/恢复只记录调用，供断言。
+/// V3.2 加编辑/删除：可变内存实现，记录调用供断言。
 class FakeListRepository implements InventoryRepository {
   FakeListRepository(this.rows);
 
@@ -18,11 +18,59 @@ class FakeListRepository implements InventoryRepository {
   Map<String, Object?>? lastRestored;
   int exportCalls = 0;
   int reloads = 0;
+  int updateItemCalls = 0;
+  int deleteItemCalls = 0;
+
+  /// 非空时 updateItem 抛 ArgumentError（模拟真实库撞名等校验拒绝）。
+  String? errorOnUpdate;
 
   @override
   Future<List<ItemWithLocations>> getAllItemsWithLocations() async {
     reloads++;
-    return List<ItemWithLocations>.unmodifiable(rows);
+    return List<ItemWithLocations>.unmodifiable(
+      rows.where((r) => !r.item.isDeleted).toList(),
+    );
+  }
+
+  @override
+  Future<void> updateItem(int id, String name) async {
+    updateItemCalls++;
+    final error = errorOnUpdate;
+    if (error != null) throw ArgumentError(error);
+    final idx = rows.indexWhere((r) => r.item.id == id);
+    if (idx < 0) return;
+    final old = rows[idx];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    rows[idx] = ItemWithLocations(
+      item: Item(
+        id: old.item.id,
+        name: name,
+        isDeleted: old.item.isDeleted,
+        createdAt: old.item.createdAt,
+        updatedAt: now,
+      ),
+      locations: old.locations,
+    );
+  }
+
+  @override
+  Future<void> deleteItem(int id) async {
+    deleteItemCalls++;
+    final idx = rows.indexWhere((r) => r.item.id == id);
+    if (idx < 0) return;
+    final old = rows[idx];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 与真实库对应：物品行软删，关联（locations 视图）随删除一并消失。
+    rows[idx] = ItemWithLocations(
+      item: Item(
+        id: old.item.id,
+        name: old.item.name,
+        isDeleted: true,
+        createdAt: old.item.createdAt,
+        updatedAt: now,
+      ),
+      locations: const <Location>[],
+    );
   }
 
   @override
@@ -94,10 +142,15 @@ class FakeBackupGateway implements BackupGateway {
   }
 }
 
-ItemWithLocations _row(String name, List<String> locationNames) {
+ItemWithLocations _row(String name, List<String> locationNames, {int? id}) {
   final now = DateTime.now().millisecondsSinceEpoch;
   return ItemWithLocations(
-    item: Item(name: name, createdAt: now, updatedAt: now),
+    item: Item(
+      id: id,
+      name: name,
+      createdAt: now,
+      updatedAt: now,
+    ),
     locations: <Location>[
       for (final loc in locationNames)
         Location(name: loc, createdAt: now, updatedAt: now),
@@ -283,5 +336,93 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(repo.restoreCalls, 0);
+  });
+
+  // ---------- V3.2 编辑/删除 ----------
+
+  testWidgets('编辑物品：改名成功，列表刷新显示新名', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('item_edit_梯子')));
+    await tester.pumpAndSettle();
+    expect(find.text('编辑物品'), findsOneWidget);
+
+    await tester.enterText(find.byKey(const Key('item_edit_name_field')), '折叠梯');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(repo.updateItemCalls, 1);
+    expect(find.text('折叠梯'), findsOneWidget);
+    expect(find.text('梯子'), findsNothing);
+  });
+
+  testWidgets('编辑物品：空名提示且不调仓储', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('item_edit_梯子')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('item_edit_name_field')), '   ');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(repo.updateItemCalls, 0);
+    expect(find.text('物品名称不能为空。'), findsOneWidget);
+    // 对话框随保存关闭（与位置页既有行为一致），SnackBar 兜底提示。
+    expect(find.text('编辑物品'), findsNothing);
+  });
+
+  testWidgets('编辑物品：撞名 ArgumentError 走 SnackBar 兜底，页面不崩', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    repo.errorOnUpdate = '已存在同名物品';
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('item_edit_梯子')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('item_edit_name_field')), '充电器');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('操作失败'), findsOneWidget);
+    expect(find.byKey(const Key('detail_search')), findsOneWidget,
+        reason: '页面仍在，未崩溃');
+  });
+
+  testWidgets('删除物品：二次确认文案含影响面，确认后列表刷新', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台', '车库'], id: 1),
+      _row('充电器', <String>['书房'], id: 2),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('item_delete_梯子')));
+    await tester.pumpAndSettle();
+    // 确认框如实展示影响面：2 处位置记录。
+    expect(find.textContaining('在 2 处的位置记录'), findsOneWidget);
+    expect(find.textContaining('不可恢复'), findsOneWidget);
+
+    // 先取消一回落空。
+    await tester.tap(find.byKey(const Key('item_delete_cancel')));
+    await tester.pumpAndSettle();
+    expect(repo.deleteItemCalls, 0);
+    expect(find.text('梯子'), findsOneWidget);
+
+    // 确认删除 → 调仓储 + 列表刷新不含该物品。
+    await tester.tap(find.byKey(const Key('item_delete_梯子')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('item_delete_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repo.deleteItemCalls, 1);
+    expect(find.text('梯子'), findsNothing);
+    expect(find.text('充电器'), findsOneWidget);
+    expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
   });
 }

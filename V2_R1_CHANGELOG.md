@@ -120,3 +120,4 @@
 
 - 本地测试数：本机 `flutter test --reporter expanded` 末行 `+72: All tests passed!`（66 → 72，净 +6：D1–D5 + N7）。本机口径，非 CI 证明。
 - 背书边界：新代码 = 新 commit = 新 run，不复用 `44697234264`/`44704176085`/`44710139353`。
+- 首次操作留痕：test-branch 提交测试

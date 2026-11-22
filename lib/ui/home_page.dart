@@ -257,20 +257,14 @@ class _HomePageState extends State<HomePage> {
       key: _scaffoldKey,
       appBar: AppBar(
         title: Text(widget.title),
+        // V3.3 导航收敛：入口统一为左上角三道杠；
+        // V1 遗留的右上角列表图标已撤下（明细页经抽屉进入）。
         leading: IconButton(
           key: const Key('open_drawer'),
           tooltip: '菜单',
           icon: const Icon(Icons.menu),
           onPressed: _openDrawer,
         ),
-        actions: <Widget>[
-          IconButton(
-            key: const Key('open_item_list'),
-            tooltip: '物品明细',
-            icon: const Icon(Icons.list),
-            onPressed: () => _push(ItemListPage(repository: widget.repository)),
-          ),
-        ],
       ),
       drawer: _buildDrawer(),
       body: SingleChildScrollView(
@@ -297,7 +291,8 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 4),
             // 技术审核条件①/文档第七章：隐私与准确率由输入法决定，弱提示常驻。
-            const Text('语音由当前输入法处理',
+            // V3.3：文案去技术味（口径不变：12px 灰色、常驻展示）。
+            const Text('语音由系统输入法处理',
                 key: Key('voice_hint'),
                 style: TextStyle(fontSize: 12, color: Colors.grey)),
             const SizedBox(height: 12),
@@ -351,12 +346,14 @@ class _HomePageState extends State<HomePage> {
                   title: Text(location.name),
                 ),
             ],
-            // 兜底文字入口：不依赖右上角图标/侧滑手势，抽屉异常时也点得到。
+            // V3.3 导航收敛：底部兜底「打开菜单」按钮已撤下（入口统一
+            // 左上角三道杠），原位置保留一行静态引导文字——纯提示、
+            // 无任何点击响应（Text 无手势），防「入口看不到」复发。
             const SizedBox(height: 16),
-            OutlinedButton(
-              key: const Key('home_menu_fallback'),
-              onPressed: _openDrawer,
-              child: const Text('物品明细 · 位置管理 · 备份恢复（打开菜单）'),
+            const Text(
+              '管理物品 / 位置 / 备份：点左上角 ☰ 菜单',
+              key: Key('home_menu_hint'),
+              style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
         ),

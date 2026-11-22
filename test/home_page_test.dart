@@ -272,14 +272,19 @@ void main() {
     await settle(tester);
   }
 
-  testWidgets('首页右上角入口 → 物品明细页（标题与搜索框就位）', (tester) async {
+  testWidgets('V3.3：右上角列表图标不复存在，明细页经抽屉可达', (tester) async {
     await pumpApp(tester);
     await settle(tester);
 
-    expect(find.byKey(const Key('open_item_list')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('open_item_list')));
-    await tester.pumpAndSettle();
+    // V3.3 决策点①：右上角 V1 遗留图标撤下，入口统一三道杠。
+    expect(find.byKey(const Key('open_item_list')), findsNothing);
+    expect(find.byKey(const Key('open_drawer')), findsOneWidget);
 
+    // 明细页仍经抽屉可达（链路回归）。
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_items')));
+    await tester.pumpAndSettle();
     expect(find.text('物品明细'), findsOneWidget);
     expect(find.byKey(const Key('detail_search')), findsOneWidget);
     expect(find.textContaining('还没有记录'), findsOneWidget,
@@ -536,10 +541,13 @@ void main() {
   });
 
   // 技术审核条件①：语音隐私弱提示常驻可见。
-  testWidgets('弱提示：语音由当前输入法处理 常驻显示', (tester) async {
+  // V3.3：文案去技术味（口径不变：12px 灰色、常驻展示）。
+  testWidgets('弱提示：语音由系统输入法处理 常驻显示', (tester) async {
     await pumpApp(tester);
     expect(find.byKey(const Key('voice_hint')), findsOneWidget);
-    expect(find.text('语音由当前输入法处理'), findsOneWidget);
+    expect(find.text('语音由系统输入法处理'), findsOneWidget);
+    expect(find.text('语音由当前输入法处理'), findsNothing,
+        reason: '旧文案不复存在');
   });
 
   // ---- V3.1 导航：抽屉菜单 + 兜底文字入口 ----
@@ -594,13 +602,35 @@ void main() {
     expect(find.byKey(const Key('export_backup')), findsOneWidget);
   });
 
-  testWidgets('兜底：首页底部可见文字入口打开抽屉', (tester) async {
-    await pumpApp(tester);
-    expect(find.byKey(const Key('home_menu_fallback')), findsOneWidget);
+  // ---- V3.3 导航收敛 ----
 
-    await tester.tap(find.byKey(const Key('home_menu_fallback')));
+  testWidgets('V3.3：底部兜底按钮不复存在，静态引导文字不可点', (tester) async {
+    await pumpApp(tester);
+
+    // 决策点②：兜底按钮撤下，原位置留静态引导文字。
+    expect(find.byKey(const Key('home_menu_fallback')), findsNothing,
+        reason: 'home_menu_fallback 整块移除');
+    final hint = tester.widget<Text>(
+      find.byKey(const Key('home_menu_hint')),
+    );
+    expect(hint.data, '管理物品 / 位置 / 备份：点左上角 ☰ 菜单');
+
+    // 静态文字无任何点击响应：tap 后抽屉不展开。
+    await tester.tap(find.byKey(const Key('home_menu_hint')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home_drawer')), findsNothing,
+        reason: '引导文字禁止添加点击响应（审核补充提醒）');
+  });
+
+  testWidgets('V3.3：首页左边缘右滑唤醒抽屉', (tester) async {
+    await pumpApp(tester);
+
+    // Scaffold drawer 原生手势：从屏幕左缘水平拖入。
+    await tester.dragFrom(const Offset(1, 300), const Offset(400, 0));
+    await tester.pumpAndSettle();
+
     expect(find.byKey(const Key('home_drawer')), findsOneWidget);
+    expect(find.text('语音记账'), findsOneWidget);
     expect(find.text('物品明细'), findsOneWidget);
   });
 }

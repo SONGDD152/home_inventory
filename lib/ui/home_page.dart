@@ -32,6 +32,20 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+/// V3.5 五模块底栏导航骨架：一级模块枚举。
+/// 仅仓储（storage）有真实功能；其余四个模块为产品规划中的占位，
+/// 数据层/页面/业务逻辑待后续迭代逐个落地（详见 V35 方案简报事实①）。
+enum _HomeModule {
+  storage('仓储'),
+  schedule('日程'),
+  knowledge('知识库'),
+  dining('餐饮'),
+  wardrobe('衣橱');
+
+  const _HomeModule(this.label);
+  final String label;
+}
+
 class _HomePageState extends State<HomePage> {
   final TextEditingController _phraseController = TextEditingController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
@@ -39,6 +53,9 @@ class _HomePageState extends State<HomePage> {
   String? _notice;
   ItemWithLocations? _result;
   bool _busy = false;
+
+  // V3.5 底栏当前模块（0=仓储，默认选中——唯一可用模块）。
+  int _moduleIndex = 0;
 
   // V3 交互说明文案（替换 V1 冻结文案，逐字符合文档六）。
   // V3.4：_emptyLocation/_locationAdded 随首页手动添加入口撤下移除
@@ -158,9 +175,57 @@ class _HomePageState extends State<HomePage> {
 
   void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
 
+  /// 子页全屏路由（V3.5 修订单：全屏切换 + 返回栈正确——
+  /// MaterialPageRoute 返回键回首页，底栏高亮不变）。
   void _push(Widget page) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => page),
+    );
+  }
+
+  /// V3.5：底栏切换一级模块。抽屉若已打开，先关闭再切换，
+  /// 避免抽屉内容残影（审核意见 7）。
+  void _selectModule(int index) {
+    final scaffold = _scaffoldKey.currentState;
+    if (scaffold?.isDrawerOpen ?? false) {
+      Navigator.of(context).pop();
+    }
+    setState(() => _moduleIndex = index);
+  }
+
+  /// 底栏一级模块图标（V3.5 方案简报）。
+  IconData _moduleIcon(_HomeModule module) {
+    switch (module) {
+      case _HomeModule.storage:
+        return Icons.inventory_2;
+      case _HomeModule.schedule:
+        return Icons.event_note;
+      case _HomeModule.knowledge:
+        return Icons.menu_book;
+      case _HomeModule.dining:
+        return Icons.restaurant;
+      case _HomeModule.wardrobe:
+        return Icons.checkroom;
+    }
+  }
+
+  /// 占位模块子项（决策点①A：渲染「建设中」ListTile，
+  /// 决策点③：点击仅提示，不进空白假页）。
+  Widget _buildingTile(_HomeModule module) {
+    return ListTile(
+      key: Key('drawer_building_${module.name}'),
+      leading: const Icon(Icons.construction),
+      title: Text('${module.label}（建设中）'),
+      subtitle: const Text('该模块规划中，敬请期待'),
+      onTap: () {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            key: Key('building_snackbar_${module.name}'),
+            content: Text('${module.label}模块建设中，敬请期待'),
+          ),
+        );
+      },
     );
   }
 
@@ -175,48 +240,71 @@ class _HomePageState extends State<HomePage> {
               decoration: BoxDecoration(
                 color: Theme.of(context).colorScheme.primaryContainer,
               ),
-              child: const Text(
-                '家庭仓储布局',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  const Text(
+                    '家庭仓储布局',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  // V3.5：副标题随当前模块显示（审核意见 7）。
+                  Text(
+                    '${_HomeModule.values[_moduleIndex].label}模块',
+                    key: Key('drawer_module_subtitle'),
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ],
               ),
             ),
-            ListTile(
-              key: const Key('drawer_voice'),
-              leading: const Icon(Icons.mic_none),
-              title: const Text('语音记账'),
-              subtitle: const Text('说一句记下 / 查（当前页）'),
-              onTap: () => Navigator.of(context).pop(),
-            ),
-            ListTile(
-              key: const Key('drawer_locations'),
-              leading: const Icon(Icons.place_outlined),
-              title: const Text('位置管理'),
-              subtitle: const Text('位置列表、备注、增删改'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _push(LocationListPage(repository: widget.repository));
-              },
-            ),
-            ListTile(
-              key: const Key('drawer_items'),
-              leading: const Icon(Icons.list_alt),
-              title: const Text('物品明细'),
-              subtitle: const Text('全部物品与存放位置，可搜索'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _push(ItemListPage(repository: widget.repository));
-              },
-            ),
-            ListTile(
-              key: const Key('drawer_backup'),
-              leading: const Icon(Icons.backup_outlined),
-              title: const Text('数据备份与恢复'),
-              subtitle: const Text('导出 JSON / 从文件恢复'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _push(BackupPage(repository: widget.repository));
-              },
-            ),
+            // V3.5：抽屉按 currentModule 渲染子菜单——仓储为真实四项，
+            // 其余模块为「建设中」占位（不做假功能、不做弹窗式子菜单）。
+            if (_moduleIndex == 0) ...<Widget>[
+              ListTile(
+                key: const Key('drawer_voice'),
+                leading: const Icon(Icons.mic_none),
+                title: const Text('语音记账'),
+                subtitle: const Text('说一句记下 / 查（当前页）'),
+                onTap: () => Navigator.of(context).pop(),
+              ),
+              ListTile(
+                key: const Key('drawer_locations'),
+                leading: const Icon(Icons.place_outlined),
+                title: const Text('位置管理'),
+                subtitle: const Text('位置列表、备注、增删改'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _push(LocationListPage(repository: widget.repository));
+                },
+              ),
+              ListTile(
+                key: const Key('drawer_items'),
+                leading: const Icon(Icons.list_alt),
+                title: const Text('物品明细'),
+                subtitle: const Text('全部物品与存放位置，可搜索'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _push(ItemListPage(repository: widget.repository));
+                },
+              ),
+              ListTile(
+                key: const Key('drawer_backup'),
+                leading: const Icon(Icons.backup_outlined),
+                title: const Text('数据备份与恢复'),
+                subtitle: const Text('导出 JSON / 从文件恢复'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _push(BackupPage(repository: widget.repository));
+                },
+              ),
+            ] else ...<Widget>[
+              for (final module in _HomeModule.values.skip(1))
+                _buildingTile(module),
+            ],
           ],
         ),
       ),
@@ -248,6 +336,22 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       drawer: _buildDrawer(),
+      // V3.5 五模块底栏（决策点②：浅色底深色图标，与内容区一致、
+      // 与深色 AppBar 上下呼应；fixed 类型为 >3 项必需，避免
+      // shifting 折叠文字）。仓储默认选中（唯一可用模块）。
+      bottomNavigationBar: BottomNavigationBar(
+        key: const Key('home_bottom_nav'),
+        currentIndex: _moduleIndex,
+        type: BottomNavigationBarType.fixed,
+        onTap: _selectModule,
+        items: <BottomNavigationBarItem>[
+          for (final module in _HomeModule.values)
+            BottomNavigationBarItem(
+              icon: Icon(_moduleIcon(module)),
+              label: module.label,
+            ),
+        ],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(

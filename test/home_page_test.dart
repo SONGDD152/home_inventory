@@ -724,4 +724,118 @@ void main() {
     expect(find.byKey(const Key('home_drawer')), findsOneWidget,
         reason: 'AppBar 位于 Scaffold 顶部，键盘弹起不裁切、热区可用');
   });
+
+  // ---------- V3.5 五模块底栏导航骨架 ----------
+
+  testWidgets('V3.5：底栏渲染 5 个一级模块按钮', (tester) async {
+    await pumpApp(tester);
+
+    expect(find.byKey(const Key('home_bottom_nav')), findsOneWidget);
+    expect(find.text('仓储'), findsOneWidget);
+    expect(find.text('日程'), findsOneWidget);
+    expect(find.text('知识库'), findsOneWidget);
+    expect(find.text('餐饮'), findsOneWidget);
+    expect(find.text('衣橱'), findsOneWidget);
+  });
+
+  testWidgets('V3.5：仓储默认选中，抽屉显示真实四项子菜单', (tester) async {
+    await pumpApp(tester);
+
+    final nav = tester.widget<BottomNavigationBar>(
+      find.byKey(const Key('home_bottom_nav')),
+    );
+    expect(nav.currentIndex, 0, reason: '仓储默认选中（唯一可用模块）');
+
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('仓储模块'), findsOneWidget, reason: '副标题随模块显示');
+    expect(find.byKey(const Key('drawer_voice')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_locations')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_items')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_backup')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_schedule')), findsNothing,
+        reason: '仓储模块不渲染占位项');
+  });
+
+  testWidgets('V3.5：切至日程 → 抽屉子菜单切换为建设中占位（决策点①A）',
+      (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.text('日程'));
+    await tester.pumpAndSettle();
+
+    final nav = tester.widget<BottomNavigationBar>(
+      find.byKey(const Key('home_bottom_nav')),
+    );
+    expect(nav.currentIndex, 1, reason: '底栏高亮随点击切换');
+
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('日程模块'), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_schedule')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_knowledge')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_dining')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_wardrobe')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_locations')), findsNothing,
+        reason: '非仓储模块不渲染仓储四项');
+
+    // 决策点③：占位点击仅提示，不进空白页。
+    await tester.tap(find.byKey(const Key('drawer_building_schedule')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('building_snackbar_schedule')), findsOneWidget,
+        reason: '点击占位项提示建设中');
+    expect(find.byKey(const Key('detail_search')), findsNothing,
+        reason: '不进入任何子页');
+  });
+
+  testWidgets('V3.5：切回仓储 → 抽屉恢复真实四项', (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.text('衣橱'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('仓储'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('仓储模块'), findsOneWidget);
+    expect(find.byKey(const Key('drawer_items')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_wardrobe')), findsNothing);
+  });
+
+  testWidgets('V3.5：仓储子菜单 → 物品明细全屏页，返回后底栏高亮不变',
+      (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_items')));
+    await tester.pumpAndSettle();
+
+    // 全屏子页（MaterialPageRoute），底栏不在该路由上。
+    expect(find.text('物品明细'), findsOneWidget);
+    expect(find.byKey(const Key('home_bottom_nav')), findsNothing,
+        reason: '子页全屏展示，不叠底栏');
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('phrase_field')), findsOneWidget,
+        reason: '返回栈正确：子页返回回首页');
+    final nav = tester.widget<BottomNavigationBar>(
+      find.byKey(const Key('home_bottom_nav')),
+    );
+    expect(nav.currentIndex, 0, reason: '返回后底栏高亮保持仓储');
+  });
+
+  testWidgets('V3.5：语音主入口与底栏并存不冲突（首屏不空回归）',
+      (tester) async {
+    await pumpApp(tester);
+
+    expect(find.byKey(const Key('phrase_field')), findsOneWidget);
+    expect(find.byKey(const Key('sample_hint')), findsOneWidget);
+    expect(find.byKey(const Key('home_bottom_nav')), findsOneWidget);
+  });
 }

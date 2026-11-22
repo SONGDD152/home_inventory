@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/phrase_parser.dart';
+import 'backup_page.dart';
 import 'item_list_page.dart';
+import 'location_list_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
@@ -33,6 +35,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final TextEditingController _phraseController = TextEditingController();
   final TextEditingController _newLocationController = TextEditingController();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   String? _notice;
   ItemWithLocations? _result;
@@ -46,6 +49,8 @@ class _HomePageState extends State<HomePage> {
   static String _notFound(String item) => '暂未记录该物品：$item。';
   static String _recorded(String item, String location) =>
       '已记下：$item → $location';
+  static String _moved(String item, String location, String previous) =>
+      '已更新：$item → $location（原位置：$previous）';
   static String _alreadyRecorded(String item, String location) =>
       '「$item」已经在「$location」了。';
   static String _locationAdded(String location) => '已添加位置：「$location」。';
@@ -98,10 +103,11 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  /// 挪位语义（V3.2）：同一物品再记新位置 = 移动，旧位置软删。
   Future<void> _handleUpsert(String item, String location, String rawText) async {
     final locationId = await widget.repository.addLocation(location);
     if (!mounted) return;
-    final result = await widget.repository.upsertItemLocation(
+    final result = await widget.repository.moveItem(
       item,
       locationId,
       rawText: rawText,
@@ -109,11 +115,17 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     final nameInDb = await _locationName(locationId);
     if (!mounted) return;
+    String notice;
+    if (result.previousLocations.isNotEmpty) {
+      notice = _moved(item, nameInDb, result.previousLocations.join('、'));
+    } else if (result.created) {
+      notice = _recorded(item, nameInDb);
+    } else {
+      notice = _alreadyRecorded(item, nameInDb);
+    }
     setState(() {
       _busy = false;
-      _notice = result.created
-          ? _recorded(item, nameInDb)
-          : _alreadyRecorded(item, nameInDb);
+      _notice = notice;
       _result = null;
     });
   }
@@ -170,24 +182,97 @@ class _HomePageState extends State<HomePage> {
     return '「${result.item.name}」在：$names（共${result.locations.length}处）。';
   }
 
+  // ---------- 导航（V3.1 导航优化：抽屉为主动线，图标/文字为兜底） ----------
+
+  void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
+
+  void _push(Widget page) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => page),
+    );
+  }
+
+  Widget _buildDrawer() {
+    return Drawer(
+      key: const Key('home_drawer'),
+      child: SafeArea(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: <Widget>[
+            DrawerHeader(
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primaryContainer,
+              ),
+              child: const Text(
+                '家庭仓储布局',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+            ),
+            ListTile(
+              key: const Key('drawer_voice'),
+              leading: const Icon(Icons.mic_none),
+              title: const Text('语音记账'),
+              subtitle: const Text('说一句记下 / 查（当前页）'),
+              onTap: () => Navigator.of(context).pop(),
+            ),
+            ListTile(
+              key: const Key('drawer_locations'),
+              leading: const Icon(Icons.place_outlined),
+              title: const Text('位置管理'),
+              subtitle: const Text('位置列表、备注、增删改'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _push(LocationListPage(repository: widget.repository));
+              },
+            ),
+            ListTile(
+              key: const Key('drawer_items'),
+              leading: const Icon(Icons.list_alt),
+              title: const Text('物品明细'),
+              subtitle: const Text('全部物品与存放位置，可搜索'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _push(ItemListPage(repository: widget.repository));
+              },
+            ),
+            ListTile(
+              key: const Key('drawer_backup'),
+              leading: const Icon(Icons.backup_outlined),
+              title: const Text('数据备份与恢复'),
+              subtitle: const Text('导出 JSON / 从文件恢复'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _push(BackupPage(repository: widget.repository));
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
       appBar: AppBar(
         title: Text(widget.title),
+        leading: IconButton(
+          key: const Key('open_drawer'),
+          tooltip: '菜单',
+          icon: const Icon(Icons.menu),
+          onPressed: _openDrawer,
+        ),
         actions: <Widget>[
           IconButton(
             key: const Key('open_item_list'),
             tooltip: '物品明细',
             icon: const Icon(Icons.list),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => ItemListPage(repository: widget.repository),
-              ),
-            ),
+            onPressed: () => _push(ItemListPage(repository: widget.repository)),
           ),
         ],
       ),
+      drawer: _buildDrawer(),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -266,6 +351,13 @@ class _HomePageState extends State<HomePage> {
                   title: Text(location.name),
                 ),
             ],
+            // 兜底文字入口：不依赖右上角图标/侧滑手势，抽屉异常时也点得到。
+            const SizedBox(height: 16),
+            OutlinedButton(
+              key: const Key('home_menu_fallback'),
+              onPressed: _openDrawer,
+              child: const Text('物品明细 · 位置管理 · 备份恢复（打开菜单）'),
+            ),
           ],
         ),
       ),

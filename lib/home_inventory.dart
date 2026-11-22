@@ -4,5 +4,8 @@ export 'data/inventory_repository.dart';
 export 'data/item.dart';
 export 'data/normalize.dart';
 export 'data/phrase_parser.dart';
+export 'ui/backup_actions.dart';
+export 'ui/backup_page.dart';
 export 'ui/home_page.dart';
 export 'ui/item_list_page.dart';
+export 'ui/location_list_page.dart';

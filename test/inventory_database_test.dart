@@ -817,4 +817,74 @@ void main() {
     await target.restoreBackup(backup);
     expect((await target.getAllItemsWithLocations()).single.item.name, '梯子');
   });
+
+  // ---- 挪位语义（V3.2） ----
+
+  test('moveItem：旧位置关联软删、只留新位置、返回原位置名', () async {
+    final balconyId = await db.addLocation('阳台');
+    final garageId = await db.addLocation('车库');
+    final livingId = await db.addLocation('客厅');
+    await db.upsertItemLocation('梯子', balconyId, rawText: '梯子放阳台');
+
+    final result = await db.moveItem('梯子', livingId, rawText: '梯子挪到客厅');
+
+    expect(result.created, isTrue);
+    expect(result.previousLocations, <String>['阳台'], reason: '挪位前原位置');
+    // 查询只剩新位置。
+    final found = await db.findByName('梯子');
+    expect(found!.locations.map((l) => l.name), <String>['客厅']);
+    // 旧关联软删留底（导出仍能看见该行）。
+    final backup = await db.exportBackup();
+    final assoc = (backup['item_locations'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['location_id'] == balconyId)
+        .toList();
+    expect(assoc, hasLength(1));
+    expect(assoc.single['is_deleted'], 1);
+    // 车库从未关联过梯子。
+    expect(
+      (backup['item_locations'] as List<Object?>)
+          .cast<Map<String, Object?>>()
+          .where((m) => m['location_id'] == garageId),
+      isEmpty,
+    );
+  });
+
+  test('moveItem：多个旧位置全部替换且按记录顺序返回', () async {
+    final a = await db.addLocation('阳台');
+    final b = await db.addLocation('车库');
+    final c = await db.addLocation('客厅');
+    await db.upsertItemLocation('梯子', a);
+    await db.upsertItemLocation('梯子', b);
+
+    final result = await db.moveItem('梯子', c);
+    expect(result.previousLocations, <String>['阳台', '车库']);
+    expect((await db.findByName('梯子'))!.locations.single.name, '客厅');
+  });
+
+  test('moveItem：目标位已是当前位置 → created=false 且原位置不含目标', () async {
+    final balconyId = await db.addLocation('阳台');
+    final livingId = await db.addLocation('客厅');
+    await db.upsertItemLocation('梯子', balconyId);
+    await db.moveItem('梯子', livingId);
+
+    final again = await db.moveItem('梯子', livingId);
+    expect(again.created, isFalse);
+    expect(again.previousLocations, isEmpty, reason: '目标位本身不算原位置');
+    expect((await db.findByName('梯子'))!.locations.single.name, '客厅');
+  });
+
+  test('moveItem：挪到已删除位置 → ArgumentError', () async {
+    final balconyId = await db.addLocation('阳台');
+    final goneId = await db.addLocation('车库');
+    await db.upsertItemLocation('梯子', balconyId);
+    await db.deleteLocation(goneId);
+
+    await expectLater(
+      db.moveItem('梯子', goneId),
+      throwsArgumentError,
+    );
+    // 原数据不受影响。
+    expect((await db.findByName('梯子'))!.locations.single.name, '阳台');
+  });
 }

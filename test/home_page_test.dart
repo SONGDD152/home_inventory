@@ -93,6 +93,50 @@ class InMemoryRepository implements InventoryRepository {
   }
 
   @override
+  Future<MoveResult> moveItem(String itemName, int locationId,
+      {String? rawText}) async {
+    final key = normalizeName(itemName);
+    var item = _items.where((i) => i.name == key).toList();
+    final int itemId;
+    if (item.isEmpty) {
+      itemId = ++_itemId;
+      _items.add(Item(id: itemId, name: key, createdAt: 1, updatedAt: 1));
+    } else {
+      itemId = item.first.id!;
+    }
+    // 挪位前其他位置名（软删语义在真实库覆盖；内存仓储同步移除）。
+    final previous = _links
+        .where((l) => l.itemId == itemId && l.locationId != locationId)
+        .map((l) => _locations
+            .where((loc) => loc.id == l.locationId && !loc.isDeleted)
+            .map((loc) => loc.name)
+            .firstOrNull)
+        .whereType<String>()
+        .toList();
+    _links.removeWhere(
+        (l) => l.itemId == itemId && l.locationId != locationId);
+    final targetExists =
+        _links.any((l) => l.itemId == itemId && l.locationId == locationId);
+    if (!targetExists) {
+      _links.add(
+        ItemLocation(
+          id: _links.length + 1,
+          itemId: itemId,
+          locationId: locationId,
+          createdAt: 1,
+          updatedAt: 1,
+        ),
+      );
+    }
+    return MoveResult(
+      itemId: itemId,
+      locationId: locationId,
+      created: !targetExists,
+      previousLocations: previous,
+    );
+  }
+
+  @override
   Future<ItemWithLocations?> findByName(String name) async {
     final key = normalizeName(name);
     final item = _items.where((i) => i.name == key).toList();
@@ -272,15 +316,39 @@ void main() {
     expect(find.text(notUnderstood), findsNothing);
   });
 
-  testWidgets('同名多位置全量列出', (tester) async {
+  testWidgets('挪位：同物品再记新位置替换旧位置（V3.2 语义）', (tester) async {
     await pumpApp(tester);
     await submit(tester, '梯子放阳台');
+
     await submit(tester, '梯子放储物间');
+    expect(find.textContaining('已更新：梯子 → 储物间（原位置：阳台）'),
+        findsOneWidget,
+        reason: 'V3.2 起再记即挪位，旧位置软删');
 
     await submit(tester, '梯子在哪');
-    expect(find.text('「梯子」在：阳台、储物间（共2处）。'), findsOneWidget);
-    expect(find.byKey(const Key('result_location_1')), findsOneWidget);
-    expect(find.byKey(const Key('result_location_2')), findsOneWidget);
+    expect(find.text('「梯子」在：储物间（共1处）。'), findsOneWidget);
+    expect(find.byKey(const Key('result_location_2')), findsOneWidget,
+        reason: '储物间是第 2 个创建的位置（id=2）');
+    expect(find.text('阳台'), findsNothing, reason: '旧位置不再列出');
+  });
+
+  testWidgets('挪位：动词「挪到」也走替换语义（梯子挪到客厅）', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子放阳台');
+
+    await submit(tester, '梯子挪到客厅');
+    expect(find.textContaining('已更新：梯子 → 客厅（原位置：阳台）'),
+        findsOneWidget);
+
+    await submit(tester, '梯子在哪');
+    expect(find.text('「梯子」在：客厅（共1处）。'), findsOneWidget);
+  });
+
+  testWidgets('挪位：重复记同一位置不提示原位置（幂等）', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子放阳台');
+    await submit(tester, '梯子放阳台');
+    expect(find.text('「梯子」已经在「阳台」了。'), findsOneWidget);
   });
 
   testWidgets('精确名称不通配：查「梯」找不到「梯子」', (tester) async {
@@ -442,5 +510,67 @@ void main() {
     await pumpApp(tester);
     expect(find.byKey(const Key('voice_hint')), findsOneWidget);
     expect(find.text('语音由当前输入法处理'), findsOneWidget);
+  });
+
+  // ---- V3.1 导航：抽屉菜单 + 兜底文字入口 ----
+
+  testWidgets('抽屉：汉堡按钮打开，四项菜单齐全', (tester) async {
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget);
+    expect(find.text('语音记账'), findsOneWidget);
+    expect(find.text('位置管理'), findsOneWidget);
+    expect(find.text('物品明细'), findsOneWidget);
+    expect(find.text('数据备份与恢复'), findsOneWidget);
+  });
+
+  testWidgets('抽屉：点「物品明细」进入明细页（底部操作区可见）', (tester) async {
+    await pumpApp(tester);
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_items')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('物品明细'), findsOneWidget);
+    expect(find.byKey(const Key('detail_search')), findsOneWidget);
+    // 底部操作区两个按钮都在明细页内。
+    expect(find.byKey(const Key('export_backup')), findsOneWidget);
+    expect(find.byKey(const Key('restore_backup')), findsOneWidget);
+  });
+
+  testWidgets('抽屉：点「位置管理」进入位置页', (tester) async {
+    await pumpApp(tester);
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_locations')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('add_location_fab')), findsOneWidget);
+    expect(find.textContaining('还没有位置'), findsOneWidget,
+        reason: '空库显示空态引导');
+  });
+
+  testWidgets('抽屉：点「数据备份与恢复」进入备份页', (tester) async {
+    await pumpApp(tester);
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_backup')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('数据备份与恢复'), findsOneWidget);
+    expect(find.byKey(const Key('export_backup')), findsOneWidget);
+  });
+
+  testWidgets('兜底：首页底部可见文字入口打开抽屉', (tester) async {
+    await pumpApp(tester);
+    expect(find.byKey(const Key('home_menu_fallback')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('home_menu_fallback')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget);
+    expect(find.text('物品明细'), findsOneWidget);
   });
 }

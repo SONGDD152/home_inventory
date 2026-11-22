@@ -21,6 +21,11 @@ abstract class InventoryRepository {
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText});
 
+  /// 挪位语义（V3.2，UI 主链路）：把物品记到新位置并软删其他位置关联，
+  /// 详见 [InventoryDatabase.moveItem]。
+  Future<MoveResult> moveItem(String itemName, int locationId,
+      {String? rawText});
+
   Future<ItemWithLocations?> findByName(String name);
 
   /// 物品明细页：全部未删除物品及各自全部未删除位置，按物品名排序。

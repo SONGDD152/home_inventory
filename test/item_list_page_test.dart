@@ -133,6 +133,22 @@ void main() {
     expect(find.byKey(const Key('detail_list')), findsOneWidget);
   });
 
+  testWidgets('备份入口在底部固定操作区，不在 AppBar 右上角', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    expect(find.byKey(const Key('export_backup')), findsOneWidget);
+    expect(find.byKey(const Key('restore_backup')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.byKey(const Key('export_backup')),
+      ),
+      findsNothing,
+      reason: '入口不再挂右上角图标，避免边缘/安全区吞掉',
+    );
+  });
+
   testWidgets('搜索：按物品名片段过滤', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台']),
@@ -220,7 +236,8 @@ void main() {
     await tester.tap(find.byKey(const Key('restore_backup')));
     await tester.pumpAndSettle();
     // 确认对话框出现，先取消一回落空。
-    expect(find.text('恢复备份'), findsOneWidget);
+    // （底部按钮与对话框标题同为「恢复备份」，改用对话框正文定位。）
+    expect(find.textContaining('将从备份文件覆盖当前全部数据'), findsOneWidget);
     await tester.tap(find.byKey(const Key('restore_cancel')));
     await tester.pumpAndSettle();
     expect(repo.restoreCalls, 0);

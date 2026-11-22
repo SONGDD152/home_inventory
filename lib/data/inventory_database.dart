@@ -473,6 +473,107 @@ class InventoryDatabase implements InventoryRepository {
     });
   }
 
+  /// 挪位语义（V3.2，UI 主链路）：把物品记到 [locationId]，此前所在的其他
+  /// 位置关联**软删**（历史留底可审计），只保留目标位置。
+  ///
+  /// 返回 [MoveResult]：previousLocations 为挪位前其他位置名（不含目标）。
+  /// 物品本身与位置本身只复用既有行，不做删除。
+  @override
+  Future<MoveResult> moveItem(String itemName, int locationId,
+      {String? rawText}) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    final db = await open();
+
+    final locationRows = await db.query(
+      tableLocations,
+      columns: <String>[columnId],
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[locationId],
+      limit: 1,
+    );
+    if (locationRows.isEmpty) {
+      throw ArgumentError.value(locationId, 'locationId', '位置不存在或已删除');
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<MoveResult>((txn) async {
+      final itemId = await _findOrCreateItem(txn, valid, now);
+
+      // 挪位前该物品的全部活动关联（含目标位）。
+      final currentLinks = await txn.query(
+        tableItemLocations,
+        columns: <String>[columnId, columnLocationId],
+        where: '$columnItemId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[itemId],
+      );
+
+      bool targetLinked = false;
+      final staleLinkIds = <int>[];
+      final staleLocationIds = <int>[];
+      for (final row in currentLinks) {
+        final linkLocationId = row[columnLocationId] as int;
+        if (linkLocationId == locationId) {
+          targetLinked = true;
+        } else {
+          staleLinkIds.add(row[columnId] as int);
+          staleLocationIds.add(linkLocationId);
+        }
+      }
+
+      // 其他位置名（挪位前），按关联 id 顺序（即记录顺序）。
+      final previousLocations = <String>[];
+      for (final staleLocationId in staleLocationIds) {
+        final locRows = await txn.query(
+          tableLocations,
+          columns: <String>[columnName],
+          where: '$columnId = ? AND $columnIsDeleted = 0',
+          whereArgs: <Object?>[staleLocationId],
+          limit: 1,
+        );
+        if (locRows.isNotEmpty) {
+          previousLocations.add(locRows.first[columnName] as String);
+        }
+      }
+
+      // 软删旧关联（留底）。
+      for (final linkId in staleLinkIds) {
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+          where: '$columnId = ?',
+          whereArgs: <Object?>[linkId],
+        );
+      }
+
+      if (targetLinked) {
+        // 物品已在目标位置：刷新时间戳即可。
+        final targetLinkRow = currentLinks.firstWhere(
+          (row) => row[columnLocationId] as int == locationId,
+        );
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{columnUpdatedAt: now},
+          where: '$columnId = ?',
+          whereArgs: <Object?>[targetLinkRow[columnId] as int],
+        );
+        return MoveResult(
+          itemId: itemId,
+          locationId: locationId,
+          created: false,
+          previousLocations: previousLocations,
+        );
+      }
+
+      await _link(txn, itemId, locationId, now, rawText: rawText);
+      return MoveResult(
+        itemId: itemId,
+        locationId: locationId,
+        created: true,
+        previousLocations: previousLocations,
+      );
+    });
+  }
+
   /// 按精确名称查询，返回该物品及其全部未删除位置（同名多位置全量）。
   /// 名称走共用 [normalizeName] 归一化（与存库同源）；空名或非精确（如「梯」查「梯子」）都查不到。
   @override

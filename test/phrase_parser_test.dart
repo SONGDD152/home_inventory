@@ -307,6 +307,23 @@ void main() {
       expect((parsePhrase('查表在哪') as ParseQuery).item, '查表');
     });
 
+    test('V3.2 挪位动词：「挪到/挪在/挪」作为放置动词', () {
+      final to = parsePhrase('梯子挪到客厅');
+      expect(to, isA<ParseUpsert>());
+      expect((to as ParseUpsert).item, '梯子');
+      expect(to.location, '客厅');
+
+      final at = parsePhrase('梯子挪在客厅');
+      expect(at, isA<ParseUpsert>());
+      expect((at as ParseUpsert).item, '梯子');
+      expect(at.location, '客厅');
+
+      final bare = parsePhrase('梯子挪客厅');
+      expect(bare, isA<ParseUpsert>());
+      expect((bare as ParseUpsert).item, '梯子');
+      expect(bare.location, '客厅');
+    });
+
     test('裸查单独开头仍不作为查询前缀：查梯子 -> 未识别（规格不变）', () {
       expect(parsePhrase('查梯子'), isA<ParseUnrecognized>());
     });

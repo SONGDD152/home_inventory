@@ -1,16 +1,16 @@
 // ignore_for_file: deprecated_member_use
 // Flutter 3.50 将 material.dart 标记为 deprecated，Material 组件本版本仍可用。
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/normalize.dart';
+import 'backup_actions.dart';
 
 /// 物品明细页：只读浏览全部物品及其位置，支持按物品名/位置名过滤；
-/// AppBar 内提供备份导出（系统分享）与恢复（文件选择器 + 确认框）。
+/// 备份导出/恢复入口在**底部固定操作区**（不再放右上角图标，
+/// 避免边缘/安全区吞掉入口），完整说明见独立「数据备份与恢复」页。
 class ItemListPage extends StatefulWidget {
   const ItemListPage({
     super.key,
@@ -33,11 +33,8 @@ class ItemListPage extends StatefulWidget {
 class _ItemListPageState extends State<ItemListPage> {
   final TextEditingController _searchController = TextEditingController();
 
-  BackupGateway get _gateway => widget.gateway ?? SystemBackupGateway();
-
   List<ItemWithLocations>? _rows;
   String? _error;
-  bool _busy = false;
 
   @override
   void initState() {
@@ -81,110 +78,22 @@ class _ItemListPageState extends State<ItemListPage> {
         .toList(growable: false);
   }
 
-  // ---------- 备份导出 ----------
-
-  Future<void> _exportBackup() async {
-    setState(() => _busy = true);
-    try {
-      final backup = await widget.repository.exportBackup();
-      final path = await _gateway
-          .writeBackupFile(const JsonEncoder.withIndent('  ').convert(backup));
-      await _gateway.shareFile(path);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          // 路径分隔符双兼容（Windows \ 与 POSIX /），只取文件名展示。
-          content: Text('备份已生成：${path.split('/').last.split('\\').last}'),
-        ),
-      );
-    } on Exception catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('导出失败：$e')),
-      );
-    }
-    if (!mounted) return;
-    setState(() => _busy = false);
-  }
-
-  // ---------- 备份恢复 ----------
-
-  Future<void> _startRestore() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('恢复备份'),
-        content: const Text(
-          '将从备份文件覆盖当前全部数据。\n\n'
-          '建议先点「导出备份」留存当前数据，'
-          '再选择要恢复的 .json 文件。',
-        ),
-        actions: <Widget>[
-          TextButton(
-            key: const Key('restore_cancel'),
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            key: const Key('restore_confirm'),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('选择文件并恢复'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-
-    final path = await _gateway.pickBackupFile();
-    if (path == null || !mounted) return;
-
-    setState(() => _busy = true);
-    try {
-      final raw = await _gateway.readBackupFile(path);
-      final data = jsonDecode(raw) as Map<String, dynamic>;
-      await widget.repository.restoreBackup(data);
-      await _reload();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('恢复完成。')),
-      );
-    } on FormatException catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('恢复失败：不是有效的备份 JSON（${e.message}）')),
-      );
-    } on Exception catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('恢复失败：$e')),
-      );
-    }
-    if (!mounted) return;
-    setState(() => _busy = false);
-  }
-
-  // ---------- 界面 ----------
-
   @override
   Widget build(BuildContext context) {
     final rows = _filtered();
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: <Widget>[
-          IconButton(
-            key: const Key('export_backup'),
-            onPressed: _busy ? null : _exportBackup,
-            tooltip: '导出备份',
-            icon: const Icon(Icons.ios_share),
+      appBar: AppBar(title: Text(widget.title)),
+      // 底部固定操作区：导出/恢复不再依赖右上角图标，SafeArea 兜住手势区。
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: BackupActions(
+            repository: widget.repository,
+            gateway: widget.gateway,
+            onRestored: _reload,
+            compact: true,
           ),
-          IconButton(
-            key: const Key('restore_backup'),
-            onPressed: _busy ? null : _startRestore,
-            tooltip: '恢复备份',
-            icon: const Icon(Icons.restore),
-          ),
-        ],
+        ),
       ),
       body: Column(
         children: <Widget>[

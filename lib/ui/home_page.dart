@@ -34,7 +34,6 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final TextEditingController _phraseController = TextEditingController();
-  final TextEditingController _newLocationController = TextEditingController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   String? _notice;
@@ -42,9 +41,10 @@ class _HomePageState extends State<HomePage> {
   bool _busy = false;
 
   // V3 交互说明文案（替换 V1 冻结文案，逐字符合文档六）。
+  // V3.4：_emptyLocation/_locationAdded 随首页手动添加入口撤下移除
+  //（空名校验与「已添加」反馈由位置管理页承担）。
   static const String _notUnderstood =
       '没听懂，试试"XX放阳台"或"XX在哪"';
-  static const String _emptyLocation = '位置名称不能为空。';
 
   static String _notFound(String item) => '暂未记录该物品：$item。';
   static String _recorded(String item, String location) =>
@@ -53,12 +53,10 @@ class _HomePageState extends State<HomePage> {
       '已更新：$item → $location（原位置：$previous）';
   static String _alreadyRecorded(String item, String location) =>
       '「$item」已经在「$location」了。';
-  static String _locationAdded(String location) => '已添加位置：「$location」。';
 
   @override
   void dispose() {
     _phraseController.dispose();
-    _newLocationController.dispose();
     super.dispose();
   }
 
@@ -130,34 +128,8 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  /// 添加位置显式入口，可选备注暂不提供录入（文档字段数据层已支持）。
-  Future<void> _addLocation() async {
-    final name = _newLocationController.text;
-    if (name.trim().isEmpty) {
-      _show(_emptyLocation);
-      return;
-    }
-    setState(() => _busy = true);
-    try {
-      final id = await widget.repository.addLocation(name);
-      if (!mounted) return;
-      _newLocationController.clear();
-      final nameInDb = await _locationName(id);
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _notice = _locationAdded(nameInDb);
-        _result = null;
-      });
-    } on ArgumentError {
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _notice = _emptyLocation;
-        _result = null;
-      });
-    }
-  }
+  // V3.4：首页手动添加位置入口（_addLocation）撤下——手动添加能力
+  // 统一收敛至抽屉 → 位置管理页（含备注录入、空名校验、错误兜底）。
 
   /// 按 id 取仓储中的归一化位置名，回显与入库一致。
   Future<String> _locationName(int id) async {
@@ -259,9 +231,14 @@ class _HomePageState extends State<HomePage> {
         title: Text(widget.title),
         // V3.3 导航收敛：入口统一为左上角三道杠；
         // V1 遗留的右上角列表图标已撤下（明细页经抽屉进入）。
+        // V3.4 可见性修复：真机浅背景下默认前景色偏淡，显式深色
+        //（与绿色主题同源的 colorScheme.primary）+ 视觉尺寸 28，
+        // 点击热区随 IconButton 默认≥48dp。
         leading: IconButton(
           key: const Key('open_drawer'),
           tooltip: '菜单',
+          iconSize: 28,
+          color: Theme.of(context).colorScheme.primary,
           icon: const Icon(Icons.menu),
           onPressed: _openDrawer,
         ),
@@ -303,33 +280,10 @@ class _HomePageState extends State<HomePage> {
                   : _submitPhrase,
               child: const Text('确定'),
             ),
-            const SizedBox(height: 8),
-            const Divider(),
-            const SizedBox(height: 8),
-            const Text('管理位置',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: TextField(
-                    key: const Key('new_location_field'),
-                    controller: _newLocationController,
-                    decoration: const InputDecoration(
-                      labelText: '东西在哪里？',
-                      hintText: '例如：储物间',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.tonal(
-                  key: const Key('add_location_button'),
-                  onPressed: _busy ? null : _addLocation,
-                  child: const Text('添加位置'),
-                ),
-              ],
-            ),
+            const SizedBox(height: 12),
+            // V3.4：首页撤「管理位置」整块（标题/输入框/添加按钮/分隔线），
+            // 查询与记录统一走顶部「说一句」，手动添加走抽屉 → 位置管理。
+            // 首页收口三层：语音主入口 + 「已记下/已更新」提示展示 + 底部引导文字。
             if (_notice != null) ...[
               const SizedBox(height: 12),
               Text(_notice!, key: const Key('notice')),

@@ -236,8 +236,8 @@ void main() {
   String recorded(String item, String location) => '已记下：$item → $location';
   String alreadyRecorded(String item, String location) =>
       '「$item」已经在「$location」了。';
-  String locationAdded(String location) => '已添加位置：「$location」。';
-  const emptyLocation = '位置名称不能为空。';
+  // （V3.4：locationAdded/emptyLocation 文案常量随首页手动添加入口
+  // 撤下移除，相关场景迁移至位置管理页测试。）
 
   setUp(() {
     repo = InMemoryRepository();
@@ -296,18 +296,33 @@ void main() {
     expect(find.byKey(const Key('phrase_field')), findsOneWidget);
   });
 
-  Future<void> addLocation(WidgetTester tester, String name) async {
-    await tester.enterText(find.byKey(const Key('new_location_field')), name);
-    await tester.tap(find.byKey(const Key('add_location_button')));
-    await settle(tester);
+  /// V3.4：首页手动添加入口已撤下，手动添加统一走
+  /// 抽屉 → 位置管理页 → FAB → 对话框；完成后返回首页。
+  Future<void> addLocationViaDrawer(WidgetTester tester, String name) async {
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_locations')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('add_location_fab')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('location_name_field')), name);
+    await tester.tap(find.text('添加'));
+    await tester.pumpAndSettle();
+    // 返回首页（位置页为 push 进入的独立路由）。
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('phrase_field')), findsOneWidget);
   }
 
   // ============ 6 条原有回归用例（保留意图，改为单句式驱动 + 冻结文案）============
 
   testWidgets('新增位置→录入→按精确名称能查到', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '阳台');
-    expect(find.text(locationAdded('阳台')), findsOneWidget);
+    await addLocationViaDrawer(tester, '阳台');
+    // 手动添加落库后回到首页，「已添加位置」提示归位置页职责（V3.4），
+    // 此处断言库内状态。
+    expect(repo.locationCount, 1);
 
     await submit(tester, '梯子放阳台');
     expect(find.text(recorded('梯子', '阳台')), findsOneWidget);
@@ -420,12 +435,20 @@ void main() {
     expect(repo.locationCount, 1);
   });
 
-  testWidgets('N2b 添加位置名为空走冻结文案，非没听懂', (tester) async {
+  testWidgets('N2b 添加位置名为空走专属文案，非没听懂（V3.4 场景迁移至位置管理页）', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '   ');
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('drawer_locations')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('add_location_fab')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('location_name_field')), '   ');
+    await tester.tap(find.text('添加'));
+    await tester.pumpAndSettle();
 
-    // D2 边界：添加位置框空名 →「位置名称不能为空」，且不得显示「没听懂」。
-    expect(find.text(emptyLocation), findsOneWidget);
+    // 空名 →「位置名称不能为空」SnackBars，且不得显示「没听懂」、零写入。
+    expect(find.text('位置名称不能为空。'), findsOneWidget);
     expect(find.text(notUnderstood), findsNothing);
     expect(repo.locationCount, 0);
   });
@@ -441,9 +464,9 @@ void main() {
 
   testWidgets('N4 显式添加位置与句式录入同源：位置表、关联表各恰好1条', (tester) async {
     await pumpApp(tester);
-    // 显式入口添加全角位置名 → 归一化落库。
-    await addLocation(tester, '　ＡＢＣ　');
-    expect(find.text(locationAdded('abc')), findsOneWidget);
+    // 显式入口（V3.4 起在位置管理页）添加全角位置名 → 归一化落库。
+    await addLocationViaDrawer(tester, '　ＡＢＣ　');
+    expect(repo.locationCount, 1);
 
     // 句式录入到同一位置（归一化后同为 abc）。
     await submit(tester, '梯子放abc');
@@ -526,8 +549,8 @@ void main() {
 
   testWidgets('验收4：添加新位置车库 → 可被后续记录引用', (tester) async {
     await pumpApp(tester);
-    await addLocation(tester, '车库');
-    expect(find.text(locationAdded('车库')), findsOneWidget);
+    await addLocationViaDrawer(tester, '车库');
+    expect(repo.locationCount, 1);
     await submit(tester, '电钻放车库');
     expect(find.text(recorded('电钻', '车库')), findsOneWidget);
     expect(repo.linkCount, 1);
@@ -632,5 +655,58 @@ void main() {
     expect(find.byKey(const Key('home_drawer')), findsOneWidget);
     expect(find.text('语音记账'), findsOneWidget);
     expect(find.text('物品明细'), findsOneWidget);
+  });
+
+  // ---- V3.4 首页交互收敛 + 三道杠可见性 ----
+
+  testWidgets('V3.4：「管理位置」整块不复存在（输入框/按钮/标题/分隔线）',
+      (tester) async {
+    await pumpApp(tester);
+
+    // 审核拍板：按代码实际 key 撤除（需求单 home_query_field/
+    // home_add_location_field 不存在，笔误已按代码修正）。
+    expect(find.byKey(const Key('new_location_field')), findsNothing);
+    expect(find.byKey(const Key('add_location_button')), findsNothing);
+    expect(find.text('管理位置'), findsNothing);
+    expect(find.text('东西在哪里？'), findsNothing);
+    expect(find.text('添加位置'), findsNothing);
+    expect(find.byType(Divider), findsNothing,
+        reason: '中间分隔线随「管理位置」一并撤除，不留占位');
+  });
+
+  testWidgets('V3.4：首页仅剩顶部一个输入控件（说一句）', (tester) async {
+    await pumpApp(tester);
+
+    expect(find.byType(TextField), findsOneWidget,
+        reason: '首页无其他手动添加/查询入口残留');
+    expect(find.byKey(const Key('phrase_field')), findsOneWidget);
+  });
+
+  testWidgets('V3.4：三道杠可见性锁定（显式深色 + iconSize 28）',
+      (tester) async {
+    await pumpApp(tester);
+
+    final button = tester.widget<IconButton>(
+      find.byKey(const Key('open_drawer')),
+    );
+    expect(button.color, isNotNull, reason: '显式深色，浅背景下清晰可辨');
+    expect(button.iconSize, 28, reason: '视觉尺寸较默认 24 增大');
+    // 点击展开（功能链路继续有效）。
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget);
+  });
+
+  testWidgets('V3.4：键盘弹起态顶部三道杠不被裁切、仍可点击', (tester) async {
+    await pumpApp(tester);
+
+    // 键盘弹起（聚焦顶部输入框）后再点三道杠，抽屉必须能打开。
+    await tester.enterText(find.byKey(const Key('phrase_field')), '梯子放阳台');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('home_drawer')), findsOneWidget,
+        reason: 'AppBar 位于 Scaffold 顶部，键盘弹起不裁切、热区可用');
   });
 }

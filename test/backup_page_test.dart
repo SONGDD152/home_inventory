@@ -9,6 +9,8 @@ import 'package:home_inventory/ui/backup_page.dart';
 
 import 'item_list_page_test.dart' show FakeBackupGateway, FakeListRepository;
 
+import 'fake_loan_mixin.dart';
+
 /// 备份页测试：独立入口承载导出/恢复（逻辑同 BackupActions，走真流程）。
 void main() {
   Future<void> pumpPage(
@@ -136,7 +138,7 @@ void main() {
 }
 
 /// 校验拒绝模拟：restoreBackup 抛 ArgumentError（与生产仓储校验一致）。
-class ThrowingRepo implements InventoryRepository {
+class ThrowingRepo with FakeLoanMixin implements InventoryRepository {
   @override
   dynamic noSuchMethod(Invocation invocation) =>
       throw UnimplementedError('${invocation.memberName} 未在本测试使用');

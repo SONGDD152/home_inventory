@@ -328,4 +328,82 @@ void main() {
       expect(parsePhrase('查梯子'), isA<ParseUnrecognized>());
     });
   });
+
+  // =========== V3.7 借还语义 + 数量 ===========
+  group('V3.7 借阅语义解析', () {
+    test('借出「借给张三2个梯子」→ ParseLend(物/人/数量)', () {
+      final r = parsePhrase('借给张三2个梯子');
+      expect(r, isA<ParseLend>());
+      final lend = r as ParseLend;
+      expect(lend.item, '梯子');
+      expect(lend.borrower, '张三');
+      expect(lend.quantity, 2);
+      expect(lend.days, isNull);
+    });
+
+    test('借出「借2个梯子给张三」→ ParseLend', () {
+      final r = parsePhrase('借2个梯子给张三') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.quantity, 2);
+    });
+
+    test('借出「张三借了梯子」数量默认 1', () {
+      final r = parsePhrase('张三借了梯子') as ParseLend;
+      expect(r.borrower, '张三');
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('借出带天数「张三借梯子3天」→ days=3', () {
+      final r = parsePhrase('张三借梯子3天') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.days, 3);
+    });
+
+    test('中文数量「张三借了两个梯子」→ quantity=2', () {
+      final r = parsePhrase('张三借了两个梯子') as ParseLend;
+      expect(r.quantity, 2);
+      expect(r.item, '梯子');
+    });
+
+    test('归还「还了2个梯子」→ ParseReturn(物/数量)', () {
+      final r = parsePhrase('还了2个梯子');
+      expect(r, isA<ParseReturn>());
+      expect((r as ParseReturn).item, '梯子');
+      expect(r.quantity, 2);
+    });
+
+    test('归还「归还梯子给张三」→ ParseReturn 数量 null=全部', () {
+      final r = parsePhrase('归还梯子给张三') as ParseReturn;
+      expect(r.item, '梯子');
+      expect(r.quantity, isNull);
+    });
+
+    test('录入带数量「2个梯子放阳台」→ ParseUpsert quantity=2', () {
+      final r = parsePhrase('2个梯子放阳台') as ParseUpsert;
+      expect(r.item, '梯子');
+      expect(r.location, '阳台');
+      expect(r.quantity, 2);
+    });
+
+    test('未识别带猜测：借/还相关给出 guess，无关为 null', () {
+      expect((parsePhrase('借梯子') as ParseUnrecognized).guess, 'lend');
+      expect((parsePhrase('梯子还') as ParseUnrecognized).guess, 'return');
+      expect((parsePhrase('梯子') as ParseUnrecognized).guess, isNull);
+    });
+
+    test('歧义防线：含放置动词的「借条放阳台」仍走录入不被借出误吞', () {
+      final r = parsePhrase('借条放阳台');
+      expect(r, isA<ParseUpsert>());
+      expect((r as ParseUpsert).item, '借条');
+      expect(r.location, '阳台');
+    });
+
+    test('老句式零回归：查询/录入/显式前缀照旧', () {
+      expect(parsePhrase('梯子在哪'), isA<ParseQuery>());
+      expect(parsePhrase('记:梯子放阳台'), isA<ParseUpsert>());
+      expect(parsePhrase('查:梯子'), isA<ParseQuery>());
+    });
+  });
 }

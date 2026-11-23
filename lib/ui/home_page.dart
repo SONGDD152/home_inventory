@@ -8,6 +8,7 @@ import '../data/phrase_parser.dart';
 import 'backup_page.dart';
 import 'item_list_page.dart';
 import 'location_list_page.dart';
+import 'loan_list_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
@@ -83,8 +84,14 @@ class _HomePageState extends State<HomePage> {
     final parsed = parsePhrase(rawText);
 
     if (parsed is ParseUnrecognized) {
-      // 未识别：零写入，只提示「没听懂」，保留原文供用户编辑。
-      _show(_notUnderstood);
+      // V3.7：未识别不再静默失败——若解析器有意图猜测，弹确认框展示
+      // 「你是要借出还是归还？」并给出正确句式引导；无猜测仍提示「没听懂」。
+      // 全程零写入，保留原文供用户编辑（元宝批复 + 建议）。
+      if (parsed.guess != null && mounted) {
+        await _showIntentConfirm(parsed.guess!);
+      } else {
+        _show(_notUnderstood);
+      }
       return;
     }
 
@@ -106,6 +113,41 @@ class _HomePageState extends State<HomePage> {
         _result = null;
       });
     }
+  }
+
+  /// V3.7：未识别且解析器有猜测时，弹确认框展示意图并给句式引导。
+  /// 选择后把示例句式填回输入框，用户点确定即可重新提交（零写入）。
+  Future<void> _showIntentConfirm(String guess) async {
+    final isLend = guess == 'lend';
+    final hint = isLend
+        ? '借给张三2个梯子'
+        : '还了2个梯子';
+    await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('intent_confirm_dialog'),
+        title: const Text('没听懂，你是要——'),
+        content: Text(
+          isLend ? '借出物品吗？\n可这样说：$hint' : '归还物品吗？\n可这样说：$hint',
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('intent_confirm_cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('intent_confirm_use'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('用这个说法'),
+          ),
+        ],
+      ),
+    ).then((useExample) {
+      if (useExample == true && mounted) {
+        setState(() => _phraseController.text = hint);
+      }
+    });
   }
 
   Future<void> _handleQuery(String item) async {
@@ -309,6 +351,17 @@ class _HomePageState extends State<HomePage> {
                 onTap: () {
                   Navigator.of(context).pop();
                   _push(BackupPage(repository: widget.repository));
+                },
+              ),
+              // V3.7：借出管理（元宝决策③A，排最后；不动五模块底栏）。
+              ListTile(
+                key: const Key('drawer_loans'),
+                leading: const Icon(Icons.swap_horiz),
+                title: const Text('借出管理'),
+                subtitle: const Text('借出/归还/逾期提醒'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _push(LoanListPage(repository: widget.repository));
                 },
               ),
             ] else ...<Widget>[

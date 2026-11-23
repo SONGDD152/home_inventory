@@ -1,6 +1,7 @@
 
 import 'dart:typed_data';
 
+import 'package:excel/excel.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:home_inventory/data/excel_exporter.dart';
 import 'package:home_inventory/data/item.dart';
@@ -60,6 +61,80 @@ void main() {
         const <ItemWithLocations>[],
       );
       expect(bytes, isNotEmpty, reason: '空数据导出空表头文件');
+    });
+  });
+
+  group('V3.7 借出明细 Sheet', () {
+    test('Sheet 名常量与列头口径锁定', () {
+      expect(ExcelExporter.sheetActive, '物品明细');
+      expect(ExcelExporter.sheetDeleted, '回收站');
+      expect(ExcelExporter.sheetLoans, '借出明细');
+    });
+
+    test('非空借出：生成含第三 Sheet 的 xlsx，列头与数据行正确', () {
+      const exporter = ExcelExporter();
+      final loan = Loan(
+        id: 1,
+        itemId: 1,
+        itemName: '梯子',
+        borrowerName: '张三',
+        quantity: 2,
+        returnedQty: 1,
+        borrowedAt: now - 86400000 * 5,
+        dueAt: now - 86400000 * 2, // 已逾期
+        isPartial: true,
+      );
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'], id: 1)],
+        const <ItemWithLocations>[],
+        loans: <Loan>[loan],
+        locationByItem: <int, String>{1: '阳台'},
+      );
+      expect(bytes[0], 0x50);
+      expect(bytes[1], 0x4B);
+
+      // 读回工作簿校验第三 Sheet 列头与数据。
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('借出明细'), isTrue);
+      final sheet = excel['借出明细'];
+      final header = sheet.row(0).map((c) => c?.value?.toString()).toList();
+      expect(header, <String?>[
+        '物品名', '借阅人', '借出数量', '已还数量',
+        '借出日', '到期日', '状态', '位置',
+      ]);
+      final data = sheet.row(1).map((c) => c?.value?.toString()).toList();
+      expect(data[0], '梯子');
+      expect(data[1], '张三');
+      expect(data[2], '2');
+      expect(data[3], '1');
+      expect(data[6], '逾期');
+      expect(data[7], '阳台');
+    });
+
+    test('既有双 Sheet 列头不变（回归锁）', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'])],
+        <ItemWithLocations>[row('椅子', <String>[], deleted: true)],
+      );
+      final excel = Excel.decodeBytes(bytes);
+      final activeHeader = excel['物品明细']
+          .row(0).map((c) => c?.value?.toString()).toList();
+      expect(activeHeader, <String?>['物品名', '存放位置', '记账原文', '标签', '更新时间']);
+      final deletedHeader = excel['回收站']
+          .row(0).map((c) => c?.value?.toString()).toList();
+      expect(deletedHeader,
+          <String?>['物品名', '存放位置', '记账原文', '标签', '更新时间', '删除时间']);
+    });
+
+    test('空借出不创建第三 Sheet', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'])],
+        const <ItemWithLocations>[],
+      );
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('借出明细'), isFalse);
     });
   });
 

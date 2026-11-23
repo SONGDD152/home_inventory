@@ -11,9 +11,11 @@ import 'package:home_inventory/data/inventory_repository.dart';
 import 'package:home_inventory/data/item.dart';
 import 'package:home_inventory/ui/item_list_page.dart';
 
+import 'fake_loan_mixin.dart';
+
 /// 内存假仓储：预置 ItemWithLocations 列表；导出/恢复只记录调用，供断言。
 /// V3.2 加编辑/删除：可变内存实现，记录调用供断言。
-class FakeListRepository implements InventoryRepository {
+class FakeListRepository with FakeLoanMixin implements InventoryRepository {
   FakeListRepository(this.rows);
 
   final List<ItemWithLocations> rows;

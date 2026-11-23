@@ -9,3 +9,4 @@ export 'ui/backup_page.dart';
 export 'ui/home_page.dart';
 export 'ui/item_list_page.dart';
 export 'ui/location_list_page.dart';
+export 'ui/loan_list_page.dart';

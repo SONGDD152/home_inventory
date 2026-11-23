@@ -28,12 +28,18 @@ class ExcelExporter {
 
   static const String sheetActive = '物品明细';
   static const String sheetDeleted = '回收站';
+  /// V3.7：借出明细 Sheet。
+  static const String sheetLoans = '借出明细';
 
   /// 生成工作簿字节。已删物品为空时不创建回收站 Sheet。
+  /// [loans] V3.7：借出记录，非空时创建第三张「借出明细」Sheet。
+  /// [locationByItem] 物品 id → 位置名（借出明细的「位置」列）。
   Uint8List buildWorkbook(
     List<ItemWithLocations> activeRows,
-    List<ItemWithLocations> deletedRows,
-  ) {
+    List<ItemWithLocations> deletedRows, {
+    List<Loan> loans = const <Loan>[],
+    Map<int, String> locationByItem = const <int, String>{},
+  }) {
     final excel = Excel.createExcel();
 
     final active = excel[sheetActive];
@@ -47,6 +53,10 @@ class ExcelExporter {
       final deleted = excel[sheetDeleted];
       _writeSheet(deleted, deletedRows, includeDeletedAt: true);
     }
+
+    if (loans.isNotEmpty) {
+      _writeLoanSheet(excel[sheetLoans], loans, locationByItem);
+    }
     return Uint8List.fromList(excel.encode()!);
   }
 
@@ -55,9 +65,12 @@ class ExcelExporter {
   /// 落盘走 [fileWriter]（注入）或 [defaultWrite]（生产）。
   Future<String> writeExcelFile(
     List<ItemWithLocations> activeRows,
-    List<ItemWithLocations> deletedRows,
-  ) async {
-    final bytes = buildWorkbook(activeRows, deletedRows);
+    List<ItemWithLocations> deletedRows, {
+    List<Loan> loans = const <Loan>[],
+    Map<int, String> locationByItem = const <int, String>{},
+  }) async {
+    final bytes = buildWorkbook(activeRows, deletedRows,
+        loans: loans, locationByItem: locationByItem);
     final writer = fileWriter ?? defaultWrite;
     return writer(bytes);
   }
@@ -132,6 +145,52 @@ class ExcelExporter {
         for (final v in values) TextCellValue(v.toString()),
       ]);
     }
+  }
+
+  /// V3.7 借出明细 Sheet。列头按元宝批复口径固定：
+  /// 物品名 / 借阅人 / 借出数量 / 已还数量 / 借出日 / 到期日 / 状态 / 位置。
+  /// 既有双 Sheet 列头不受影响（独立方法，回归锁住）。
+  void _writeLoanSheet(
+    Sheet sheet,
+    List<Loan> loans,
+    Map<int, String> locationByItem,
+  ) {
+    final headers = <String>[
+      '物品名', '借阅人', '借出数量', '已还数量',
+      '借出日', '到期日', '状态', '位置',
+    ];
+    sheet.appendRow(<CellValue?>[for (final h in headers) TextCellValue(h)]);
+    for (var c = 0; c < headers.length; c++) {
+      final cell = sheet.cell(CellIndex.indexByColumnRow(
+          columnIndex: c, rowIndex: 0));
+      cell.cellStyle = CellStyle(bold: true, fontFamily: 'Calibri');
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final loan in loans) {
+      final status = loan.isReturned
+          ? '已归还'
+          : (loan.isOverdue(nowMs) ? '逾期' : '借出中');
+      final location = locationByItem[loan.itemId] ?? '—';
+      final values = <Object?>[
+        loan.itemName,
+        loan.borrowerName.isEmpty ? '—' : loan.borrowerName,
+        loan.quantity,
+        loan.returnedQty,
+        _formatDate(loan.borrowedAt),
+        _formatDate(loan.dueAt),
+        status,
+        location,
+      ];
+      sheet.appendRow(<CellValue?>[
+        for (final v in values) TextCellValue(v.toString()),
+      ]);
+    }
+    _fitColumnWidths(sheet, headers.length);
+  }
+
+  String _formatDate(int ms) {
+    final t = DateTime.fromMillisecondsSinceEpoch(ms);
+    return '${t.year}-${_two(t.month)}-${_two(t.day)}';
   }
 
   /// 列宽按内容估算（中文按 2 个单位计），设上限避免超宽列。

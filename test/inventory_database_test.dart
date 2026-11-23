@@ -16,8 +16,8 @@ void main() {
   late InventoryDatabase db;
   late List<InventoryDatabase> opened;
 
-  // 默认 version=6，与生产对齐；全新装库走 onCreate，显式低版本的迁移测试另行指定。
-  InventoryDatabase newDb({int version = 6, String? path}) {
+  // 默认 version=7，与生产对齐（V3.7）；全新装库走 onCreate，显式低版本的迁移测试另行指定。
+  InventoryDatabase newDb({int version = 7, String? path}) {
     final instance = InventoryDatabase(
       databaseFactory: databaseFactoryFfi,
       databasePath: path ?? dbPath,
@@ -704,7 +704,7 @@ void main() {
     final backup = await db.exportBackup();
 
     expect(backup['app'], 'home_inventory');
-    expect((backup['schemaVersion'] as num).toInt(), 6);
+    expect((backup['schemaVersion'] as num).toInt(), 7);
     expect(backup['exportedAt'], isNotNull);
     expect(backup['items'] as List, hasLength(2), reason: '两件物品（无软删物品入口）');
     expect(backup['locations'] as List, hasLength(2), reason: '阳台+书房（书房已软删，仍导出）');
@@ -813,7 +813,7 @@ void main() {
     }, '缺 locations/item_locations 表');
     await expectRejected(<String, Object?>{
       'app': 'home_inventory',
-      'schemaVersion': 7,
+      'schemaVersion': 8,
       'items': <Object?>[],
       'locations': <Object?>[],
       'item_locations': <Object?>[],
@@ -1296,5 +1296,371 @@ void main() {
       isEmpty,
       reason: '新建同名不复活旧关联（审核确认点②口径）',
     );
+  });
+
+  // =========== V3.7 借阅管理 ===========
+  group('V3.7 借出/归还/迁移', () {
+    test('v6 旧库升级到 v7：items 补 quantity、建借出两表、老数据零丢失', () async {
+      final legacyPath = p.join(tempDir.path, 'v6_v7.db');
+      final factory = databaseFactoryFfi;
+      final legacy = await factory.openDatabase(
+        legacyPath,
+        options: OpenDatabaseOptions(
+          version: 6,
+          onCreate: (d, v) async {
+            await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER)');
+            await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, remark TEXT)');
+            await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, raw_text TEXT, tags TEXT)');
+            final now = DateTime.now().millisecondsSinceEpoch;
+            await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null});
+          },
+        ),
+      );
+      await legacy.close();
+
+      final upgraded = InventoryDatabase(
+          databaseFactory: factory, databasePath: legacyPath, version: 7);
+      opened.add(upgraded);
+      final rows = await upgraded.getAllItems();
+      expect(rows, hasLength(1));
+      expect(rows.single.name, '梯子');
+      expect(rows.single.quantity, 1, reason: '老物品补默认数量 1');
+      expect(await upgraded.getAllLoans(), isEmpty);
+      expect(await upgraded.getActiveBorrowers(), isEmpty);
+    });
+
+    test('迁移失败整体回滚：v7 建表前抛错，版本退回 6 且数据不丢', () async {
+      final legacyPath = p.join(tempDir.path, 'v7_rollback.db');
+      final factory = databaseFactoryFfi;
+      final legacy = await factory.openDatabase(
+        legacyPath,
+        options: OpenDatabaseOptions(
+          version: 6,
+          onCreate: (d, v) async {
+            await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER)');
+            await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, remark TEXT)');
+            await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, raw_text TEXT, tags TEXT)');
+            final now = DateTime.now().millisecondsSinceEpoch;
+            await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null});
+          },
+        ),
+      );
+      await legacy.close();
+
+      final failing = InventoryDatabase.forTesting(
+        databaseFactory: factory,
+        databasePath: legacyPath,
+        version: 7,
+        migrationV7FailureHook: () => throw StateError('injected v7 failure'),
+      );
+      opened.add(failing);
+      await expectLater(failing.open(), throwsA(isA<StateError>()));
+
+      final raw = await factory.openDatabase(legacyPath);
+      try {
+        expect(await raw.getVersion(), 6);
+        final cols = await raw.rawQuery('PRAGMA table_info(items)');
+        expect(cols.any((c) => c['name'] == 'quantity'), isFalse,
+            reason: '半迁移态回滚');
+        expect(await raw.query('items'), hasLength(1));
+      } finally {
+        await raw.close();
+      }
+    });
+
+    test('旧备份（无 quantity/借出表）恢复到 v7：自动补 quantity=1', () async {
+      // 用 v6 结构手工造一份备份 map（模拟 V3.6 导出的 JSON）。
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final oldBackup = <String, Object?>{
+        'app': 'home_inventory',
+        'schemaVersion': 6,
+        'exportedAt': now,
+        'items': <Map<String, Object?>>[
+          {'id': 1, 'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null},
+        ],
+        'locations': <Map<String, Object?>>[
+          {'id': 1, 'name': '阳台', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'remark': null},
+        ],
+        'item_locations': <Map<String, Object?>>[
+          {'id': 1, 'item_id': 1, 'location_id': 1, 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'raw_text': null, 'tags': null},
+        ],
+      };
+      await db.restoreBackup(oldBackup);
+      final rows = await db.getAllItemsWithLocations();
+      expect(rows, hasLength(1));
+      expect(rows.single.item.quantity, 1, reason: '旧备份恢复补数量 1（元宝硬约束）');
+      expect(rows.single.locations.single.name, '阳台');
+    });
+
+    test('借出默认 3 天；全部归还后 isReturned=true', () async {
+      final loan = await db.lendItem('梯子', '张三');
+      expect(loan.quantity, 1);
+      expect(loan.returnedQty, 0);
+      expect(loan.isReturned, isFalse);
+      expect(loan.dueAt - loan.borrowedAt, 3 * 86400000,
+          reason: '默认借期 3 天（UTC 毫秒）');
+
+      await db.returnLoan(loan.id!);
+      final all = await db.getAllLoans();
+      expect(all.single.isReturned, isTrue);
+      expect(all.single.returnedAt, isNotNull);
+    });
+
+    test('部分归还：数量累加、isPartial=true、未还清不置 returnedAt', () async {
+      final loan = await db.lendItem('梯子', '张三', quantity: 3);
+      await db.returnLoan(loan.id!, quantity: 1);
+      var current = (await db.getAllLoans()).single;
+      expect(current.returnedQty, 1);
+      expect(current.isPartial, isTrue);
+      expect(current.returnedAt, isNull);
+      expect(current.isReturned, isFalse);
+
+      await db.returnLoan(loan.id!, quantity: 2);
+      current = (await db.getAllLoans()).single;
+      expect(current.returnedQty, 3);
+      expect(current.isReturned, isTrue);
+      expect(current.returnedAt, isNotNull);
+    });
+
+    test('归还数量超未还量 → ArgumentError；已还完再还幂等', () async {
+      final loan = await db.lendItem('梯子', '张三', quantity: 2);
+      await expectLater(db.returnLoan(loan.id!, quantity: 3),
+          throwsA(isA<ArgumentError>()));
+      await db.returnLoan(loan.id!);
+      await db.returnLoan(loan.id!); // 幂等，不抛
+      expect((await db.getAllLoans()).single.returnedQty, 2);
+    });
+
+    test('改借期从借出时刻起算；逾期判定 isOverdue(now)', () async {
+      final loan = await db.lendItem('梯子', '张三', days: 1);
+      await db.updateLoanDue(loan.id!, 5);
+      final updated = (await db.getAllLoans()).single;
+      expect(updated.dueAt - updated.borrowedAt, 5 * 86400000);
+      expect(updated.isOverdue(updated.dueAt - 1), isFalse);
+      expect(updated.isOverdue(updated.dueAt + 1), isTrue);
+    });
+
+    test('借阅人去重：同名借出复用一行；软删后历史 loan 名字快照仍在', () async {
+      await db.lendItem('梯子', '张三');
+      await db.lendItem('充电器', '张三');
+      expect(await db.getActiveBorrowers(), hasLength(1));
+
+      final borrowers = await db.getActiveBorrowers();
+      await db.softDeleteBorrower(borrowers.single.id!);
+      expect(await db.getActiveBorrowers(), isEmpty);
+      final loans = await db.getAllLoans();
+      expect(loans, hasLength(2));
+      expect(loans.every((l) => l.borrowerName == '张三'), isTrue,
+          reason: '快照不受软删影响');
+    });
+
+    test('借出备份往返：导出含借出两表，恢复后借还状态保真', () async {
+      await put('梯子', '阳台');
+      final loan = await db.lendItem('梯子', '张三', quantity: 2, days: 7);
+      await db.returnLoan(loan.id!, quantity: 1);
+      final backup = await db.exportBackup();
+      expect(backup.containsKey('borrowers'), isTrue);
+      expect(backup.containsKey('loans'), isTrue);
+
+      final otherPath = p.join(tempDir.path, 'restore_v37.db');
+      final other = newDb(path: otherPath);
+      await other.restoreBackup(backup);
+      final restored = await other.getAllLoans();
+      expect(restored, hasLength(1));
+      expect(restored.single.quantity, 2);
+      expect(restored.single.returnedQty, 1);
+      expect(restored.single.isPartial, isTrue);
+      expect(await other.getActiveBorrowers(), hasLength(1));
+    });
+
+    test('借出数量/天数非法 → ArgumentError', () async {
+      await expectLater(db.lendItem('梯子', '张三', quantity: 0),
+          throwsA(isA<ArgumentError>()));
+      await expectLater(db.lendItem('梯子', '张三', days: 0),
+          throwsA(isA<ArgumentError>()));
+    });
+  });
+
+  // =========== V3.7 借阅管理 ===========
+  group('V3.7 借出/归还/迁移', () {
+    test('v6 旧库升级到 v7：items 补 quantity、建借出两表、老数据零丢失', () async {
+      final legacyPath = p.join(tempDir.path, 'v6_v7.db');
+      final factory = databaseFactoryFfi;
+      final legacy = await factory.openDatabase(
+        legacyPath,
+        options: OpenDatabaseOptions(
+          version: 6,
+          onCreate: (d, v) async {
+            await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER)');
+            await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, remark TEXT)');
+            await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, raw_text TEXT, tags TEXT)');
+            final now = DateTime.now().millisecondsSinceEpoch;
+            await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null});
+          },
+        ),
+      );
+      await legacy.close();
+
+      final upgraded = InventoryDatabase(
+          databaseFactory: factory, databasePath: legacyPath, version: 7);
+      opened.add(upgraded);
+      final rows = await upgraded.getAllItems();
+      expect(rows, hasLength(1));
+      expect(rows.single.name, '梯子');
+      expect(rows.single.quantity, 1, reason: '老物品补默认数量 1');
+      expect(await upgraded.getAllLoans(), isEmpty);
+      expect(await upgraded.getActiveBorrowers(), isEmpty);
+    });
+
+    test('迁移失败整体回滚：v7 建表前抛错，版本退回 6 且数据不丢', () async {
+      final legacyPath = p.join(tempDir.path, 'v7_rollback.db');
+      final factory = databaseFactoryFfi;
+      final legacy = await factory.openDatabase(
+        legacyPath,
+        options: OpenDatabaseOptions(
+          version: 6,
+          onCreate: (d, v) async {
+            await d.execute('CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER)');
+            await d.execute('CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, remark TEXT)');
+            await d.execute('CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, raw_text TEXT, tags TEXT)');
+            final now = DateTime.now().millisecondsSinceEpoch;
+            await d.insert('items', {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null});
+          },
+        ),
+      );
+      await legacy.close();
+
+      final failing = InventoryDatabase.forTesting(
+        databaseFactory: factory,
+        databasePath: legacyPath,
+        version: 7,
+        migrationV7FailureHook: () => throw StateError('injected v7 failure'),
+      );
+      opened.add(failing);
+      await expectLater(failing.open(), throwsA(isA<StateError>()));
+
+      final raw = await factory.openDatabase(legacyPath);
+      try {
+        expect(await raw.getVersion(), 6);
+        final cols = await raw.rawQuery('PRAGMA table_info(items)');
+        expect(cols.any((c) => c['name'] == 'quantity'), isFalse,
+            reason: '半迁移态回滚');
+        expect(await raw.query('items'), hasLength(1));
+      } finally {
+        await raw.close();
+      }
+    });
+
+    test('旧备份（无 quantity/借出表）恢复到 v7：自动补 quantity=1', () async {
+      // 用 v6 结构手工造一份备份 map（模拟 V3.6 导出的 JSON）。
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final oldBackup = <String, Object?>{
+        'app': 'home_inventory',
+        'schemaVersion': 6,
+        'exportedAt': now,
+        'items': <Map<String, Object?>>[
+          {'id': 1, 'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'deleted_at': null},
+        ],
+        'locations': <Map<String, Object?>>[
+          {'id': 1, 'name': '阳台', 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'remark': null},
+        ],
+        'item_locations': <Map<String, Object?>>[
+          {'id': 1, 'item_id': 1, 'location_id': 1, 'is_deleted': 0, 'created_at': now, 'updated_at': now, 'raw_text': null, 'tags': null},
+        ],
+      };
+      await db.restoreBackup(oldBackup);
+      final rows = await db.getAllItemsWithLocations();
+      expect(rows, hasLength(1));
+      expect(rows.single.item.quantity, 1, reason: '旧备份恢复补数量 1（元宝硬约束）');
+      expect(rows.single.locations.single.name, '阳台');
+    });
+
+    test('借出默认 3 天；全部归还后 isReturned=true', () async {
+      final loan = await db.lendItem('梯子', '张三');
+      expect(loan.quantity, 1);
+      expect(loan.returnedQty, 0);
+      expect(loan.isReturned, isFalse);
+      expect(loan.dueAt - loan.borrowedAt, 3 * 86400000,
+          reason: '默认借期 3 天（UTC 毫秒）');
+
+      await db.returnLoan(loan.id!);
+      final all = await db.getAllLoans();
+      expect(all.single.isReturned, isTrue);
+      expect(all.single.returnedAt, isNotNull);
+    });
+
+    test('部分归还：数量累加、isPartial=true、未还清不置 returnedAt', () async {
+      final loan = await db.lendItem('梯子', '张三', quantity: 3);
+      await db.returnLoan(loan.id!, quantity: 1);
+      var current = (await db.getAllLoans()).single;
+      expect(current.returnedQty, 1);
+      expect(current.isPartial, isTrue);
+      expect(current.returnedAt, isNull);
+      expect(current.isReturned, isFalse);
+
+      await db.returnLoan(loan.id!, quantity: 2);
+      current = (await db.getAllLoans()).single;
+      expect(current.returnedQty, 3);
+      expect(current.isReturned, isTrue);
+      expect(current.returnedAt, isNotNull);
+    });
+
+    test('归还数量超未还量 → ArgumentError；已还完再还幂等', () async {
+      final loan = await db.lendItem('梯子', '张三', quantity: 2);
+      await expectLater(db.returnLoan(loan.id!, quantity: 3),
+          throwsA(isA<ArgumentError>()));
+      await db.returnLoan(loan.id!);
+      await db.returnLoan(loan.id!); // 幂等，不抛
+      expect((await db.getAllLoans()).single.returnedQty, 2);
+    });
+
+    test('改借期从借出时刻起算；逾期判定 isOverdue(now)', () async {
+      final loan = await db.lendItem('梯子', '张三', days: 1);
+      await db.updateLoanDue(loan.id!, 5);
+      final updated = (await db.getAllLoans()).single;
+      expect(updated.dueAt - updated.borrowedAt, 5 * 86400000);
+      expect(updated.isOverdue(updated.dueAt - 1), isFalse);
+      expect(updated.isOverdue(updated.dueAt + 1), isTrue);
+    });
+
+    test('借阅人去重：同名借出复用一行；软删后历史 loan 名字快照仍在', () async {
+      await db.lendItem('梯子', '张三');
+      await db.lendItem('充电器', '张三');
+      expect(await db.getActiveBorrowers(), hasLength(1));
+
+      final borrowers = await db.getActiveBorrowers();
+      await db.softDeleteBorrower(borrowers.single.id!);
+      expect(await db.getActiveBorrowers(), isEmpty);
+      final loans = await db.getAllLoans();
+      expect(loans, hasLength(2));
+      expect(loans.every((l) => l.borrowerName == '张三'), isTrue,
+          reason: '快照不受软删影响');
+    });
+
+    test('借出备份往返：导出含借出两表，恢复后借还状态保真', () async {
+      await put('梯子', '阳台');
+      final loan = await db.lendItem('梯子', '张三', quantity: 2, days: 7);
+      await db.returnLoan(loan.id!, quantity: 1);
+      final backup = await db.exportBackup();
+      expect(backup.containsKey('borrowers'), isTrue);
+      expect(backup.containsKey('loans'), isTrue);
+
+      final otherPath = p.join(tempDir.path, 'restore_v37.db');
+      final other = newDb(path: otherPath);
+      await other.restoreBackup(backup);
+      final restored = await other.getAllLoans();
+      expect(restored, hasLength(1));
+      expect(restored.single.quantity, 2);
+      expect(restored.single.returnedQty, 1);
+      expect(restored.single.isPartial, isTrue);
+      expect(await other.getActiveBorrowers(), hasLength(1));
+    });
+
+    test('借出数量/天数非法 → ArgumentError', () async {
+      await expectLater(db.lendItem('梯子', '张三', quantity: 0),
+          throwsA(isA<ArgumentError>()));
+      await expectLater(db.lendItem('梯子', '张三', days: 0),
+          throwsA(isA<ArgumentError>()));
+    });
   });
 }

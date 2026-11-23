@@ -45,8 +45,62 @@ class MoveResult {
 /// V3.6：新增 [deletedAt]（软删进回收站的时间戳，可空）。已删物品 isDeleted=true
 /// 且 deletedAt 非空；正常物品两者均为"未删"。历史数据（v5 旧库）deleted_at 为
 /// NULL，[fromMap] 按 null 读取兼容。
+/// V3.7：新增 [quantity]（物品数量，默认 1）。旧备份/旧库无此字段时按 1 读取，
+/// 保证 V3.6 及以前导出的 .json 能恢复到新版（元宝迁移兼容硬约束）。
 class Item {
   const Item({
+    this.id,
+    required this.name,
+    this.isDeleted = false,
+    required this.createdAt,
+    required this.updatedAt,
+    this.deletedAt,
+    this.quantity = 1,
+  });
+
+  final int? id;
+  final String name;
+  final bool isDeleted;
+  final int createdAt;
+  final int updatedAt;
+
+  /// 软删（进回收站）时间戳；正常物品/历史软删行为 null。
+  final int? deletedAt;
+
+  /// 物品数量（V3.7，借出/部分归还的数量基础）。默认 1，最少 1。
+  final int quantity;
+
+  /// [includeQuantity] 默认 true；旧库迁移中途（quantity 列尚未 ALTER 时）
+  /// 传 false 省略该列，避免 "no column named quantity"。
+  Map<String, Object?> toMap({bool includeQuantity = true}) =>
+      <String, Object?>{
+        if (id != null) 'id': id,
+        'name': name,
+        'is_deleted': isDeleted ? 1 : 0,
+        'created_at': createdAt,
+        'updated_at': updatedAt,
+        // null 时省略列：兼容尚未 ALTER 加列的 v5 旧库直接插入。
+        if (deletedAt != null) 'deleted_at': deletedAt,
+        if (includeQuantity) 'quantity': quantity,
+      };
+
+  factory Item.fromMap(Map<String, Object?> map) => Item(
+        id: map['id'] as int?,
+        name: map['name'] as String,
+        isDeleted: (map['is_deleted'] as int?) == 1,
+        createdAt: (map['created_at'] as num).toInt(),
+        updatedAt: (map['updated_at'] as num).toInt(),
+        deletedAt: (map['deleted_at'] as num?)?.toInt(),
+        // 旧备份无 quantity 列 → 补 1（元宝迁移兼容硬约束）。
+        quantity: (map['quantity'] as num?)?.toInt() ?? 1,
+      );
+}
+
+/// 借阅人（V3.7，元宝决策②A：独立 borrowers 表 + 软删）。
+///
+/// loans 表冗余存 borrower_name 快照，软删借阅人后历史借出记录仍显示当时名字。
+class Borrower {
+  const Borrower({
     this.id,
     required this.name,
     this.isDeleted = false,
@@ -60,8 +114,6 @@ class Item {
   final bool isDeleted;
   final int createdAt;
   final int updatedAt;
-
-  /// 软删（进回收站）时间戳；正常物品/历史软删行为 null。
   final int? deletedAt;
 
   Map<String, Object?> toMap() => <String, Object?>{
@@ -70,17 +122,103 @@ class Item {
         'is_deleted': isDeleted ? 1 : 0,
         'created_at': createdAt,
         'updated_at': updatedAt,
-        // null 时省略列：兼容尚未 ALTER 加列的 v5 旧库直接插入。
         if (deletedAt != null) 'deleted_at': deletedAt,
       };
 
-  factory Item.fromMap(Map<String, Object?> map) => Item(
+  factory Borrower.fromMap(Map<String, Object?> map) => Borrower(
         id: map['id'] as int?,
         name: map['name'] as String,
         isDeleted: (map['is_deleted'] as int?) == 1,
         createdAt: (map['created_at'] as num).toInt(),
         updatedAt: (map['updated_at'] as num).toInt(),
         deletedAt: (map['deleted_at'] as num?)?.toInt(),
+      );
+}
+
+/// 借出记录（V3.7，元宝决策①A/②A）。
+///
+/// 一条 loan = 一次借出。部分归还采用「原记录 returnedQty 累加 + isPartial=true」，
+/// 与元宝闭环简报"标 is_partial + 剩余数量"口径等价，且正好对应导出列头
+/// 「借出数量/已还数量」的 quantity/returnedQty 两列，不额外拆行。
+/// [dueAt] 用 UTC 毫秒存、本地显示（与现有时间戳口径一致）。
+/// 状态由 returnedQty 与 quantity 推导：已归还=全部归还；逾期=未还清且 dueAt < now。
+class Loan {
+  const Loan({
+    this.id,
+    required this.itemId,
+    this.updatedAt,
+    required this.itemName,
+    required this.borrowerName,
+    required this.quantity,
+    this.returnedQty = 0,
+    required this.borrowedAt,
+    required this.dueAt,
+    this.returnedAt,
+    this.isPartial = false,
+  });
+
+  final int? id;
+  final int itemId;
+
+  /// 最近变更时间（UTC 毫秒）；构造新记录时可为 null，落库时写入。
+  final int? updatedAt;
+
+  /// 物品名快照（借出时的名字，改名后历史仍可读）。
+  final String itemName;
+
+  /// 借阅人名字快照（软删借阅人后历史仍可读）。
+  final String borrowerName;
+
+  /// 借出数量。
+  final int quantity;
+
+  /// 已归还数量（0..quantity）。
+  final int returnedQty;
+
+  /// 借出时间（UTC 毫秒）。
+  final int borrowedAt;
+
+  /// 到期时间（UTC 毫秒，默认借出日 +3 天，单笔可改）。
+  final int dueAt;
+
+  /// 全部归还时间（null 表示尚未还清）。
+  final int? returnedAt;
+
+  /// 是否发生过部分归还（只要归还过一部分且未一次还清即 true）。
+  final bool isPartial;
+
+  /// 是否全部归还。
+  bool get isReturned => returnedQty >= quantity;
+
+  /// 是否逾期（未还清且已过到期日）。[nowMs] 注入便于测试。
+  bool isOverdue(int nowMs) => !isReturned && dueAt < nowMs;
+
+  Map<String, Object?> toMap() => <String, Object?>{
+        if (id != null) 'id': id,
+        'item_id': itemId,
+        'item_name': itemName,
+        'borrower_name': borrowerName,
+        'quantity': quantity,
+        'returned_qty': returnedQty,
+        'borrowed_at': borrowedAt,
+        'due_at': dueAt,
+        if (returnedAt != null) 'returned_at': returnedAt,
+        'is_partial': isPartial ? 1 : 0,
+        if (updatedAt != null) 'updated_at': updatedAt,
+      };
+
+  factory Loan.fromMap(Map<String, Object?> map) => Loan(
+        id: map['id'] as int?,
+        itemId: (map['item_id'] as num).toInt(),
+        itemName: map['item_name'] as String,
+        borrowerName: map['borrower_name'] as String,
+        quantity: (map['quantity'] as num?)?.toInt() ?? 1,
+        returnedQty: (map['returned_qty'] as num?)?.toInt() ?? 0,
+        borrowedAt: (map['borrowed_at'] as num).toInt(),
+        dueAt: (map['due_at'] as num).toInt(),
+        returnedAt: (map['returned_at'] as num?)?.toInt(),
+        isPartial: (map['is_partial'] as int?) == 1,
+        updatedAt: (map['updated_at'] as num?)?.toInt(),
       );
 }
 

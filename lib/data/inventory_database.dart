@@ -20,12 +20,13 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 6,
+    this.version = 7,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
         _migrationV5FailureHook = null,
-        _migrationV6FailureHook = null;
+        _migrationV6FailureHook = null,
+        _migrationV7FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
@@ -33,19 +34,24 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 6,
+    this.version = 7,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
     void Function()? migrationV6FailureHook,
+    void Function()? migrationV7FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = migrationFailureHook,
         _migrationV5FailureHook = migrationV5FailureHook,
-        _migrationV6FailureHook = migrationV6FailureHook;
+        _migrationV6FailureHook = migrationV6FailureHook,
+        _migrationV7FailureHook = migrationV7FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
   static const String tableItemLocations = 'item_locations';
+  // V3.7 借阅管理：借阅人表 + 借出记录表。
+  static const String tableBorrowers = 'borrowers';
+  static const String tableLoans = 'loans';
 
   static const String columnId = 'id';
   static const String columnName = 'name';
@@ -60,6 +66,15 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnRemark = 'remark';
   static const String columnRawText = 'raw_text';
   static const String columnTags = 'tags';
+  // V3.7：物品数量（items）+ 借出记录字段（loans）。
+  static const String columnQuantity = 'quantity';
+  static const String columnItemName = 'item_name';
+  static const String columnBorrowerName = 'borrower_name';
+  static const String columnReturnedQty = 'returned_qty';
+  static const String columnBorrowedAt = 'borrowed_at';
+  static const String columnDueAt = 'due_at';
+  static const String columnReturnedAt = 'returned_at';
+  static const String columnIsPartial = 'is_partial';
 
   /// 未删除记录的唯一约束：物品名唯一、位置名唯一、同一(物品,位置)关联唯一。
   static const String itemsUniqueIndex = 'idx_items_name_unique';
@@ -85,6 +100,10 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.6：v6 加列事务的失败注入点（deleted_at 加列前调用），
   /// 验证失败整体回滚、版本退回 5。私有字段，仅 forTesting 可注入。
   final void Function()? _migrationV6FailureHook;
+
+  /// V3.7：v7 迁移失败注入点（建新表前调用），验证整体回滚、版本退回 6。
+  /// 私有字段，仅 forTesting 可注入。
+  final void Function()? _migrationV7FailureHook;
 
   Database? _db;
 
@@ -127,7 +146,8 @@ class InventoryDatabase implements InventoryRepository {
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
         $columnCreatedAt INTEGER NOT NULL,
         $columnUpdatedAt INTEGER NOT NULL,
-        $columnDeletedAt INTEGER
+        $columnDeletedAt INTEGER,
+        $columnQuantity INTEGER NOT NULL DEFAULT 1
       )
     ''');
     await db.execute('''
@@ -152,7 +172,38 @@ class InventoryDatabase implements InventoryRepository {
         $columnTags TEXT
       )
     ''');
+    await _createBorrowTables(db);
     await _createIndexes(db);
+  }
+
+  /// V3.7：借阅人表 + 借出记录表。
+  /// loans 冗余 item_name / borrower_name 快照：改名或软删借阅人后历史仍可读。
+  Future<void> _createBorrowTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableBorrowers (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnName TEXT NOT NULL,
+        $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
+        $columnCreatedAt INTEGER NOT NULL,
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnDeletedAt INTEGER
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableLoans (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnItemId INTEGER NOT NULL,
+        $columnItemName TEXT NOT NULL,
+        $columnBorrowerName TEXT NOT NULL,
+        $columnQuantity INTEGER NOT NULL DEFAULT 1,
+        $columnReturnedQty INTEGER NOT NULL DEFAULT 0,
+        $columnBorrowedAt INTEGER NOT NULL,
+        $columnDueAt INTEGER NOT NULL,
+        $columnReturnedAt INTEGER,
+        $columnIsPartial INTEGER NOT NULL DEFAULT 0,
+        $columnUpdatedAt INTEGER NOT NULL
+      )
+    ''');
   }
 
   Future<void> _createIndexes(Database db) async {
@@ -172,6 +223,19 @@ class InventoryDatabase implements InventoryRepository {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_assoc_location '
       'ON $tableItemLocations($columnLocationId)',
+    );
+    // V3.7：借阅人名唯一（活跃行）、借出记录按到期日/物品索引。
+    await db.execute(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_borrowers_name_unique '
+      'ON $tableBorrowers($columnName) WHERE $columnIsDeleted = 0',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_loans_due '
+      'ON $tableLoans($columnDueAt)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_loans_item '
+      'ON $tableLoans($columnItemId)',
     );
   }
 
@@ -200,7 +264,8 @@ class InventoryDatabase implements InventoryRepository {
         final itemName = normalizeName(name);
         final locationName = normalizeName(location);
         if (itemName.isEmpty || locationName.isEmpty) continue;
-        final itemId = await _findOrCreateItem(db, itemName, now);
+        final itemId = await _findOrCreateItem(db, itemName, now,
+            includeQuantity: false);
         final locationId = await _findOrCreateLocation(db, locationName, now);
         await _link(db, itemId, locationId, now);
       }
@@ -232,6 +297,31 @@ class InventoryDatabase implements InventoryRepository {
       if (v6Hook != null) v6Hook();
       await _addColumnIfMissing(db, tableItems, columnDeletedAt,
           type: 'INTEGER');
+    }
+
+    // v6 → v7：V3.7 借阅管理——items 加 quantity（默认 1），
+    // 新建 borrowers / loans 两张表。
+    // 注意 oldVersion<3 时上面已走 _onCreate(db,3) 建的是 v3 三表结构，
+    // 不含 quantity/借出表，所以这里统一按 oldVersion<7 判断补齐。
+    if (oldVersion < 7 && newVersion >= 7) {
+      // 失败注入点：在建表/加列前抛错，验证整体回滚、版本退回 6。
+      final v7Hook = _migrationV7FailureHook;
+      if (v7Hook != null) v7Hook();
+      await _addColumnIfMissing(db, tableItems, columnQuantity,
+          type: 'INTEGER NOT NULL DEFAULT 1');
+      await _createBorrowTables(db);
+      // 索引单独补（_createBorrowTables 里的索引在 _createIndexes 中，
+      // 升级路径不会走 _createIndexes，这里补建借阅相关索引）。
+      await db.execute(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_borrowers_name_unique '
+        'ON $tableBorrowers($columnName) WHERE $columnIsDeleted = 0',
+      );
+      await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_loans_due ON $tableLoans($columnDueAt)',
+      );
+      await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_loans_item ON $tableLoans($columnItemId)',
+      );
     }
   }
 
@@ -294,7 +384,8 @@ class InventoryDatabase implements InventoryRepository {
     for (final name in itemNames) {
       itemIds[name] = await db.insert(
         tableItems,
-        Item(name: name, createdAt: now, updatedAt: now).toMap(),
+        Item(name: name, createdAt: now, updatedAt: now)
+            .toMap(includeQuantity: false),
       );
     }
     final locationIds = <String, int>{};
@@ -325,7 +416,8 @@ class InventoryDatabase implements InventoryRepository {
     return normalized;
   }
 
-  Future<int> _findOrCreateItem(DatabaseExecutor db, String name, int now) async {
+  Future<int> _findOrCreateItem(DatabaseExecutor db, String name, int now,
+      {int quantity = 1, bool includeQuantity = true}) async {
     final rows = await db.query(
       tableItems,
       columns: <String>[columnId],
@@ -336,7 +428,8 @@ class InventoryDatabase implements InventoryRepository {
     if (rows.isNotEmpty) return rows.first[columnId] as int;
     return db.insert(
       tableItems,
-      Item(name: name, createdAt: now, updatedAt: now).toMap(),
+      Item(name: name, createdAt: now, updatedAt: now, quantity: quantity)
+          .toMap(includeQuantity: includeQuantity),
     );
   }
 
@@ -941,7 +1034,8 @@ class InventoryDatabase implements InventoryRepository {
         .toList(growable: false);
   }
 
-  /// 备份导出：三张表全量行（含软删行，保证还原保真），外加库名、schema 版本、导出时间。
+  /// 备份导出：全部表全量行（含软删行，保证还原保真），外加库名、schema 版本、导出时间。
+  /// V3.7：新增 borrowers / loans 两张表；旧版恢复时缺表按空处理。
   /// 纯读取，不改库。
   @override
   Future<Map<String, Object?>> exportBackup() async {
@@ -954,11 +1048,15 @@ class InventoryDatabase implements InventoryRepository {
       tableLocations: await db.query(tableLocations, orderBy: '$columnId ASC'),
       tableItemLocations:
           await db.query(tableItemLocations, orderBy: '$columnId ASC'),
+      tableBorrowers: await db.query(tableBorrowers, orderBy: '$columnId ASC'),
+      tableLoans: await db.query(tableLoans, orderBy: '$columnId ASC'),
     };
   }
 
-  /// 备份恢复：事务内清空三表后按备份重插（保留原 id）。
+  /// 备份恢复：事务内清空所有表后按备份重插（保留原 id）。
   /// 校验备份归属与版本（版本高于当前库则拒绝），任何一步失败整体回滚。
+  /// 兼容旧备份：无 borrowers/loans 键时按空表处理；旧物品行无 quantity 时
+  /// [Item.fromMap] 自动补 1（元宝迁移兼容硬约束）。
   @override
   Future<void> restoreBackup(Map<String, Object?> data) async {
     if (data['app'] != 'home_inventory') {
@@ -975,9 +1073,18 @@ class InventoryDatabase implements InventoryRepository {
     final itemMaps = _rowsOf(data, tableItems);
     final locationMaps = _rowsOf(data, tableLocations);
     final assocMaps = _rowsOf(data, tableItemLocations);
+    final borrowerMaps = data.containsKey(tableBorrowers)
+        ? _rowsOf(data, tableBorrowers)
+        : <Map<String, Object?>>[];
+    final loanMaps = data.containsKey(tableLoans)
+        ? _rowsOf(data, tableLoans)
+        : <Map<String, Object?>>[];
 
     final db = await open();
     await db.transaction<void>((txn) async {
+      // 清空顺序：先子表后主表，避免外键/索引干扰。
+      await txn.delete(tableLoans);
+      await txn.delete(tableBorrowers);
       await txn.delete(tableItemLocations);
       await txn.delete(tableLocations);
       await txn.delete(tableItems);
@@ -989,6 +1096,12 @@ class InventoryDatabase implements InventoryRepository {
       }
       for (final row in assocMaps) {
         await txn.insert(tableItemLocations, ItemLocation.fromMap(row).toMap());
+      }
+      for (final row in borrowerMaps) {
+        await txn.insert(tableBorrowers, Borrower.fromMap(row).toMap());
+      }
+      for (final row in loanMaps) {
+        await txn.insert(tableLoans, Loan.fromMap(row).toMap());
       }
     });
   }
@@ -1004,6 +1117,184 @@ class InventoryDatabase implements InventoryRepository {
               for (final e in row.entries) '${e.key}': e.value,
             })
         .toList(growable: false);
+  }
+
+  // ==================== V3.7 借阅管理 ====================
+
+  /// 默认借期 3 天（元宝批复），单笔可在借出时覆盖。
+  static const int defaultLoanDays = 3;
+
+  /// 借出：物品 + 借阅人 + 数量 + 天数（默认 3 天）。
+  /// 借阅人按名字复用活跃行（去重），物品按名字复用活跃行。
+  /// due_at 用 UTC 毫秒（DateTime.now().toUtc() + 天数），本地显示由 UI 负责。
+  /// 名称走归一化；数量 >= 1，天数 >= 1，否则抛 ArgumentError。
+  @override
+  Future<Loan> lendItem(
+    String itemName,
+    String borrowerName, {
+    int quantity = 1,
+    int? days,
+  }) async {
+    final validItem = _normalizeName(itemName, '物品名称');
+    final validBorrower = _normalizeName(borrowerName, '借阅人姓名');
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '借出数量至少为 1');
+    }
+    final loanDays = days ?? defaultLoanDays;
+    if (loanDays < 1) {
+      throw ArgumentError.value(loanDays, 'days', '借期至少为 1 天');
+    }
+
+    final db = await open();
+    final nowUtc = DateTime.now().toUtc();
+    final now = nowUtc.millisecondsSinceEpoch;
+    final due = nowUtc.add(Duration(days: loanDays)).millisecondsSinceEpoch;
+
+    return db.transaction<Loan>((txn) async {
+      final itemId = await _findOrCreateItem(txn, validItem, now);
+      // 借阅人：复用活跃行，软删的不复用（同名会新建）。
+      final borrowerRows = await txn.query(
+        tableBorrowers,
+        columns: <String>[columnId],
+        where: '$columnName = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[validBorrower],
+        limit: 1,
+      );
+      if (borrowerRows.isEmpty) {
+        await txn.insert(
+          tableBorrowers,
+          Borrower(name: validBorrower, createdAt: now, updatedAt: now).toMap(),
+        );
+      }
+      final loan = Loan(
+        itemId: itemId,
+        updatedAt: now,
+        itemName: validItem,
+        borrowerName: validBorrower,
+        quantity: quantity,
+        borrowedAt: now,
+        dueAt: due,
+      );
+      final id = await txn.insert(tableLoans, loan.toMap());
+      return Loan(
+        id: id,
+        itemId: itemId,
+        updatedAt: now,
+        itemName: validItem,
+        borrowerName: validBorrower,
+        quantity: quantity,
+        borrowedAt: now,
+        dueAt: due,
+      );
+    });
+  }
+
+  /// 归还：[quantity] 为空 = 全部归还；给定值 = 部分归还（累加 returnedQty，
+  /// 标 isPartial）。数量非法或超借出量抛 ArgumentError。幂等：已还完再还无操作。
+  @override
+  Future<void> returnLoan(int loanId, {int? quantity}) async {
+    final db = await open();
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    await db.transaction<void>((txn) async {
+      final rows = await txn.query(
+        tableLoans,
+        where: '$columnId = ?',
+        whereArgs: <Object?>[loanId],
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        throw ArgumentError.value(loanId, 'loanId', '借出记录不存在');
+      }
+      final loan = Loan.fromMap(rows.first);
+      if (loan.isReturned) return; // 幂等
+      final remaining = loan.quantity - loan.returnedQty;
+      final amount = quantity ?? remaining;
+      if (amount < 1 || amount > remaining) {
+        throw ArgumentError.value(quantity, 'quantity', '归还数量超出未还数量');
+      }
+      final newReturned = loan.returnedQty + amount;
+      final fullyReturned = newReturned >= loan.quantity;
+      await txn.update(
+        tableLoans,
+        <String, Object?>{
+          columnReturnedQty: newReturned,
+          columnIsPartial: fullyReturned ? (loan.isPartial ? 1 : 0) : 1,
+          if (fullyReturned) columnReturnedAt: now,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[loanId],
+      );
+    });
+  }
+
+  /// 单笔改借期（天数从借出时刻起算，UTC）。
+  @override
+  Future<void> updateLoanDue(int loanId, int days) async {
+    if (days < 1) {
+      throw ArgumentError.value(days, 'days', '借期至少为 1 天');
+    }
+    final db = await open();
+    final rows = await db.query(
+      tableLoans,
+      columns: <String>[columnBorrowedAt],
+      where: '$columnId = ?',
+      whereArgs: <Object?>[loanId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(loanId, 'loanId', '借出记录不存在');
+    }
+    final borrowedAt = (rows.first[columnBorrowedAt] as num).toInt();
+    final due = DateTime.fromMillisecondsSinceEpoch(borrowedAt, isUtc: true)
+        .add(Duration(days: days))
+        .millisecondsSinceEpoch;
+    await db.update(
+      tableLoans,
+      <String, Object?>{
+        columnDueAt: due,
+        columnUpdatedAt: DateTime.now().toUtc().millisecondsSinceEpoch,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[loanId],
+    );
+  }
+
+  /// 全部借出记录（含已还，按借出时间倒序；逾期由 UI 按 due_at 与 now 计算）。
+  @override
+  Future<List<Loan>> getAllLoans() async {
+    final db = await open();
+    final rows = await db.query(tableLoans, orderBy: '$columnBorrowedAt DESC');
+    return rows.map(Loan.fromMap).toList(growable: false);
+  }
+
+  /// 活跃借阅人（未软删，按名字排序）——借出时下拉去重来源。
+  @override
+  Future<List<Borrower>> getActiveBorrowers() async {
+    final db = await open();
+    final rows = await db.query(
+      tableBorrowers,
+      where: '$columnIsDeleted = 0',
+      orderBy: '$columnName ASC',
+    );
+    return rows.map(Borrower.fromMap).toList(growable: false);
+  }
+
+  /// 软删借阅人（历史 loan 的 borrower_name 快照不受影响）。
+  @override
+  Future<void> softDeleteBorrower(int id) async {
+    final db = await open();
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    await db.update(
+      tableBorrowers,
+      <String, Object?>{
+        columnIsDeleted: 1,
+        columnDeletedAt: now,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
   }
 
   /// 调试/验收用：统计未删除关联数。

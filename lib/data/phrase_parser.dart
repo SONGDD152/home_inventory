@@ -1,16 +1,23 @@
 import 'normalize.dart';
 
-/// 句式解析结果（密封类型，三态）。
+/// 句式解析结果（密封类型）。
+///
+/// V3.7：在原三态（录入/查询/未识别）基础上扩展借出 [ParseLend] / 归还
+/// [ParseReturn] 两态；[ParseUnrecognized] 携带向 UI 展示的意图猜测，
+/// 供"没听懂"时弹确认框（元宝批复：不静默失败，显示猜测意图）。
 sealed class ParseResult {
   const ParseResult();
 }
 
 /// 录入意图：<物品>放<位置>
 class ParseUpsert extends ParseResult {
-  const ParseUpsert({required this.item, required this.location});
+  const ParseUpsert({required this.item, required this.location, this.quantity = 1});
 
   final String item;
   final String location;
+
+  /// V3.7：录入数量（"记：2个梯子放阳台" → 2），默认 1。
+  final int quantity;
 }
 
 /// 查询意图：<物品>在哪
@@ -20,9 +27,40 @@ class ParseQuery extends ParseResult {
   final String item;
 }
 
+/// 借出意图（V3.7）：物品 + 借阅人 + 数量 + 借期天数。
+class ParseLend extends ParseResult {
+  const ParseLend({
+    required this.item,
+    required this.borrower,
+    this.quantity = 1,
+    this.days,
+  });
+
+  final String item;
+  final String borrower;
+  final int quantity;
+
+  /// 可选借期（"借给张三3天" → 3）；未提则用默认 3 天。
+  final int? days;
+}
+
+/// 归还意图（V3.7）：物品 + 数量（未提=全部）。
+class ParseReturn extends ParseResult {
+  const ParseReturn({required this.item, this.quantity});
+
+  final String item;
+
+  /// 归还数量；null 表示全部归还。
+  final int? quantity;
+}
+
 /// 未识别：不符合允许的句式模板。
+/// [guess] 为可选意图猜测（'lend'/'return'/null），供 UI 确认框使用。
 class ParseUnrecognized extends ParseResult {
-  const ParseUnrecognized();
+  const ParseUnrecognized({this.guess});
+
+  /// 'lend' / 'return' / null（无猜测）。
+  final String? guess;
 }
 
 const List<String> _trailingParticles = <String>['了', '呢', '吧'];
@@ -161,6 +199,161 @@ ParseQuery? _parseQuery(String text) {
   return null;
 }
 
+// ==================== V3.7 借阅/数量语义 ====================
+
+/// 借出触发词。按长度降序，长的优先。
+const List<String> _lendMarkers = <String>['借给', '借出', '借走', '借了', '借'];
+
+/// 归还触发词。
+const List<String> _returnMarkers = <String>['归还', '还了', '还回', '还'];
+
+/// 中文数字 → 整数。仅覆盖 1-20（家庭场景够用）。
+const Map<String, int> _cnNumbers = <String, int>{
+  '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5,
+  '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+  '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+  '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
+};
+
+/// 从文本头部剥出数量（"2个梯子" → (2, "梯子")；"两个梯子" 同）。
+/// 识别阿拉伯数字与中文数字，量词 个/本/把/件/只/张 可跟可不跟。
+({int value, String rest})? _extractLeadingQuantity(String text) {
+  // 阿拉伯数字。
+  final arabic = RegExp(r'^(\d+)\s*[个本把件只张只]?\s*');
+  final m = arabic.firstMatch(text);
+  if (m != null) {
+    final value = int.tryParse(m.group(1)!);
+    if (value != null && value >= 1) {
+      return (value: value, rest: text.substring(m.end).trim());
+    }
+  }
+  // 中文数字（长词优先：十一 先于 一）。
+  final keys = _cnNumbers.keys.toList()..sort((a, b) => b.length.compareTo(a.length));
+  for (final key in keys) {
+    if (!text.startsWith(key)) continue;
+    var rest = text.substring(key.length).trim();
+    // 剥一个可选量词。
+    if (rest.isNotEmpty && '个本把件只张'.contains(rest.substring(0, 1))) {
+      rest = rest.substring(1).trim();
+    }
+    return (value: _cnNumbers[key]!, rest: rest);
+  }
+  return null;
+}
+
+/// 解析借出句式。返回 null 表示不匹配。
+///
+/// 支持三种自然口语（数量/天数均可省略）：
+///  * 借给张三2个梯子 / 借给张三梯子（「给」字句，人到「给」后、物到「给」前）
+///  * 张三借了2个梯子 / 张三借梯子（人+借动词）
+///  * 借2个梯子给张三（物在「借」后、「给」前，人在「给」后）
+ParseLend? _parseLend(String text) {
+  if (!text.contains('借')) return null;
+
+  // 形态1「借给」：句式 = 借给 + <人> + <数量物品> + [天数]
+  // 人/物无显式分隔，靠数量切分："借给张三2个梯子" → 人=张三、物=梯子、数量=2。
+  if (text.startsWith('借给')) {
+    var tail = text.substring(2).trim(); // "张三2个梯子" / "张三5天梯子"
+    if (tail.isEmpty) return null;
+
+    // 先剥尾部天数（"张三2个梯子5天"）。
+    int? days;
+    final dayMatch = RegExp(r'(\d+)\s*天$').firstMatch(tail);
+    if (dayMatch != null) {
+      days = int.tryParse(dayMatch.group(1)!);
+      tail = tail.substring(0, dayMatch.start).trim();
+    }
+    if (tail.isEmpty) return null;
+
+    // 找数量位置：数量前面是人，数量+量词后面是物。
+    final qtyMatch = RegExp(r'(\d+|[一两二三四五六七八九十]+)\s*[个本把件只张]').firstMatch(tail);
+    if (qtyMatch != null) {
+      final borrower = normalizeName(tail.substring(0, qtyMatch.start).trim());
+      final item = normalizeName(_stripTrailingParticle(tail.substring(qtyMatch.end).trim()));
+      final qty = int.tryParse(qtyMatch.group(1)!) ?? _cnNumbers[qtyMatch.group(1)!] ?? 1;
+      if (borrower.isNotEmpty && item.isNotEmpty && qty >= 1) {
+        return ParseLend(item: item, borrower: borrower, quantity: qty, days: days);
+      }
+    }
+    // 无数量："借给张三梯子" — 人/物难分，返回带 guess 由 UI 确认（此处放弃精确解析）。
+    return null;
+  }
+
+  final giveIdx = text.indexOf('给');
+  if (giveIdx > 0) {
+    // 形态2：借<数量><物品>给<人>(借2个梯子给张三)
+    final head = text.substring(0, giveIdx).trim(); // "借2个梯子"
+    var tail = text.substring(giveIdx + 1).trim(); // "张三"
+    if (tail.isEmpty) return null;
+    int? days;
+    final dayMatch = RegExp(r'^(.+?)(\d+)\s*天$').firstMatch(tail);
+    if (dayMatch != null && dayMatch.group(1)!.trim().isNotEmpty) {
+      days = int.tryParse(dayMatch.group(2)!);
+      tail = dayMatch.group(1)!.trim();
+    }
+    final borrower = normalizeName(tail);
+    if (borrower.isEmpty) return null;
+    var itemPart = head.startsWith('借') ? head.substring(1).trim() : head;
+    var quantity = 1;
+    final q = _extractLeadingQuantity(itemPart);
+    if (q != null && q.rest.isNotEmpty) {
+      quantity = q.value;
+      itemPart = q.rest;
+    }
+    final item = normalizeName(_stripTrailingParticle(itemPart));
+    if (item.isEmpty) return null;
+    return ParseLend(item: item, borrower: borrower, quantity: quantity, days: days);
+  }
+
+  // 形态3：<人>借<了>?<数量><物品>。借动词必须在人之后。
+  for (final marker in _lendMarkers) {
+    final idx = text.indexOf(marker);
+    if (idx <= 0) continue;
+    final borrower = normalizeName(text.substring(0, idx));
+    var rest = text.substring(idx + marker.length).trim();
+    if (borrower.isEmpty || rest.isEmpty) continue;
+    if (_placeVerbs.any((v) => rest.contains(v))) continue;
+    var quantity = 1;
+    final q = _extractLeadingQuantity(rest);
+    if (q != null && q.rest.isNotEmpty) {
+      quantity = q.value;
+      rest = q.rest;
+    }
+    int? days;
+    final dayMatch = RegExp(r'(\d+)\s*天\s*$').firstMatch(rest);
+    if (dayMatch != null) {
+      days = int.tryParse(dayMatch.group(1)!);
+      rest = rest.substring(0, dayMatch.start).trim();
+    }
+    final item = normalizeName(_stripTrailingParticle(rest));
+    if (item.isEmpty) continue;
+    return ParseLend(item: item, borrower: borrower, quantity: quantity, days: days);
+  }
+  return null;
+}
+
+/// 解析归还句式。支持：还了2个梯子 / 还梯子 / 归还梯子给张三。
+ParseReturn? _parseReturn(String text) {
+  for (final marker in _returnMarkers) {
+    if (!text.startsWith(marker)) continue;
+    var rest = text.substring(marker.length).trim();
+    if (rest.isEmpty) continue;
+    int? quantity;
+    final q = _extractLeadingQuantity(rest);
+    if (q != null && q.rest.isNotEmpty) {
+      quantity = q.value;
+      rest = q.rest;
+    }
+    // 去掉尾部 "给某人"（归还对象借出时已记在 loan 上，这里只取物品）。
+    final giveIdx = rest.indexOf('给');
+    if (giveIdx > 0) rest = rest.substring(0, giveIdx).trim();
+    final item = normalizeName(_stripTrailingParticle(rest));
+    if (item.isEmpty) continue;
+    return ParseReturn(item: item, quantity: quantity);
+  }
+  return null;
+}
+
 /// 把一句中文口语解析成结构化意图。
 ///
 /// 纯函数：只接收一个 String，只调用 [normalizeName]，不碰仓储、数据库、UI。
@@ -181,8 +374,18 @@ ParseResult parsePhrase(String input) {
     final rest = _stripTrailingParticle(
         text.substring(_recordPrefix.length).trim());
     if (rest.isEmpty) return const ParseUnrecognized();
+    // 先剥数量（"记：2个梯子放阳台" → quantity=2），再解析句式。
+    final q = _extractLeadingQuantity(rest);
+    if (q != null) {
+      final withQty = _parseRecord(q.rest);
+      if (withQty != null) {
+        return ParseUpsert(item: withQty.item, location: withQty.location,
+            quantity: q.value);
+      }
+    }
     final parsed = _parseRecord(rest);
-    return parsed ?? const ParseUnrecognized();
+    if (parsed != null) return parsed;
+    return const ParseUnrecognized();
   }
   if (text.startsWith(_queryPrefixMark)) {
     final rest =
@@ -198,9 +401,32 @@ ParseResult parsePhrase(String input) {
     return const ParseUnrecognized();
   }
 
+  // V3.7：借/还语义优先于录入。解析函数内部已排除含放置动词的录入句
+  // （如「借条放阳台」），以及查询句式由后续 query 分支兜底。
+  final lend = _parseLend(text);
+  if (lend != null) return lend;
+  final ret = _parseReturn(text);
+  if (ret != null) return ret;
+
   // 查询优先（后缀式与前缀式），命中即返回。
   final query = _parseQuery(text);
   if (query != null) return query;
 
-  return _parseRecord(text) ?? const ParseUnrecognized();
+  // 录入：先试前置数量（"2个梯子放阳台" → quantity=2），再试原样。
+  final q = _extractLeadingQuantity(text);
+  if (q != null) {
+    final withQty = _parseRecord(q.rest);
+    if (withQty != null) {
+      return ParseUpsert(item: withQty.item, location: withQty.location,
+          quantity: q.value);
+    }
+  }
+  final record = _parseRecord(text);
+  if (record != null) return record;
+
+  // 未识别：给 UI 一个意图猜测（含"借"→lend，含"还"→return），供确认框展示。
+  final guess = text.contains('借')
+      ? 'lend'
+      : (text.contains('还') ? 'return' : null);
+  return ParseUnrecognized(guess: guess);
 }

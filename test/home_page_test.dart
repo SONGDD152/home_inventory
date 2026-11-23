@@ -4,12 +4,14 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:home_inventory/home_inventory.dart';
 
+import 'fake_loan_mixin.dart';
+
 /// 纯内存仓储：用于 widget 测试，操作是内存级的，pump 一帧即可落地。
 /// 数据层的真实数据库行为由 inventory_database_test.dart 用真实 sqlite 覆盖。
 ///
 /// Step 0（第 4 块测试基建）：三处 key 生成已改用生产共用 normalizeName，
 /// 与仓储边界同源；不再各自 trim()，杜绝两套归一化标准。
-class InMemoryRepository implements InventoryRepository {
+class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   final List<Location> _locations = <Location>[];
   final List<Item> _items = <Item>[];
   final List<ItemLocation> _links = <ItemLocation>[];
@@ -971,5 +973,81 @@ void main() {
     expect(find.byKey(const Key('phrase_field')), findsOneWidget);
     expect(find.byKey(const Key('sample_hint')), findsOneWidget);
     expect(find.byKey(const Key('home_bottom_nav')), findsOneWidget);
+  });
+
+  // =========== V3.7 借出入口 + 未识别确认框 ===========
+  testWidgets('V3.7：仓储抽屉末项「借出管理」可进入借出页', (tester) async {
+    await pumpApp(tester);
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('drawer_loans')), findsOneWidget);
+    expect(find.text('借出管理'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('drawer_loans')));
+    await tester.pumpAndSettle();
+    expect(find.text('借出管理'), findsWidgets);
+    expect(find.byKey(const Key('loan_add_fab')), findsOneWidget);
+  });
+
+  testWidgets('V3.7：未识别带借意图弹确认框，点「用这个说法」填回示例句式',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借梯子'); // 有 guess=lend 但解析不出完整三要素
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('intent_confirm_dialog')), findsOneWidget);
+    expect(find.textContaining('借出'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('intent_confirm_use')));
+    await tester.pumpAndSettle();
+    final field = tester.widget<TextField>(find.byKey(const Key('phrase_field')));
+    expect(field.controller!.text, contains('借给'));
+  });
+
+  testWidgets('V3.7：未识别无意图（纯物品名）仍提示没听懂、不弹确认框',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子');
+    await settle(tester);
+    expect(find.byKey(const Key('intent_confirm_dialog')), findsNothing);
+    expect(find.textContaining('没听懂'), findsOneWidget);
+  });
+
+  // =========== V3.7 借出入口 + 未识别确认框 ===========
+  testWidgets('V3.7：仓储抽屉末项「借出管理」可进入借出页', (tester) async {
+    await pumpApp(tester);
+    await tester.tap(find.byKey(const Key('open_drawer')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('drawer_loans')), findsOneWidget);
+    expect(find.text('借出管理'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('drawer_loans')));
+    await tester.pumpAndSettle();
+    expect(find.text('借出管理'), findsWidgets);
+    expect(find.byKey(const Key('loan_add_fab')), findsOneWidget);
+  });
+
+  testWidgets('V3.7：未识别带借意图弹确认框，点「用这个说法」填回示例句式',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借梯子'); // 有 guess=lend 但解析不出完整三要素
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('intent_confirm_dialog')), findsOneWidget);
+    expect(find.textContaining('借出'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('intent_confirm_use')));
+    await tester.pumpAndSettle();
+    final field = tester.widget<TextField>(find.byKey(const Key('phrase_field')));
+    expect(field.controller!.text, contains('借给'));
+  });
+
+  testWidgets('V3.7：未识别无意图（纯物品名）仍提示没听懂、不弹确认框',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '梯子');
+    await settle(tester);
+    expect(find.byKey(const Key('intent_confirm_dialog')), findsNothing);
+    expect(find.textContaining('没听懂'), findsOneWidget);
   });
 }

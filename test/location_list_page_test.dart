@@ -5,8 +5,10 @@ import 'package:home_inventory/data/inventory_repository.dart';
 import 'package:home_inventory/data/item.dart';
 import 'package:home_inventory/ui/location_list_page.dart';
 
+import 'fake_loan_mixin.dart';
+
 /// 内存假仓储：位置管理用到的 4 个方法，其余 noSuchMethod 兜底。
-class FakeLocationRepository implements InventoryRepository {
+class FakeLocationRepository with FakeLoanMixin implements InventoryRepository {
   FakeLocationRepository(List<Location> seed)
       : locations = List<Location>.from(seed);
 

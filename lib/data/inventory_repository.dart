@@ -58,4 +58,29 @@ abstract class InventoryRepository {
   /// 备份恢复：事务内清空三表后按备份重插（保留原 id）。
   /// 非 `home_inventory` 备份或版本高于当前库时抛 ArgumentError。
   Future<void> restoreBackup(Map<String, Object?> data);
+
+  // ---------- V3.7 借阅管理 ----------
+
+  /// 借出：物品 + 借阅人 + 数量 + 借期天数（默认 3 天）。
+  /// 借阅人按名字复用活跃行；due_at 用 UTC 存储。
+  /// 以下六个方法提供安全默认实现（返回空/无操作），使测试假仓储无需逐个实现；
+  /// 生产 [InventoryDatabase] 全部 override 为真实数据库行为。
+  Future<Loan> lendItem(String itemName, String borrowerName,
+      {int quantity = 1, int? days}) =>
+      throw UnimplementedError('lendItem 需由真实仓储实现');
+
+  /// 归还：[quantity] 为空 = 全部；给定值 = 部分归还（累加 + 标 is_partial）。
+  Future<void> returnLoan(int loanId, {int? quantity}) async {}
+
+  /// 单笔改借期（天数从借出时刻起算）。
+  Future<void> updateLoanDue(int loanId, int days) async {}
+
+  /// 全部借出记录（含已还，借出时间倒序）。逾期由 UI 按 due_at 计算。
+  Future<List<Loan>> getAllLoans() async => const <Loan>[];
+
+  /// 活跃借阅人（未软删，名字排序）——借出时下拉去重来源。
+  Future<List<Borrower>> getActiveBorrowers() async => const <Borrower>[];
+
+  /// 软删借阅人（历史 loan 的 borrower_name 快照不受影响）。
+  Future<void> softDeleteBorrower(int id) async {}
 }

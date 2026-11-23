@@ -169,6 +169,22 @@ class _ItemListPageState extends State<ItemListPage> {
     await _reload();
   }
 
+  /// V3.7：借出明细导出数据（loans + 物品 id→位置名映射）。
+  /// 复用明细页已加载的 _rows 构造映射，避免额外全表查询。
+  Future<({List<Loan> loans, Map<int, String> locationByItem})>
+      _loanExportData() async {
+    final loans = await widget.repository.getAllLoans();
+    final locationByItem = <int, String>{};
+    for (final row in _rows ?? const <ItemWithLocations>[]) {
+      final id = row.item.id;
+      if (id == null) continue;
+      locationByItem[id] = row.locations.isEmpty
+          ? '（无位置）'
+          : row.locations.map((l) => l.name).join('、');
+    }
+    return (loans: loans, locationByItem: locationByItem);
+  }
+
   /// V3.6.1：点击导出 Excel = 直接保存到手机（SAF）。
   /// 工作簿字节直接从 buildWorkbook 取（无需落临时盘），写用户所选位置。
   Future<void> _saveExcel() async {
@@ -178,7 +194,9 @@ class _ItemListPageState extends State<ItemListPage> {
       final exporter = widget.exporter ?? const ExcelExporter();
       final activeRows = _rows ?? const <ItemWithLocations>[];
       final deletedRows = await widget.repository.getDeletedItems();
-      final bytes = exporter.buildWorkbook(activeRows, deletedRows);
+      final loanData = await _loanExportData();
+      final bytes = exporter.buildWorkbook(activeRows, deletedRows,
+          loans: loanData.loans, locationByItem: loanData.locationByItem);
       final fileName = exporter.fileNameFor(DateTime.now());
       final saved = await gateway.saveBytesToDevice(fileName, bytes);
       if (!mounted) return;
@@ -208,8 +226,11 @@ class _ItemListPageState extends State<ItemListPage> {
     try {
       final activeRows = _rows ?? const <ItemWithLocations>[];
       final deletedRows = await widget.repository.getDeletedItems();
+      final loanData = await _loanExportData();
       final path = await (widget.exporter ?? const ExcelExporter())
-          .writeExcelFile(activeRows, deletedRows);
+          .writeExcelFile(activeRows, deletedRows,
+              loans: loanData.loans,
+              locationByItem: loanData.locationByItem);
       await gateway.shareFile(path);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

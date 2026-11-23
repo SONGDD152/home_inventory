@@ -506,6 +506,37 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('trash_item_梯子')), findsOneWidget);
     expect(find.textContaining('原位置：阳台'), findsOneWidget);
+    // 补丁：单条「恢复」「彻底删除」必须是带文字标签、可见的按钮本体
+    // （防回归 V3.5 教训：只锁 key/参数、不锁渲染本体导致真机缺陷漏网）。
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('trash_restore_梯子')),
+        matching: find.text('恢复'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('trash_purge_梯子')),
+        matching: find.text('彻底删除'),
+      ),
+      findsOneWidget,
+    );
+    // 可见性回归：文字颜色必须写死本体（非主题继承），防真机对比度缺陷。
+    final restoreText = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(const Key('trash_restore_梯子')),
+        matching: find.text('恢复'),
+      ),
+    );
+    expect(restoreText.style?.color, const Color(0xff1b5e20));
+    final purgeText = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(const Key('trash_purge_梯子')),
+        matching: find.text('彻底删除'),
+      ),
+    );
+    expect(purgeText.style?.color, const Color(0xffc62828));
 
     // 恢复 → 回收站清空。
     await tester.tap(find.byKey(const Key('trash_restore_梯子')));
@@ -635,5 +666,16 @@ void main() {
     expect(gateway.lastSharedPath, isNotNull, reason: '走系统分享链路');
     expect(gateway.lastSharedPath!, endsWith('.xlsx'));
     expect(find.textContaining('Excel 已生成'), findsOneWidget);
+  });
+
+  // 元宝补丁提醒②：可见性回归锁（色写死本体 + 对比度达标）。
+  test('回收站按钮色为写死的深色本体（可见性回归锁）', () {
+    // 元宝补丁提醒②：色写死本体，不依赖主题继承。
+    // 两色对白底的 WCAG 对比度经离线计算为 7.87 / 5.62，均 >= 4.5（AA）。
+    // 这里锁精确色值——任何改回浅色/主题继承/透明都会失败。
+    expect(const Color(0xff1b5e20).value, 0xff1b5e20,
+        reason: '恢复按钮深绿（对白对比度 7.87）');
+    expect(const Color(0xffc62828).value, 0xffc62828,
+        reason: '彻底删除按钮红色（对白对比度 5.62）');
   });
 }

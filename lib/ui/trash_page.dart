@@ -171,31 +171,67 @@ class _TrashPageState extends State<TrashPage> {
       itemCount: rows.length,
       itemBuilder: (context, index) {
         final row = rows[index];
-        return ListTile(
+        // V3.6 补丁：单条操作改为「独立一行 + 文字标签」按钮。
+        // 原实现把两个纯图标 IconButton 塞在 ListTile.trailing，三行长文本旁
+        // 图标不显眼，真机验收反馈找不到按钮。文字标签 + 整行可见彻底解决。
+        // key 全部保留，既有测试断言不破。
+        return Card(
           key: Key('trash_item_${row.item.name}'),
-          title: Text(row.item.name),
-          subtitle: Text(
-            row.locations.isEmpty
-                ? '${_deletedAtLabel(row)}\n（无位置记录）'
-                : '${_deletedAtLabel(row)}\n原位置：${row.locations.map((l) => l.name).join('、')}（含历史）',
-          ),
-          isThreeLine: true,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              IconButton(
-                key: Key('trash_restore_${row.item.name}'),
-                tooltip: '恢复',
-                icon: const Icon(Icons.restore),
-                onPressed: _busy ? null : () => _restore(row),
-              ),
-              IconButton(
-                key: Key('trash_purge_${row.item.name}'),
-                tooltip: '彻底删除',
-                icon: const Icon(Icons.delete_forever, color: Colors.red),
-                onPressed: _busy ? null : () => _purgeItem(row),
-              ),
-            ],
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Text(
+                  row.item.name,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  row.locations.isEmpty
+                      ? '${_deletedAtLabel(row)}\n（无位置记录）'
+                      : '${_deletedAtLabel(row)}\n原位置：${row.locations.map((l) => l.name).join('、')}（含历史）',
+                  style: const TextStyle(fontSize: 12.5, color: Color(0xff607d8b)),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: Key('trash_restore_${row.item.name}'),
+                        onPressed: _busy ? null : () => _restore(row),
+                        // 补丁（真机可见性缺陷）：色写死在 Icon/Text 本体，
+                        // 不经主题继承链——与 V3.5 三道杠同类问题，主题色
+                        // 被吞会让图标/文字与背景同色、指尖能按但肉眼看不见。
+                        icon: const Icon(Icons.restore,
+                            size: 18, color: Color(0xff1b5e20)),
+                        label: const Text('恢复',
+                            style: TextStyle(color: Color(0xff1b5e20))),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xff1b5e20)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        key: Key('trash_purge_${row.item.name}'),
+                        onPressed: _busy ? null : () => _purgeItem(row),
+                        icon: const Icon(Icons.delete_forever,
+                            size: 18, color: Color(0xffc62828)),
+                        label: const Text('彻底删除',
+                            style: TextStyle(color: Color(0xffc62828))),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xffc62828)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         );
       },

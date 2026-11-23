@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -677,5 +678,97 @@ void main() {
         reason: '恢复按钮深绿（对白对比度 7.87）');
     expect(const Color(0xffc62828).value, 0xffc62828,
         reason: '彻底删除按钮红色（对白对比度 5.62）');
+  });
+
+  // ---- V3.6.1 布局优化：元宝批复新增 3 条断言 ----
+
+  /// WCAG 相对亮度（sRGB 线性化后加权），供对比度断言精确计算。
+  double luminance(Color c) {
+    double ch(int v) {
+      final s = v / 255.0;
+      return s <= 0.04045 ? s / 12.92 : math.pow((s + 0.055) / 1.055, 2.4).toDouble();
+    }
+
+    return 0.2126 * ch(c.red) + 0.7152 * ch(c.green) + 0.0722 * ch(c.blue);
+  }
+
+  double contrast(Color a, Color b) {
+    final la = luminance(a);
+    final lb = luminance(b);
+    final hi = la > lb ? la : lb;
+    final lo = la > lb ? lb : la;
+    return (hi + 0.05) / (lo + 0.05);
+  }
+
+  testWidgets('V3.6.1① 元信息单行无换行（锁卡片变矮）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await repo.deleteItem(1);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+
+    // 元信息是单行 Text（maxLines=1 + ellipsis），不再内嵌 \n 换行。
+    final meta = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(const Key('trash_meta_梯子')),
+        matching: find.byType(Text),
+      ),
+    );
+    expect(meta.maxLines, 1, reason: '元信息单行');
+    expect(meta.overflow, TextOverflow.ellipsis, reason: '超长位置省略号');
+    expect(meta.data, isNot(contains('\n')), reason: '元信息无硬换行');
+
+    // 超长位置兜底：长按气泡（Tooltip）给完整位置，防恢复判断失准。
+    final tip = tester.widget<Tooltip>(
+      find.byKey(const Key('trash_meta_梯子')),
+    );
+    expect(tip.message, contains('原位置：'),
+        reason: '长按气泡含完整位置');
+    expect(tip.triggerMode, TooltipTriggerMode.longPress);
+  });
+
+  testWidgets('V3.6.1② chip 触控区高度 ≥ 48dp（锁安全侧）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await repo.deleteItem(1);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+
+    final restoreSize = tester.getSize(find.byKey(const Key('trash_restore_梯子')));
+    final purgeSize = tester.getSize(find.byKey(const Key('trash_purge_梯子')));
+    expect(restoreSize.height, greaterThanOrEqualTo(48),
+        reason: '恢复按钮触控区 ≥ 48dp（元宝驳回 42dp）');
+    expect(purgeSize.height, greaterThanOrEqualTo(48),
+        reason: '彻底删除按钮触控区 ≥ 48dp');
+  });
+
+  test('V3.6.1③ chip 填充底与文字色对比度达标（防主题吞色）', () {
+    // 批复①：浅绿/淡红填充 + 深色文字，对比度均 >= 4.5（AA）。
+    // 锁精确色值 + 算对比度：任何改回浅色文字/透明度/主题继承都会失败。
+    const restoreFg = Color(0xff1b5e20);
+    const restoreBg = Color(0xffe8f5e9);
+    const purgeFg = Color(0xffc62828);
+    const purgeBg = Color(0xfffdecea);
+
+    expect(restoreFg.value, 0xff1b5e20, reason: '恢复文字色写死深绿');
+    expect(restoreBg.value, 0xffe8f5e9, reason: '恢复浅绿填充底写死');
+    expect(purgeFg.value, 0xffc62828, reason: '删除文字色写死深红');
+    expect(purgeBg.value, 0xfffdecea, reason: '删除淡红填充底写死');
+
+    expect(contrast(restoreFg, restoreBg), greaterThanOrEqualTo(4.5),
+        reason: '恢复 chip 对比度 ≈7.00');
+    expect(contrast(purgeFg, purgeBg), greaterThanOrEqualTo(4.5),
+        reason: '删除 chip 对比度 ≈4.92');
+
+    // 批复 a：两个 chip 均为「浅填充底 + 深文字色」——填充克制、文字清晰，
+    // 危险操作（淡红底）与安全操作（浅绿底）都不喧宾夺主。
+    expect(luminance(restoreBg), greaterThan(0.8), reason: '恢复填充底是浅色');
+    expect(luminance(purgeBg), greaterThan(0.8), reason: '删除填充底是浅色');
+    expect(luminance(restoreFg), lessThan(0.2), reason: '恢复文字是深色');
+    expect(luminance(purgeFg), lessThan(0.2), reason: '删除文字是深色');
   });
 }

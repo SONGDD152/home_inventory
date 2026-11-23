@@ -175,9 +175,16 @@ class _TrashPageState extends State<TrashPage> {
         // 原实现把两个纯图标 IconButton 塞在 ListTile.trailing，三行长文本旁
         // 图标不显眼，真机验收反馈找不到按钮。文字标签 + 整行可见彻底解决。
         // key 全部保留，既有测试断言不破。
+        // V3.6.1 布局优化（元宝批复落实）：
+        // ① 元信息从两行压成单行（ellipsis），长按气泡给完整位置——防超长位置名误判；
+        // ② 按钮从各占一半的描边大块改为右对齐 chip（浅绿/淡红填充底），
+        //    危险操作（彻底删除）视觉权重低于安全操作（恢复）；
+        // ③ 触控区硬锁 48dp（元宝驳回 42dp：危险操作偏安全侧）；
+        // ④ 间距层级：物品名↔元信息(2) < 元信息↔按钮(8)，形成主体/附属层级。
+        // 可见性防护同源复用：色写死在 Icon/Text 本体，不经主题继承；key 全保留。
         return Card(
           key: Key('trash_item_${row.item.name}'),
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
             child: Column(
@@ -188,44 +195,58 @@ class _TrashPageState extends State<TrashPage> {
                   style: const TextStyle(
                       fontSize: 16, fontWeight: FontWeight.w600),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  row.locations.isEmpty
-                      ? '${_deletedAtLabel(row)}\n（无位置记录）'
-                      : '${_deletedAtLabel(row)}\n原位置：${row.locations.map((l) => l.name).join('、')}（含历史）',
-                  style: const TextStyle(fontSize: 12.5, color: Color(0xff607d8b)),
+                const SizedBox(height: 2),
+                Tooltip(
+                  key: Key('trash_meta_${row.item.name}'),
+                  triggerMode: TooltipTriggerMode.longPress,
+                  message: row.locations.isEmpty
+                      ? '无位置记录'
+                      : '原位置：${row.locations.map((l) => l.name).join('、')}（含历史）',
+                  child: Text(
+                    row.locations.isEmpty
+                        ? '${_deletedAtLabel(row)}（无位置记录）'
+                        : '${_deletedAtLabel(row)} · 原位置：${row.locations.map((l) => l.name).join('、')}（含历史）',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12.5, color: Color(0xff607d8b)),
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: <Widget>[
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        key: Key('trash_restore_${row.item.name}'),
-                        onPressed: _busy ? null : () => _restore(row),
-                        // 补丁（真机可见性缺陷）：色写死在 Icon/Text 本体，
-                        // 不经主题继承链——与 V3.5 三道杠同类问题，主题色
-                        // 被吞会让图标/文字与背景同色、指尖能按但肉眼看不见。
-                        icon: const Icon(Icons.restore,
-                            size: 18, color: Color(0xff1b5e20)),
-                        label: const Text('恢复',
-                            style: TextStyle(color: Color(0xff1b5e20))),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xff1b5e20)),
-                        ),
+                    OutlinedButton.icon(
+                      key: Key('trash_restore_${row.item.name}'),
+                      onPressed: _busy ? null : () => _restore(row),
+                      // 色写死在 Icon/Text 本体（V3.5 吞色防护），填充底浅绿。
+                      icon: const Icon(Icons.restore,
+                          size: 18, color: Color(0xff1b5e20)),
+                      label: const Text('恢复',
+                          style: TextStyle(color: Color(0xff1b5e20))),
+                      style: OutlinedButton.styleFrom(
+                        backgroundColor: const Color(0xffe8f5e9),
+                        side: BorderSide.none,
+                        shape: const StadiumBorder(),
+                        minimumSize: const Size(72, 48),
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        key: Key('trash_purge_${row.item.name}'),
-                        onPressed: _busy ? null : () => _purgeItem(row),
-                        icon: const Icon(Icons.delete_forever,
-                            size: 18, color: Color(0xffc62828)),
-                        label: const Text('彻底删除',
-                            style: TextStyle(color: Color(0xffc62828))),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xffc62828)),
-                        ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      key: Key('trash_purge_${row.item.name}'),
+                      onPressed: _busy ? null : () => _purgeItem(row),
+                      // 危险操作：淡红填充底 + 深红字，对比度 4.92（AA 达标）；
+                      // 视觉权重低于「恢复」的饱和绿，防喧宾夺主。
+                      icon: const Icon(Icons.delete_forever,
+                          size: 18, color: Color(0xffc62828)),
+                      label: const Text('彻底删除',
+                          style: TextStyle(color: Color(0xffc62828))),
+                      style: OutlinedButton.styleFrom(
+                        backgroundColor: const Color(0xfffdecea),
+                        side: BorderSide.none,
+                        shape: const StadiumBorder(),
+                        minimumSize: const Size(96, 48),
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
                       ),
                     ),
                   ],

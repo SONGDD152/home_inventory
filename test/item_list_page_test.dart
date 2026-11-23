@@ -163,6 +163,12 @@ class FakeBackupGateway implements BackupGateway {
   String? lastWrittenPath;
   String? lastSharedPath;
 
+  // V3.6.1 保存路径记录与注入开关。
+  String? lastSavedFileName;
+  Uint8List? lastSavedBytes;
+  bool saveReturnsNull = false; // true = 模拟用户取消
+  bool saveThrows = false; // true = 模拟失败（磁盘满/权限）
+
   @override
   Future<String> writeBackupFile(String json) async {
     lastWrittenJson = json;
@@ -174,6 +180,15 @@ class FakeBackupGateway implements BackupGateway {
   @override
   Future<void> shareFile(String path) async {
     lastSharedPath = path;
+  }
+
+  @override
+  Future<String?> saveBytesToDevice(String fileName, Uint8List bytes) async {
+    lastSavedFileName = fileName;
+    lastSavedBytes = bytes;
+    if (saveThrows) throw StateError('磁盘已满');
+    if (saveReturnsNull) return null;
+    return 'fake://saved_${_nextId++}/$fileName';
   }
 
   @override
@@ -309,7 +324,7 @@ void main() {
     expect(find.textContaining('没有匹配的物品'), findsOneWidget);
   });
 
-  testWidgets('导出备份：生成文件 → 唤起分享 → 提示文件名', (tester) async {
+  testWidgets('V3.6.1 导出备份：点击→直接保存到手机（不分享）→提示已保存', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[]);
     final gateway = FakeBackupGateway();
     await _pumpPage(tester, repo: repo, gateway: gateway);
@@ -318,10 +333,64 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(repo.exportCalls, 1);
-    expect(gateway.lastWrittenJson, isNotNull);
-    expect(jsonDecode(gateway.lastWrittenJson!), isA<Map<String, Object?>>());
-    expect(gateway.lastSharedPath, gateway.lastWrittenPath);
+    expect(gateway.lastSavedBytes, isNotNull, reason: '字节交给系统保存对话框');
+    expect(jsonDecode(utf8.decode(gateway.lastSavedBytes!)),
+        isA<Map<String, Object?>>());
+    expect(gateway.lastSavedFileName, endsWith('.json'));
+    expect(gateway.lastSharedPath, isNull, reason: '点击不触发分享');
+    expect(find.textContaining('已保存：'), findsOneWidget);
+  });
+
+  testWidgets('V3.6.1 长按导出备份：走原系统分享链路（保留分享能力）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    await _pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.longPress(find.byKey(const Key('export_backup')));
+    await tester.pumpAndSettle();
+
+    expect(repo.exportCalls, 1);
+    expect(gateway.lastSharedPath, isNotNull, reason: '长按触发分享');
+    expect(gateway.lastSavedBytes, isNull, reason: '长按不触发保存');
     expect(find.textContaining('备份已生成'), findsOneWidget);
+  });
+
+  testWidgets('V3.6.1 保存提示文案：长按可分享给好友（12sp 灰字）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    expect(find.text('长按可分享给好友'), findsOneWidget);
+    final hint = tester.widget<Text>(find.text('长按可分享给好友'));
+    expect(hint.style?.fontSize, 12, reason: '元宝修订①：12sp');
+    expect(hint.style?.color, Colors.grey, reason: '灰字不抢按钮');
+  });
+
+  testWidgets('V3.6.1 保存取消（返回 null）：静默无提示无异常', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[]);
+    final gateway = FakeBackupGateway()..saveReturnsNull = true;
+    await _pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('export_backup')));
+    await tester.pumpAndSettle();
+
+    expect(gateway.lastSavedBytes, isNotNull, reason: '确实调用了保存');
+    expect(find.textContaining('已保存'), findsNothing);
+    expect(find.textContaining('无法保存'), findsNothing);
+    expect(find.byKey(const Key('export_backup')), findsOneWidget,
+        reason: '页面未崩溃');
+  });
+
+  testWidgets('V3.6.1 保存失败（抛异常）：明确提示改用分享，不静默吞掉', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[]);
+    final gateway = FakeBackupGateway()..saveThrows = true;
+    await _pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('export_backup')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('无法保存，请改用分享'), findsOneWidget);
+    expect(find.byKey(const Key('export_backup')), findsOneWidget,
+        reason: '页面未崩溃');
   });
 
   testWidgets('恢复备份：确认 → 选文件 → 调仓储 → 提示完成 → 重载列表', (tester) async {
@@ -643,13 +712,28 @@ void main() {
     expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
   });
 
-  testWidgets('导出Excel：生成文件并走系统分享链路（V3.6）', (tester) async {
+  testWidgets('V3.6.1 导出Excel：点击→直接保存（SAF）→提示已保存', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台'], id: 1),
     ]);
     final gateway = FakeBackupGateway();
-    // 落盘注入内存假件（widget 假异步环境禁止真实文件 IO）；
-    // 字节构建与文件名规则由 excel_exporter_test.dart 用真 IO 锁定。
+    await _pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('export_excel')));
+    await tester.pumpAndSettle();
+
+    expect(gateway.lastSavedBytes, isNotNull, reason: '工作簿字节交给保存对话框');
+    expect(gateway.lastSavedBytes![0], 0x50, reason: 'zip 头（xlsx 容器）');
+    expect(gateway.lastSavedFileName, endsWith('.xlsx'));
+    expect(gateway.lastSharedPath, isNull, reason: '点击不触发分享');
+    expect(find.textContaining('已保存：'), findsOneWidget);
+  });
+
+  testWidgets('V3.6.1 长按导出Excel：走原系统分享链路（保留分享能力）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    final gateway = FakeBackupGateway();
     Uint8List? lastBytes;
     final exporter = ExcelExporter(
       fileWriter: (bytes) async {
@@ -659,12 +743,11 @@ void main() {
     );
     await _pumpPage(tester, repo: repo, gateway: gateway, exporter: exporter);
 
-    await tester.tap(find.byKey(const Key('export_excel')));
+    await tester.longPress(find.byKey(const Key('export_excel')));
     await tester.pumpAndSettle();
 
-    expect(lastBytes, isNotNull, reason: '工作簿字节已构建');
-    expect(lastBytes![0], 0x50, reason: 'zip 头（xlsx 容器）');
-    expect(gateway.lastSharedPath, isNotNull, reason: '走系统分享链路');
+    expect(lastBytes, isNotNull, reason: '分享路仍生成 xlsx 落盘');
+    expect(gateway.lastSharedPath, isNotNull, reason: '长按触发分享');
     expect(gateway.lastSharedPath!, endsWith('.xlsx'));
     expect(find.textContaining('Excel 已生成'), findsOneWidget);
   });

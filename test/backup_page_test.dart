@@ -43,7 +43,7 @@ void main() {
     );
   });
 
-  testWidgets('导出备份：生成 → 分享 → 提示', (tester) async {
+  testWidgets('V3.6.1 导出备份：点击→保存到手机→提示已保存', (tester) async {
     final repo = FakeListRepository(const <ItemWithLocations>[]);
     final gateway = FakeBackupGateway();
     await pumpPage(tester, repo: repo, gateway: gateway);
@@ -52,8 +52,49 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(repo.exportCalls, 1);
-    expect(jsonDecode(gateway.lastWrittenJson!), isA<Map<String, Object?>>());
+    expect(gateway.lastSavedBytes, isNotNull);
+    expect(jsonDecode(utf8.decode(gateway.lastSavedBytes!)),
+        isA<Map<String, Object?>>());
+    expect(find.textContaining('已保存：'), findsOneWidget);
+  });
+
+  testWidgets('V3.6.1 长按导出备份：分享给好友（保留原分享链路）', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    await pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.longPress(find.byKey(const Key('export_backup')));
+    await tester.pumpAndSettle();
+
+    expect(repo.exportCalls, 1);
+    expect(gateway.lastSharedPath, isNotNull);
     expect(find.textContaining('备份已生成'), findsOneWidget);
+  });
+
+  testWidgets('V3.6.1 跨版本恢复：V3.6 旧结构备份（schemaVersion=5）能成功恢复',
+      (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    // V3.6 及更早导出的备份结构：schemaVersion=5，无 deleted_at 字段。
+    // 新版（库版本 6）恢复时不得因缺字段/版本旧而失败。
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': 5,
+      'exportedAt': 1700000000000,
+      'items': <Object?>[],
+      'locations': <Object?>[],
+      'item_locations': <Object?>[],
+    }));
+    await pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repo.restoreCalls, 1);
+    expect(find.textContaining('恢复完成'), findsOneWidget);
+    expect(find.textContaining('恢复失败'), findsNothing);
   });
 
   testWidgets('恢复备份：确认 → 选文件 → 调仓储 → 提示完成', (tester) async {

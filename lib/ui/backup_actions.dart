@@ -23,6 +23,7 @@ class BackupActions extends StatefulWidget {
     this.gateway,
     this.onRestored,
     this.onExportExcel,
+    this.onShareExcel,
     this.compact = true,
   });
 
@@ -34,9 +35,13 @@ class BackupActions extends StatefulWidget {
   /// 恢复完成（成功）后的回调，例如刷新明细列表。
   final Future<void> Function()? onRestored;
 
-  /// V3.6：Excel 导出回调；null 表示不显示该按钮（备份页不受影响）。
-  /// 导出与分享的全部逻辑在调用方（明细页持有 exporter 与数据）。
+  /// V3.6.1：Excel「点击=保存到手机」回调；null 表示不显示该按钮（备份页不受影响）。
+  /// 导出与保存的全部逻辑在调用方（明细页持有 exporter 与数据）。
   final Future<void> Function()? onExportExcel;
+
+  /// V3.6.1：Excel「长按=分享给好友」回调。生产必传（与 onExportExcel 配套）；
+  /// null 时 Excel 按钮仍可点击保存，仅长按无分享。
+  final Future<void> Function()? onShareExcel;
 
   /// true = 底部操作区横排；false = 独立页纵排全宽。
   final bool compact;
@@ -52,7 +57,48 @@ class _BackupActionsState extends State<BackupActions> {
 
   // ---------- 备份导出 ----------
 
-  Future<void> _exportBackup() async {
+  /// 备份文件名（与 SystemBackupGateway.writeBackupFile 同格式，便于用户识别）。
+  String _backupFileName(DateTime now) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return 'home_inventory_backup_'
+        '${now.year}${two(now.month)}${two(now.day)}_'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}.json';
+  }
+
+  /// V3.6.1：点击导出 = 直接保存到手机（系统 SAF 保存对话框）。
+  /// null（用户取消）静默无提示；异常（磁盘满/权限/ROM 拒绝）明确提示。
+  Future<void> _saveBackup() async {
+    setState(() => _busy = true);
+    try {
+      final backup = await widget.repository.exportBackup();
+      final bytes = utf8.encode(
+        const JsonEncoder.withIndent('  ').convert(backup),
+      );
+      final fileName = _backupFileName(DateTime.now());
+      final saved = await _gateway.saveBytesToDevice(fileName, bytes);
+      if (!mounted) return;
+      if (saved == null) {
+        // 用户取消：SAF 对话框自带取消，这里静默、不提示、不报错。
+        setState(() => _busy = false);
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已保存：$fileName')),
+      );
+    } catch (_) {
+      // 兜住 Error + Exception：file_picker 失败可能抛 PlatformException，
+      // 也可能抛 Error（磁盘满/ROM 拒绝）。元宝 b 条：失败必须明确提示。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法保存，请改用分享（长按导出按钮）')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  /// V3.6.1：长按导出 = 走原系统分享面板（发微信/邮箱等）。
+  Future<void> _shareBackup() async {
     setState(() => _busy = true);
     try {
       final backup = await widget.repository.exportBackup();
@@ -66,6 +112,23 @@ class _BackupActionsState extends State<BackupActions> {
           content: Text('备份已生成：${path.split('/').last.split('\\').last}'),
         ),
       );
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('导出失败：$e')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  /// V3.6.1：Excel 长按 = 走原分享链路（回调交给明细页）。
+  Future<void> _shareExcel() async {
+    final callback = widget.onShareExcel;
+    if (callback == null) return;
+    setState(() => _busy = true);
+    try {
+      await callback();
     } on Exception catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -143,11 +206,16 @@ class _BackupActionsState extends State<BackupActions> {
 
   @override
   Widget build(BuildContext context) {
-    final exportButton = FilledButton.tonalIcon(
+    // V3.6.1：点击 = 保存到手机；长按 = 分享给好友。
+    // 用 GestureDetector 包住按钮接长按，按钮 onPressed 仍走点击（互不冲突）。
+    final exportButton = GestureDetector(
       key: const Key('export_backup'),
-      onPressed: _busy ? null : _exportBackup,
-      icon: const Icon(Icons.ios_share),
-      label: const Text('导出备份'),
+      onLongPress: _busy ? null : _shareBackup,
+      child: FilledButton.tonalIcon(
+        onPressed: _busy ? null : _saveBackup,
+        icon: const Icon(Icons.ios_share),
+        label: const Text('导出备份'),
+      ),
     );
     final restoreButton = OutlinedButton.icon(
       key: const Key('restore_backup'),
@@ -157,12 +225,24 @@ class _BackupActionsState extends State<BackupActions> {
     );
     final excelButton = widget.onExportExcel == null
         ? null
-        : FilledButton.tonalIcon(
+        : GestureDetector(
             key: const Key('export_excel'),
-            onPressed: _busy ? null : widget.onExportExcel,
-            icon: const Icon(Icons.table_view),
-            label: const Text('导出Excel'),
+            onLongPress: _busy ? null : _shareExcel,
+            child: FilledButton.tonalIcon(
+              onPressed: _busy ? null : widget.onExportExcel,
+              icon: const Icon(Icons.table_view),
+              label: const Text('导出Excel'),
+            ),
           );
+    // 元宝修订①：提示文案「长按可分享给好友」，12sp，灰字不抢按钮。
+    const hint = Padding(
+      padding: EdgeInsets.only(top: 6),
+      child: Text(
+        '长按可分享给好友',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 12, color: Colors.grey),
+      ),
+    );
     if (widget.compact) {
       final children = <Widget>[
         Expanded(child: exportButton),
@@ -174,7 +254,10 @@ class _BackupActionsState extends State<BackupActions> {
           ..add(const SizedBox(width: 12))
           ..add(Expanded(child: excelButton));
       }
-      return Row(children: children);
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[Row(children: children), hint],
+      );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -186,6 +269,7 @@ class _BackupActionsState extends State<BackupActions> {
           const SizedBox(height: 12),
           excelButton,
         ],
+        hint,
       ],
     );
   }

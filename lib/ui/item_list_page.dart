@@ -112,7 +112,8 @@ class _ItemListPageState extends State<ItemListPage> {
             repository: widget.repository,
             gateway: widget.gateway,
             onRestored: _reload,
-            onExportExcel: _exportExcel,
+            onExportExcel: _saveExcel,
+            onShareExcel: _shareExcel,
             compact: true,
           ),
         ),
@@ -168,8 +169,40 @@ class _ItemListPageState extends State<ItemListPage> {
     await _reload();
   }
 
-  /// V3.6：导出 Excel（正常明细 + 回收站两个 Sheet），复用备份分享链路。
-  Future<void> _exportExcel() async {
+  /// V3.6.1：点击导出 Excel = 直接保存到手机（SAF）。
+  /// 工作簿字节直接从 buildWorkbook 取（无需落临时盘），写用户所选位置。
+  Future<void> _saveExcel() async {
+    final gateway = widget.gateway ?? SystemBackupGateway();
+    setState(() => _busy = true);
+    try {
+      final exporter = widget.exporter ?? const ExcelExporter();
+      final activeRows = _rows ?? const <ItemWithLocations>[];
+      final deletedRows = await widget.repository.getDeletedItems();
+      final bytes = exporter.buildWorkbook(activeRows, deletedRows);
+      final fileName = exporter.fileNameFor(DateTime.now());
+      final saved = await gateway.saveBytesToDevice(fileName, bytes);
+      if (!mounted) return;
+      if (saved == null) {
+        // 用户取消：静默。
+        setState(() => _busy = false);
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已保存：$fileName')),
+      );
+    } catch (_) {
+      // 兜住 Error + Exception（磁盘满/权限/ROM 拒绝），失败必须明确提示。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法保存，请改用分享（长按导出按钮）')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  /// V3.6.1：长按 Excel = 走原系统分享面板（生成 xlsx 后 shareFile）。
+  Future<void> _shareExcel() async {
     final gateway = widget.gateway ?? SystemBackupGateway();
     setState(() => _busy = true);
     try {

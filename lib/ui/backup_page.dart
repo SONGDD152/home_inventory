@@ -36,8 +36,9 @@ class BackupPage extends StatelessWidget {
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             const Text(
-              '备份会把全部物品和位置打包成一个 JSON 文件，'
-              '通过系统分享面板保存到手机文件或发给自己；'
+              '备份会把全部物品和位置打包成一个 JSON 文件。'
+              '导出文件将通过系统对话框保存到您选择的位置（如下载、文档等）；'
+              '长按导出按钮可分享给好友。'
               '恢复会从所选文件覆盖当前全部数据。',
               style: TextStyle(fontSize: 13, color: Colors.grey),
             ),

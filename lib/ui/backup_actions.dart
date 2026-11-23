@@ -7,12 +7,13 @@ import 'package:flutter/material.dart';
 import '../data/backup_gateway.dart';
 import '../data/inventory_repository.dart';
 
-/// 备份/恢复操作块（可复用）。
+/// 备份/恢复/Excel 导出操作块（可复用）。
 ///
 /// 承载导出（系统分享面板）与恢复（文件选择器 + 确认框 + 覆盖还原）的
 /// 全部交互逻辑，业务逻辑与 V3.1 完全一致；只改承载方式：
-/// - [compact] = true：横向两个按钮，供明细页底部固定操作区；
-/// - [compact] = false：纵向两个全宽按钮，供独立备份页主体。
+/// - [compact] = true：横向按钮排，供明细页底部固定操作区；
+/// - [compact] = false：纵向全宽按钮，供独立备份页主体。
+/// - [onExportExcel] 非 null 时追加「导出Excel」按钮（V3.6 明细页）。
 ///
 /// 恢复成功后回调 [onRestored]（调用方刷新列表）。
 class BackupActions extends StatefulWidget {
@@ -21,6 +22,7 @@ class BackupActions extends StatefulWidget {
     required this.repository,
     this.gateway,
     this.onRestored,
+    this.onExportExcel,
     this.compact = true,
   });
 
@@ -31,6 +33,10 @@ class BackupActions extends StatefulWidget {
 
   /// 恢复完成（成功）后的回调，例如刷新明细列表。
   final Future<void> Function()? onRestored;
+
+  /// V3.6：Excel 导出回调；null 表示不显示该按钮（备份页不受影响）。
+  /// 导出与分享的全部逻辑在调用方（明细页持有 exporter 与数据）。
+  final Future<void> Function()? onExportExcel;
 
   /// true = 底部操作区横排；false = 独立页纵排全宽。
   final bool compact;
@@ -149,14 +155,26 @@ class _BackupActionsState extends State<BackupActions> {
       icon: const Icon(Icons.restore),
       label: const Text('恢复备份'),
     );
+    final excelButton = widget.onExportExcel == null
+        ? null
+        : FilledButton.tonalIcon(
+            key: const Key('export_excel'),
+            onPressed: _busy ? null : widget.onExportExcel,
+            icon: const Icon(Icons.table_view),
+            label: const Text('导出Excel'),
+          );
     if (widget.compact) {
-      return Row(
-        children: <Widget>[
-          Expanded(child: exportButton),
-          const SizedBox(width: 12),
-          Expanded(child: restoreButton),
-        ],
-      );
+      final children = <Widget>[
+        Expanded(child: exportButton),
+        const SizedBox(width: 12),
+        Expanded(child: restoreButton),
+      ];
+      if (excelButton != null) {
+        children
+          ..add(const SizedBox(width: 12))
+          ..add(Expanded(child: excelButton));
+      }
+      return Row(children: children);
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -164,6 +182,10 @@ class _BackupActionsState extends State<BackupActions> {
         exportButton,
         const SizedBox(height: 12),
         restoreButton,
+        if (excelButton != null) ...<Widget>[
+          const SizedBox(height: 12),
+          excelButton,
+        ],
       ],
     );
   }

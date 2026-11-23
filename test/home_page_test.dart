@@ -81,15 +81,96 @@ class InMemoryRepository implements InventoryRepository {
     final idx = _items.indexWhere((i) => i.id == id);
     if (idx < 0) return;
     final old = _items[idx];
+    final now = DateTime.now().millisecondsSinceEpoch;
     _items[idx] = Item(
       id: old.id,
       name: old.name,
       isDeleted: true,
       createdAt: old.createdAt,
-      updatedAt: old.updatedAt,
+      updatedAt: now,
+      deletedAt: now,
     );
-    // 真实库为物理 DELETE；内存版同步移除，语义等价。
+    // V3.6：活跃关联行同步软删留底（与真实库一致，恢复时可复活）。
+    for (var i = 0; i < _links.length; i++) {
+      final l = _links[i];
+      if (l.itemId == id && !l.isDeleted) {
+        _links[i] = ItemLocation(
+          id: l.id,
+          itemId: l.itemId,
+          locationId: l.locationId,
+          isDeleted: true,
+          createdAt: l.createdAt,
+          updatedAt: now,
+          rawText: l.rawText,
+          tags: l.tags,
+        );
+      }
+    }
+  }
+
+  @override
+  Future<List<ItemWithLocations>> getDeletedItems() async {
+    final deleted = _items.where((i) => i.isDeleted).toList()
+      ..sort((a, b) => (b.deletedAt ?? 0).compareTo(a.deletedAt ?? 0));
+    return <ItemWithLocations>[
+      for (final item in deleted)
+        ItemWithLocations(
+          item: item,
+          locations: _locations
+              .where((loc) =>
+                  !loc.isDeleted &&
+                  _links.any((link) =>
+                      link.itemId == item.id && link.locationId == loc.id))
+              .toList(growable: false),
+        ),
+    ];
+  }
+
+  @override
+  Future<void> restoreItem(int id) async {
+    final idx = _items.indexWhere((i) => i.id == id);
+    if (idx < 0) return;
+    final item = _items[idx];
+    // 撞名预检查（决策点④A：撞名即失败）。
+    if (_items.any((i) => i.id != id && i.name == item.name && !i.isDeleted)) {
+      throw ArgumentError('已存在同名物品，恢复失败');
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _items[idx] = Item(
+      id: item.id,
+      name: item.name,
+      createdAt: item.createdAt,
+      updatedAt: now,
+    );
+    // 软删关联行复活（内存版不做 updated_at 精确匹配，全量复活）。
+    for (var i = 0; i < _links.length; i++) {
+      final l = _links[i];
+      if (l.itemId == id && l.isDeleted) {
+        _links[i] = ItemLocation(
+          id: l.id,
+          itemId: l.itemId,
+          locationId: l.locationId,
+          isDeleted: false,
+          createdAt: l.createdAt,
+          updatedAt: now,
+          rawText: l.rawText,
+          tags: l.tags,
+        );
+      }
+    }
+  }
+
+  @override
+  Future<void> purgeItem(int id) async {
+    _items.removeWhere((i) => i.id == id && i.isDeleted);
     _links.removeWhere((l) => l.itemId == id);
+  }
+
+  @override
+  Future<void> purgeAll() async {
+    final ids = _items.where((i) => i.isDeleted).map((i) => i.id!).toList();
+    _items.removeWhere((i) => i.isDeleted);
+    _links.removeWhere((l) => ids.contains(l.itemId));
   }
 
   @override

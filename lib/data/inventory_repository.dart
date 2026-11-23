@@ -14,9 +14,23 @@ abstract class InventoryRepository {
   /// V3.2：编辑物品名称（归一化+撞名校验，见 [InventoryDatabase.updateItem]）。
   Future<void> updateItem(int id, String name);
 
-  /// V3.2：删除物品（物品行软删留底，其全部关联行物理清除），
-  /// 详见 [InventoryDatabase.deleteItem]。
+  /// V3.2：删除物品（V3.6 起为软删进回收站：物品行 is_deleted=1+deleted_at，
+  /// 活跃关联行同步软删留底），详见 [InventoryDatabase.deleteItem]。
   Future<void> deleteItem(int id);
+
+  /// V3.6：回收站——全部已删物品（is_deleted=1，deleted_at 倒序，NULL 排末尾），
+  /// 每件物品附全部关联行对应的有效位置（含挪位历史，去重）。
+  Future<List<ItemWithLocations>> getDeletedItems();
+
+  /// V3.6：恢复回收站物品（撞名即抛 ArgumentError，不自动改名；
+  /// "删除时活跃"的关联行复活，位置关系还原）。
+  Future<void> restoreItem(int id);
+
+  /// V3.6：彻底删除回收站物品（物理 DELETE 物品行+全部关联行，不可恢复）。
+  Future<void> purgeItem(int id);
+
+  /// V3.6：清空回收站（物理 DELETE 全部已删物品及其关联行，不可恢复）。
+  Future<void> purgeAll();
 
   /// V3：编辑位置名称/备注。
   Future<void> updateLocation(int id, {String? name, String? remark});

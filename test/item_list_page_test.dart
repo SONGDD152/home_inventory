@@ -1,9 +1,11 @@
 // ignore_for_file: deprecated_member_use
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:home_inventory/data/backup_gateway.dart';
+import 'package:home_inventory/data/excel_exporter.dart';
 import 'package:home_inventory/data/inventory_repository.dart';
 import 'package:home_inventory/data/item.dart';
 import 'package:home_inventory/ui/item_list_page.dart';
@@ -23,6 +25,9 @@ class FakeListRepository implements InventoryRepository {
 
   /// 非空时 updateItem 抛 ArgumentError（模拟真实库撞名等校验拒绝）。
   String? errorOnUpdate;
+
+  /// 非空时 restoreItem 抛 ArgumentError（模拟恢复撞名拒绝）。
+  String? errorOnRestore;
 
   @override
   Future<List<ItemWithLocations>> getAllItemsWithLocations() async {
@@ -60,7 +65,7 @@ class FakeListRepository implements InventoryRepository {
     if (idx < 0) return;
     final old = rows[idx];
     final now = DateTime.now().millisecondsSinceEpoch;
-    // 与真实库对应：物品行软删，关联（locations 视图）随删除一并消失。
+    // V3.6：物品行软删（带 deleted_at），关联视图保留供回收站展示原位置。
     rows[idx] = ItemWithLocations(
       item: Item(
         id: old.item.id,
@@ -68,9 +73,50 @@ class FakeListRepository implements InventoryRepository {
         isDeleted: true,
         createdAt: old.item.createdAt,
         updatedAt: now,
+        deletedAt: now,
       ),
-      locations: const <Location>[],
+      locations: old.locations,
+      rawTexts: old.rawTexts,
+      tags: old.tags,
     );
+  }
+
+  @override
+  Future<List<ItemWithLocations>> getDeletedItems() async =>
+      List<ItemWithLocations>.unmodifiable(
+        rows.where((r) => r.item.isDeleted).toList(),
+      );
+
+  @override
+  Future<void> restoreItem(int id) async {
+    final error = errorOnRestore;
+    if (error != null) throw ArgumentError(error);
+    final idx = rows.indexWhere((r) => r.item.id == id);
+    if (idx < 0) return;
+    final old = rows[idx];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    rows[idx] = ItemWithLocations(
+      item: Item(
+        id: old.item.id,
+        name: old.item.name,
+        isDeleted: false,
+        createdAt: old.item.createdAt,
+        updatedAt: now,
+      ),
+      locations: old.locations,
+      rawTexts: old.rawTexts,
+      tags: old.tags,
+    );
+  }
+
+  @override
+  Future<void> purgeItem(int id) async {
+    rows.removeWhere((r) => r.item.id == id && r.item.isDeleted);
+  }
+
+  @override
+  Future<void> purgeAll() async {
+    rows.removeWhere((r) => r.item.isDeleted);
   }
 
   @override
@@ -162,9 +208,16 @@ Future<void> _pumpPage(
   WidgetTester tester, {
   required FakeListRepository repo,
   required FakeBackupGateway gateway,
+  ExcelExporter? exporter,
 }) async {
   await tester.pumpWidget(
-    MaterialApp(home: ItemListPage(repository: repo, gateway: gateway)),
+    MaterialApp(
+      home: ItemListPage(
+        repository: repo,
+        gateway: gateway,
+        exporter: exporter,
+      ),
+    ),
   );
   await tester.pumpAndSettle();
 }
@@ -395,7 +448,7 @@ void main() {
         reason: '页面仍在，未崩溃');
   });
 
-  testWidgets('删除物品：二次确认文案含影响面，确认后列表刷新', (tester) async {
+  testWidgets('删除物品：二次确认文案为软删口径，确认后列表刷新', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台', '车库'], id: 1),
       _row('充电器', <String>['书房'], id: 2),
@@ -404,9 +457,9 @@ void main() {
 
     await tester.tap(find.byKey(const Key('item_delete_梯子')));
     await tester.pumpAndSettle();
-    // 确认框如实展示影响面：2 处位置记录。
-    expect(find.textContaining('在 2 处的位置记录'), findsOneWidget);
-    expect(find.textContaining('不可恢复'), findsOneWidget);
+    // V3.6 口径：删除=进回收站，可在回收站恢复，不再宣称不可恢复。
+    expect(find.textContaining('回收站'), findsOneWidget);
+    expect(find.textContaining('不可恢复'), findsNothing);
 
     // 先取消一回落空。
     await tester.tap(find.byKey(const Key('item_delete_cancel')));
@@ -424,5 +477,163 @@ void main() {
     expect(find.text('梯子'), findsNothing);
     expect(find.text('充电器'), findsOneWidget);
     expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
+  });
+
+  // ---- V3.6 回收站 / 左滑 / Excel ----
+
+  testWidgets('回收站入口：空回收站显示空态', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('回收站为空'), findsOneWidget);
+    expect(find.byKey(const Key('trash_empty')), findsOneWidget);
+  });
+
+  testWidgets('回收站：展示已删物品与原位置，恢复后回列表（V3.6）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+      _row('充电器', <String>['书房'], id: 2),
+    ]);
+    await repo.deleteItem(1); // 预删梯子
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('trash_item_梯子')), findsOneWidget);
+    expect(find.textContaining('原位置：阳台'), findsOneWidget);
+
+    // 恢复 → 回收站清空。
+    await tester.tap(find.byKey(const Key('trash_restore_梯子')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('trash_empty')), findsOneWidget);
+
+    // 返回明细页 → 列表刷新含梯子。
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('梯子'), findsOneWidget);
+    expect(find.text('共 2 件物品 · 2 条存放记录'), findsOneWidget);
+  });
+
+  testWidgets('回收站：恢复撞名失败提示（决策点④A）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await repo.deleteItem(1);
+    repo.errorOnRestore = '已存在同名物品，恢复失败';
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('trash_restore_梯子')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('已存在同名物品，恢复失败'), findsOneWidget);
+    // 恢复失败 → 物品仍在回收站。
+    expect(find.byKey(const Key('trash_item_梯子')), findsOneWidget);
+  });
+
+  testWidgets('回收站：彻底删除二次确认后物理清除', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+      _row('充电器', <String>['书房'], id: 2),
+    ]);
+    await repo.deleteItem(1);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('trash_purge_梯子')));
+    await tester.pumpAndSettle();
+    // 二次确认对话框。
+    expect(find.textContaining('不可恢复'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, '彻底删除'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('trash_empty')), findsOneWidget);
+    // 充电器不受影响（未删除状态仍在明细页）。
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+    expect(find.text('充电器'), findsOneWidget);
+    expect(find.text('梯子'), findsNothing);
+  });
+
+  testWidgets('回收站：全部清空二次确认后清空', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+      _row('充电器', <String>['书房'], id: 2),
+    ]);
+    await repo.deleteItem(1);
+    await repo.deleteItem(2);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('trash_purge_all')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('全部物品'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, '全部清空').last);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('trash_empty')), findsOneWidget);
+  });
+
+  testWidgets('左滑软删：二次确认后条目从正常列表消失（V3.6）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+      _row('充电器', <String>['书房'], id: 2),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.drag(find.byKey(const Key('swipe_item_1')),
+        const Offset(-500, 0));
+    await tester.pumpAndSettle();
+    // confirmDismiss 二次确认框。
+    expect(find.textContaining('可在回收站恢复'), findsOneWidget);
+    // 取消 → 条目留在原位。
+    await tester.tap(find.byKey(const Key('swipe_delete_cancel')));
+    await tester.pumpAndSettle();
+    expect(find.text('梯子'), findsOneWidget);
+    expect(repo.deleteItemCalls, 0);
+
+    // 再次左滑 → 确认 → 条目消失。
+    await tester.drag(find.byKey(const Key('swipe_item_1')),
+        const Offset(-500, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('swipe_delete_confirm')));
+    await tester.pumpAndSettle();
+    expect(repo.deleteItemCalls, 1);
+    expect(find.text('梯子'), findsNothing);
+    expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
+  });
+
+  testWidgets('导出Excel：生成文件并走系统分享链路（V3.6）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    final gateway = FakeBackupGateway();
+    // 落盘注入内存假件（widget 假异步环境禁止真实文件 IO）；
+    // 字节构建与文件名规则由 excel_exporter_test.dart 用真 IO 锁定。
+    Uint8List? lastBytes;
+    final exporter = ExcelExporter(
+      fileWriter: (bytes) async {
+        lastBytes = bytes;
+        return '/fake/${DateTime.now()}.xlsx';
+      },
+    );
+    await _pumpPage(tester, repo: repo, gateway: gateway, exporter: exporter);
+
+    await tester.tap(find.byKey(const Key('export_excel')));
+    await tester.pumpAndSettle();
+
+    expect(lastBytes, isNotNull, reason: '工作簿字节已构建');
+    expect(lastBytes![0], 0x50, reason: 'zip 头（xlsx 容器）');
+    expect(gateway.lastSharedPath, isNotNull, reason: '走系统分享链路');
+    expect(gateway.lastSharedPath!, endsWith('.xlsx'));
+    expect(find.textContaining('Excel 已生成'), findsOneWidget);
   });
 }

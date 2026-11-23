@@ -16,8 +16,8 @@ void main() {
   late InventoryDatabase db;
   late List<InventoryDatabase> opened;
 
-  // 默认 version=5，与生产对齐；全新装库走 onCreate，显式低版本的迁移测试另行指定。
-  InventoryDatabase newDb({int version = 5, String? path}) {
+  // 默认 version=6，与生产对齐；全新装库走 onCreate，显式低版本的迁移测试另行指定。
+  InventoryDatabase newDb({int version = 6, String? path}) {
     final instance = InventoryDatabase(
       databaseFactory: databaseFactoryFfi,
       databasePath: path ?? dbPath,
@@ -704,7 +704,7 @@ void main() {
     final backup = await db.exportBackup();
 
     expect(backup['app'], 'home_inventory');
-    expect((backup['schemaVersion'] as num).toInt(), 5);
+    expect((backup['schemaVersion'] as num).toInt(), 6);
     expect(backup['exportedAt'], isNotNull);
     expect(backup['items'] as List, hasLength(2), reason: '两件物品（无软删物品入口）');
     expect(backup['locations'] as List, hasLength(2), reason: '阳台+书房（书房已软删，仍导出）');
@@ -813,7 +813,7 @@ void main() {
     }, '缺 locations/item_locations 表');
     await expectRejected(<String, Object?>{
       'app': 'home_inventory',
-      'schemaVersion': 6,
+      'schemaVersion': 7,
       'items': <Object?>[],
       'locations': <Object?>[],
       'item_locations': <Object?>[],
@@ -825,6 +825,245 @@ void main() {
     // 正确备份仍可恢复（库未被前面失败破坏）。
     await target.restoreBackup(backup);
     expect((await target.getAllItemsWithLocations()).single.item.name, '梯子');
+  });
+
+  // ---- V3.6 回收站 ----
+
+  /// 造一个 v5 结构旧库（items 无 deleted_at），含活跃与历史软删行。
+  Future<String> createV5LegacyDb(String fileName) async {
+    final legacyPath = p.join(tempDir.path, fileName);
+    final factory = databaseFactoryFfi;
+    final legacy = await factory.openDatabase(
+      legacyPath,
+      options: OpenDatabaseOptions(
+        version: 5,
+        onCreate: (d, v) async {
+          await d.execute(
+              'CREATE TABLE locations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, remark TEXT)');
+          await d.execute(
+              'CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+          await d.execute(
+              'CREATE TABLE item_locations (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, location_id INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, raw_text TEXT, tags TEXT)');
+          final now = DateTime.now().millisecondsSinceEpoch;
+          await d.insert('locations',
+              {'name': '阳台', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          // 梯子：活跃行。
+          await d.insert('items',
+              {'name': '梯子', 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+          // 旧物：历史软删行（deleted_at 尚不存在，模拟 v3.2 时代软删）。
+          await d.insert('items',
+              {'name': '旧物', 'is_deleted': 1, 'created_at': now, 'updated_at': now});
+          await d.insert('item_locations',
+              {'item_id': 1, 'location_id': 1, 'is_deleted': 0, 'created_at': now, 'updated_at': now});
+        },
+      ),
+    );
+    await legacy.close();
+    return legacyPath;
+  }
+
+  test('v5 旧库升级到 v6：ALTER 补 deleted_at，老数据零丢失', () async {
+    final factory = databaseFactoryFfi;
+    final legacyPath = await createV5LegacyDb('v5_legacy.db');
+
+    final upgraded = InventoryDatabase(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 6,
+    );
+    opened.add(upgraded);
+
+    // 老数据：活跃行正常显示，软删历史行进回收站（deleted_at 为 NULL）。
+    final active = await upgraded.getAllItemsWithLocations();
+    expect(active.single.item.name, '梯子');
+    final deleted = await upgraded.getDeletedItems();
+    expect(deleted.single.item.name, '旧物');
+    expect(deleted.single.item.deletedAt, isNull, reason: '历史软删行无删除时间');
+    // v6 能力可用：删除真实物品后 deleted_at 写入。
+    await upgraded.deleteItem(active.single.item.id!);
+    final after = await upgraded.getDeletedItems();
+    expect(after.where((r) => r.item.name == '梯子').single.item.deletedAt,
+        isNotNull);
+  });
+
+  test('v6 加列失败整体回滚：版本退回5、列撤销、旧数据不丢', () async {
+    final factory = databaseFactoryFfi;
+    final legacyPath = await createV5LegacyDb('v6_rollback.db');
+
+    final failing = InventoryDatabase.forTesting(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 6,
+      migrationV6FailureHook: () =>
+          throw StateError('injected v6 migration failure'),
+    );
+    opened.add(failing);
+    await expectLater(failing.open(), throwsA(isA<StateError>()));
+
+    final raw = await factory.openDatabase(legacyPath);
+    try {
+      expect(await raw.getVersion(), 5, reason: 'setVersion 随事务回滚');
+      final itemCols = await raw.rawQuery('PRAGMA table_info(items)');
+      expect(itemCols.any((c) => c['name'] == 'deleted_at'), isFalse,
+          reason: '不留半迁移态');
+      expect(await raw.query('items'), hasLength(2), reason: '旧数据不丢');
+    } finally {
+      await raw.close();
+    }
+
+    // 不带钩子的正常 v6 仍能成功升级。
+    final recovered = InventoryDatabase(
+      databaseFactory: factory,
+      databasePath: legacyPath,
+      version: 6,
+    );
+    opened.add(recovered);
+    expect((await recovered.getAllItemsWithLocations()).single.item.name, '梯子');
+  });
+
+  test('V3.6 软删→恢复：位置关系还原、挪位历史行不复活', () async {
+    final balconyId = await db.addLocation('阳台');
+    final garageId = await db.addLocation('车库');
+    final up = await db.upsertItemLocation('梯子', balconyId,
+        rawText: '梯子放阳台');
+    await db.moveItem('梯子', garageId); // 阳台变挪位软删历史行
+
+    await db.deleteItem(up.itemId);
+
+    // 回收站：物品可见，原位置展示含历史（阳台+车库均有效位置）。
+    final deleted = await db.getDeletedItems();
+    expect(deleted.single.item.name, '梯子');
+    expect(deleted.single.locations.map((l) => l.name),
+        containsAll(<String>['阳台', '车库']));
+
+    await db.restoreItem(up.itemId);
+
+    // 恢复后正常列表只回到车库（删除时活跃行复活，挪位历史行保持留底）。
+    final found = await db.findByName('梯子');
+    expect(found!.locations.map((l) => l.name), <String>['车库']);
+    expect(found.item.deletedAt, isNull);
+    // 挪位历史行未复活：原文「梯子放阳台」在阳台历史行上，不随恢复出现。
+    expect(found.rawTexts, isEmpty);
+  });
+
+  test('V3.6 恢复撞名：提示失败不自动改名（决策点④A）', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+    await db.deleteItem(up.itemId);
+    // 同名新物品可正常新建（唯一索引不拦已删名）。
+    final reborn = await db.upsertItemLocation('梯子', balconyId);
+    expect(reborn.itemId, isNot(up.itemId));
+
+    await expectLater(
+      db.restoreItem(up.itemId),
+      throwsA(isA<ArgumentError>().having(
+        (e) => e.message, 'message', contains('已存在同名物品'),
+      )),
+    );
+    // 恢复失败 → 旧物品仍在回收站、新物品不受影响。
+    expect((await db.getDeletedItems()).single.item.id, up.itemId);
+    expect((await db.getAllItemsWithLocations()).single.item.id, reborn.itemId);
+  });
+
+  test('V3.6 purgeItem：物品行+全部关联行物理清除、回收站消失', () async {
+    final balconyId = await db.addLocation('阳台');
+    final up = await db.upsertItemLocation('梯子', balconyId);
+    await db.moveItem('梯子', await db.addLocation('车库'));
+    await db.deleteItem(up.itemId);
+
+    await db.purgeItem(up.itemId);
+
+    final backup = await db.exportBackup();
+    expect(
+      (backup['items'] as List<Object?>)
+          .cast<Map<String, Object?>>()
+          .where((m) => m['name'] == '梯子'),
+      isEmpty,
+      reason: '物品行物理清除',
+    );
+    expect(
+      (backup['item_locations'] as List<Object?>)
+          .cast<Map<String, Object?>>()
+          .where((m) => m['item_id'] == up.itemId),
+      isEmpty,
+      reason: '关联行（含挪位历史）物理清除',
+    );
+    expect(await db.getDeletedItems(), isEmpty);
+    // 幂等：重复 purge 不抛错。
+    await db.purgeItem(up.itemId);
+  });
+
+  test('V3.6 purgeAll：清空回收站，活跃物品不受影响', () async {
+    final up1 = await put('梯子', '阳台');
+    final up2 = await put('充电器', '书房');
+    await db.deleteItem(up1.itemId);
+    await db.deleteItem(up2.itemId);
+    expect(await db.getDeletedItems(), hasLength(2));
+
+    await db.purgeAll();
+
+    expect(await db.getDeletedItems(), isEmpty);
+    final backup = await db.exportBackup();
+    expect((backup['items'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .every((m) => m['is_deleted'] == 0), isTrue);
+  });
+
+  test('V3.6 getDeletedItems：deleted_at 倒序，NULL 历史行排末尾', () async {
+    await put('书', '书房');
+    final backup = await db.exportBackup();
+    // 构造历史软删行：把「书」行改为 is_deleted=1 且无 deleted_at（v3.2 口径），恢复。
+    final items = List<Map<String, Object?>>.of(
+      (backup['items'] as List<Object?>).cast<Map<String, Object?>>(),
+    )..removeWhere((m) => m['name'] == '书');
+    items.add(<String, Object?>{
+      'id': 1,
+      'name': '书',
+      'is_deleted': 1,
+      'created_at': 1,
+      'updated_at': 1,
+    });
+    final restored = <String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': backup['schemaVersion'],
+      'items': items,
+      'locations': backup['locations'],
+      'item_locations': backup['item_locations'],
+    };
+    await db.restoreBackup(restored);
+
+    final up2 = await put('梯子', '阳台');
+    await db.deleteItem(up2.itemId);
+
+    final rows = await db.getDeletedItems();
+    expect(rows, hasLength(2));
+    expect(rows.first.item.name, '梯子', reason: '有 deleted_at 的排前');
+    expect(rows.first.item.deletedAt, isNotNull);
+    expect(rows.last.item.name, '书', reason: 'NULL 历史行排末尾');
+    expect(rows.last.item.deletedAt, isNull);
+  });
+
+  test('V3.6 备份往返：导出含已删行，恢复后正常/回收站各自归位', () async {
+    await put('梯子', '阳台');
+    await put('充电器', '书房');
+    await db.deleteItem(1); // 梯子进回收站
+
+    final backup = await db.exportBackup();
+    final exportedItems = (backup['items'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['name'] == '梯子')
+        .toList();
+    expect(exportedItems, hasLength(1), reason: '已删行随备份导出');
+    expect(exportedItems.single['deleted_at'], isNotNull);
+
+    // 恢复到另一空库 → 状态一致。
+    final otherPath = p.join(tempDir.path, 'restore_v36.db');
+    final target = newDb(path: otherPath);
+    await target.restoreBackup(backup);
+    expect((await target.getAllItemsWithLocations()).single.item.name, '充电器');
+    final deleted = await target.getDeletedItems();
+    expect(deleted.single.item.name, '梯子');
+    expect(deleted.single.item.deletedAt, isNotNull, reason: '回收站归位');
   });
 
   // ---- 挪位语义（V3.2） ----
@@ -953,7 +1192,7 @@ void main() {
     expect((await db.findByName('充电器'))!.item.name, '充电器');
   });
 
-  test('V3.2 deleteItem：物品行软删、关联物理清零（含挪位软删历史）、幂等', () async {
+  test('V3.6 deleteItem：物品行软删+deleted_at、关联行软删留底、幂等', () async {
     final balconyId = await db.addLocation('阳台');
     final livingId = await db.addLocation('客厅');
     final up = await db.upsertItemLocation('梯子', balconyId);
@@ -969,7 +1208,12 @@ void main() {
           .where((r) => r.item.name == '梯子'),
       isEmpty,
     );
-    // 物品行软删留底；该物品关联行全部物理清除（导出不含任何梯子关联）。
+    // 回收站可见该物品（V3.6）。
+    final deleted = await db.getDeletedItems();
+    expect(deleted.where((r) => r.item.name == '梯子'), hasLength(1));
+    expect(deleted.single.item.isDeleted, isTrue);
+    expect(deleted.single.item.deletedAt, isNotNull);
+    // 物品行软删留底；关联行软删留底（V3.6 语义：不再物理清除）。
     final backup = await db.exportBackup();
     final items = (backup['items'] as List<Object?>)
         .cast<Map<String, Object?>>()
@@ -977,12 +1221,16 @@ void main() {
         .toList();
     expect(items, hasLength(1));
     expect(items.single['is_deleted'], 1, reason: '物品行软删留底');
+    expect(items.single['deleted_at'], isNotNull, reason: '记录删除时间');
+    final assocs = (backup['item_locations'] as List<Object?>)
+        .cast<Map<String, Object?>>()
+        .where((m) => m['item_id'] == up.itemId)
+        .toList();
+    expect(assocs, hasLength(2), reason: '活跃行+挪位历史行均留底');
     expect(
-      (backup['item_locations'] as List<Object?>)
-          .cast<Map<String, Object?>>()
-          .where((m) => m['item_id'] == up.itemId),
-      isEmpty,
-      reason: '关联行（活跃+挪位软删历史）物理清除',
+      assocs.every((m) => m['is_deleted'] == 1),
+      isTrue,
+      reason: '活跃行被删除联动软删，挪位历史行本就软删',
     );
     // 幂等：重复删除不抛错。
     await db.deleteItem(up.itemId);

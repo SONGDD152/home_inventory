@@ -3,13 +3,18 @@
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
+import '../data/excel_exporter.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/normalize.dart';
 import 'backup_actions.dart';
+import 'trash_page.dart';
 
 /// 物品明细页：浏览全部物品及其位置，支持按物品名/位置名过滤；
-/// V3.2 起每条物品支持编辑（改名）与删除（二次确认，物理清除其位置记录）；
+/// V3.2 起每条物品支持编辑（改名）与删除；
+/// V3.6 起删除统一为**软删进回收站**（左滑或按钮，二次确认后
+/// 物品行与"删除时活跃"关联行留底，可在回收站恢复），不再物理清除；
+/// 右上角回收站入口 + 底部「导出Excel」；
 /// 备份导出/恢复入口在**底部固定操作区**（不再放右上角图标，
 /// 避免边缘/安全区吞掉入口），完整说明见独立「数据备份与恢复」页。
 class ItemListPage extends StatefulWidget {
@@ -17,6 +22,7 @@ class ItemListPage extends StatefulWidget {
     super.key,
     required this.repository,
     this.gateway,
+    this.exporter,
     this.title = '物品明细',
   });
 
@@ -24,6 +30,9 @@ class ItemListPage extends StatefulWidget {
 
   /// 备份交互网关；生产默认系统实现，测试注入假网关。
   final BackupGateway? gateway;
+
+  /// V3.6：Excel 导出器；生产默认 [ExcelExporter]，测试注入临时目录实现。
+  final ExcelExporter? exporter;
 
   final String title;
 
@@ -84,7 +93,17 @@ class _ItemListPageState extends State<ItemListPage> {
   Widget build(BuildContext context) {
     final rows = _filtered();
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(
+        title: Text(widget.title),
+        actions: <Widget>[
+          IconButton(
+            key: const Key('trash_entry'),
+            tooltip: '回收站',
+            icon: const Icon(Icons.restore_from_trash_outlined),
+            onPressed: _busy ? null : _openTrash,
+          ),
+        ],
+      ),
       // 底部固定操作区：导出/恢复不再依赖右上角图标，SafeArea 兜住手势区。
       bottomNavigationBar: SafeArea(
         child: Padding(
@@ -93,6 +112,7 @@ class _ItemListPageState extends State<ItemListPage> {
             repository: widget.repository,
             gateway: widget.gateway,
             onRestored: _reload,
+            onExportExcel: _exportExcel,
             compact: true,
           ),
         ),
@@ -135,7 +155,44 @@ class _ItemListPageState extends State<ItemListPage> {
   int _filteredRecordCount(List<ItemWithLocations> rows) =>
       rows.fold(0, (n, r) => n + r.locations.length);
 
-  // ---------- V3.2 编辑/删除 ----------
+  // ---------- V3.6 回收站 / Excel 导出 ----------
+
+  Future<void> _openTrash() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => TrashPage(repository: widget.repository),
+        fullscreenDialog: false,
+      ),
+    );
+    // 回收站内恢复/彻底删除后，返回明细页刷新列表与统计。
+    await _reload();
+  }
+
+  /// V3.6：导出 Excel（正常明细 + 回收站两个 Sheet），复用备份分享链路。
+  Future<void> _exportExcel() async {
+    final gateway = widget.gateway ?? SystemBackupGateway();
+    setState(() => _busy = true);
+    try {
+      final activeRows = _rows ?? const <ItemWithLocations>[];
+      final deletedRows = await widget.repository.getDeletedItems();
+      final path = await (widget.exporter ?? const ExcelExporter())
+          .writeExcelFile(activeRows, deletedRows);
+      await gateway.shareFile(path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Excel 已生成：${path.split('/').last}')),
+      );
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('导出失败：$e')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  // ---------- V3.2 编辑 / V3.6 软删（决策点①A：语义统一进回收站） ----------
 
   /// 操作统一兜底：校验类错误是 ArgumentError（Error 非 Exception），
   /// 必须 on ArgumentError 单独 catch，文案展示 e.message（沿用惯例）。
@@ -197,13 +254,12 @@ class _ItemListPageState extends State<ItemListPage> {
   }
 
   Future<void> _deleteItem(ItemWithLocations row) async {
-    final n = row.locations.length;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除物品'),
         content: Text('确定删除物品「${row.item.name}」吗？\n'
-            '将同时清除它在 $n 处的位置记录（含历史记录），此操作不可恢复。'),
+            '删除后可在回收站查看或恢复。'),
         actions: <Widget>[
           TextButton(
             key: const Key('item_delete_cancel'),
@@ -245,33 +301,81 @@ class _ItemListPageState extends State<ItemListPage> {
       itemCount: rows.length,
       itemBuilder: (context, index) {
         final row = rows[index];
-        return ListTile(
-          key: Key('detail_item_${row.item.name}'),
-          title: Text(row.item.name),
-          subtitle: row.locations.isEmpty
-              ? const Text('（没有有效位置）')
-              : Text(
-                  row.locations.map((loc) => loc.name).join('、'),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
+        // V3.6：左滑软删（决策点①A：与删除按钮同语义，均进回收站）。
+        // confirmDismiss 必须 await 二次确认防误触；确认后走 deleteItem
+        // 并整体刷新（统计数字随之更新）。
+        return Dismissible(
+          key: Key('swipe_item_${row.item.id}'),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            color: Colors.red,
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text('删除',
+                    style: TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.w600)),
+                SizedBox(width: 8),
+                Icon(Icons.delete_outline, color: Colors.white),
+              ],
+            ),
+          ),
+          confirmDismiss: (direction) async {
+            final confirmed = await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('删除物品'),
+                content: Text(
+                    '确定删除物品「${row.item.name}」吗？\n删除后可在回收站恢复。'),
+                actions: <Widget>[
+                  TextButton(
+                    key: const Key('swipe_delete_cancel'),
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('取消'),
+                  ),
+                  TextButton(
+                    key: const Key('swipe_delete_confirm'),
+                    onPressed: () => Navigator.of(context).pop(true),
+                    child: const Text('删除'),
+                  ),
+                ],
+              ),
+            );
+            if (confirmed != true || !mounted) return false;
+            await widget.repository.deleteItem(row.item.id!);
+            await _reload();
+            return true;
+          },
+          child: ListTile(
+            key: Key('detail_item_${row.item.name}'),
+            title: Text(row.item.name),
+            subtitle: row.locations.isEmpty
+                ? const Text('（没有有效位置）')
+                : Text(
+                    row.locations.map((loc) => loc.name).join('、'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text('${row.locations.length} 处'),
+                IconButton(
+                  key: Key('item_edit_${row.item.name}'),
+                  tooltip: '编辑',
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: _busy ? null : () => _editItem(row),
                 ),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Text('${row.locations.length} 处'),
-              IconButton(
-                key: Key('item_edit_${row.item.name}'),
-                tooltip: '编辑',
-                icon: const Icon(Icons.edit_outlined),
-                onPressed: _busy ? null : () => _editItem(row),
-              ),
-              IconButton(
-                key: Key('item_delete_${row.item.name}'),
-                tooltip: '删除',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: _busy ? null : () => _deleteItem(row),
-              ),
-            ],
+                IconButton(
+                  key: Key('item_delete_${row.item.name}'),
+                  tooltip: '删除',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: _busy ? null : () => _deleteItem(row),
+                ),
+              ],
+            ),
           ),
         );
       },

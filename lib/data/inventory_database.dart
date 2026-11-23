@@ -20,25 +20,28 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 5,
+    this.version = 6,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
-        _migrationV5FailureHook = null;
+        _migrationV5FailureHook = null,
+        _migrationV6FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
-  /// 两个钩子分别覆盖 v4 名称清洗与 v5 加列阶段的失败回滚。
+  /// 三个钩子分别覆盖 v4 名称清洗、v5 加列与 v6 加列阶段的失败回滚。
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 5,
+    this.version = 6,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
+    void Function()? migrationV6FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = migrationFailureHook,
-        _migrationV5FailureHook = migrationV5FailureHook;
+        _migrationV5FailureHook = migrationV5FailureHook,
+        _migrationV6FailureHook = migrationV6FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -51,6 +54,8 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnIsDeleted = 'is_deleted';
   static const String columnCreatedAt = 'created_at';
   static const String columnUpdatedAt = 'updated_at';
+  // V3.6 回收站：物品软删（进回收站）时间戳（可空，兼容 v5 旧库）。
+  static const String columnDeletedAt = 'deleted_at';
   // V3 交互说明新增列（可空，兼容 v4 旧库）。
   static const String columnRemark = 'remark';
   static const String columnRawText = 'raw_text';
@@ -76,6 +81,10 @@ class InventoryDatabase implements InventoryRepository {
   /// 验证三段 ALTER 包在一个事务里、失败整体回滚不留半迁移态。
   /// 私有字段，仅 [InventoryDatabase.forTesting] 可注入，生产构造恒为 null。
   final void Function()? _migrationV5FailureHook;
+
+  /// V3.6：v6 加列事务的失败注入点（deleted_at 加列前调用），
+  /// 验证失败整体回滚、版本退回 5。私有字段，仅 forTesting 可注入。
+  final void Function()? _migrationV6FailureHook;
 
   Database? _db;
 
@@ -117,7 +126,8 @@ class InventoryDatabase implements InventoryRepository {
         $columnName TEXT NOT NULL,
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
         $columnCreatedAt INTEGER NOT NULL,
-        $columnUpdatedAt INTEGER NOT NULL
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnDeletedAt INTEGER
       )
     ''');
     await db.execute('''
@@ -212,15 +222,28 @@ class InventoryDatabase implements InventoryRepository {
       await _addColumnIfMissing(db, tableItemLocations, columnRawText);
       await _addColumnIfMissing(db, tableItemLocations, columnTags);
     }
+
+    // v5 → v6：V3.6 回收站新增物品删除时间戳 deleted_at（可空）。
+    // 注意：is_deleted 列 v5 建表即有，**不可**再 ALTER（duplicate column），
+    // 此处仅加 deleted_at。老数据 NULL，不迁移历史软删行的时间。
+    if (oldVersion < 6 && newVersion >= 6) {
+      // 失败注入点：加列前抛错，验证整体回滚、版本退回 5（见回滚测试）。
+      final v6Hook = _migrationV6FailureHook;
+      if (v6Hook != null) v6Hook();
+      await _addColumnIfMissing(db, tableItems, columnDeletedAt,
+          type: 'INTEGER');
+    }
   }
 
   /// 若表中无此列则 ALTER ADD；列已存在则跳过（升级幂等）。
+  /// [type] 指定列类型（v5 三列是 TEXT；v6 的 deleted_at 是 INTEGER）。
   Future<void> _addColumnIfMissing(
-      DatabaseExecutor db, String table, String column) async {
+      DatabaseExecutor db, String table, String column,
+      {String type = 'TEXT'}) async {
     final rows = await db.rawQuery('PRAGMA table_info($table)');
     final exists = rows.any((row) => row['name'] == column);
     if (exists) return;
-    await db.execute('ALTER TABLE $table ADD COLUMN $column TEXT');
+    await db.execute('ALTER TABLE $table ADD COLUMN $column $type');
   }
 
   /// v3 → v4：历史数据名称归一化清洗。
@@ -388,15 +411,18 @@ class InventoryDatabase implements InventoryRepository {
     });
   }
 
-  /// V3.2：删除物品（事务内）。
+  /// V3.6：删除物品（软删进回收站，决策点③A）。
   ///
-  /// 清理原则：软删留底仅在实体仍活跃时有意义；实体删除时其关联历史
-  /// 一并物理清除。因此：
-  ///  * 物品行软删（is_deleted=1 留底：备份恢复保真、允许同名复活走新行）；
-  ///  * 该物品**全部**关联行物理 DELETE——含活跃行与挪位软删历史行。
-  ///    物品已删，关联审计价值为零；物理清除的行导出备份自然不含，
-  ///    还原后同样不含，与「还原后状态一致」的保真原则不冲突。
-  /// 挪位（moveItem）软删留底的拍板语义不变，留底行的清理时机即此处。
+  /// 与 v3.2 版本的区别：关联行**不再物理清除**，改为同步软删留底——
+  /// 恢复物品时关联行复活，位置关系完整还原；彻底删除（[purgeItem]）
+  /// 时才物理清行。
+  ///  * 物品行：is_deleted=1 + deleted_at=now 留底（回收站按 deleted_at 排序）；
+  ///  * 该物品**活跃**关联行（is_deleted=0）：同步软删（is_deleted=1），
+  ///    且 updated_at 置为与物品 deleted_at 完全相同的 now（同一事务同一
+  ///    时间戳）。恢复时以 `updated_at == deleted_at` 精确匹配"删除时活跃"
+  ///    的关联行复活，避免把更早的挪位软删历史行一并复活（复活的后果是
+  ///    物品恢复后多位置并存，违背 V3 挪位=替换语义）。
+  ///  * 挪位软删历史行（is_deleted=1 且 updated_at 更早）保持不动。
   /// 幂等：物品不存在或已删除时无操作。
   @override
   Future<void> deleteItem(int id) async {
@@ -405,16 +431,126 @@ class InventoryDatabase implements InventoryRepository {
     await db.transaction<void>((txn) async {
       final updated = await txn.update(
         tableItems,
-        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+        <String, Object?>{
+          columnIsDeleted: 1,
+          columnDeletedAt: now,
+          columnUpdatedAt: now,
+        },
         where: '$columnId = ? AND $columnIsDeleted = 0',
         whereArgs: <Object?>[id],
       );
       if (updated == 0) return; // 不存在或已删除，幂等返回。
+      await txn.update(
+        tableItemLocations,
+        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+        where: '$columnItemId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[id],
+      );
+    });
+  }
+
+  /// V3.6：恢复回收站物品（决策点④A：撞名即失败，不自动改名）。
+  ///
+  /// 事务内三步：
+  ///  1. 撞名预检查：存在同名**未删除**物品（排除自身）抛 ArgumentError
+  ///     （部分唯一索引 idx_items_name_unique WHERE is_deleted=0 兜底并发）；
+  ///  2. 物品行复活：is_deleted=0、deleted_at 置 NULL；
+  ///  3. 关联行复活：仅复活"删除时活跃"的行——`is_deleted=1 AND
+  ///     updated_at == 物品 deleted_at`（[deleteItem] 软删时写入的同一
+  ///     时间戳），挪位软删历史行保持留底。
+  /// 幂等：物品不存在或未删除时无操作（返回）。
+  @override
+  Future<void> restoreItem(int id) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.transaction<void>((txn) async {
+      final rows = await txn.query(
+        tableItems,
+        columns: <String>[columnName, columnDeletedAt],
+        where: '$columnId = ? AND $columnIsDeleted = 1',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return; // 不存在或未删除，幂等返回。
+      final deletedAt = (rows.first[columnDeletedAt] as num?)?.toInt();
+
+      final conflicts = await txn.query(
+        tableItems,
+        columns: <String>[columnId],
+        where: '$columnName = ? AND $columnIsDeleted = 0 AND $columnId != ?',
+        whereArgs: <Object?>[rows.first[columnName] as String, id],
+        limit: 1,
+      );
+      if (conflicts.isNotEmpty) {
+        throw ArgumentError.value(id, 'id', '已存在同名物品，恢复失败');
+      }
+
+      await txn.update(
+        tableItems,
+        <String, Object?>{
+          columnIsDeleted: 0,
+          columnDeletedAt: null,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[id],
+      );
+      // 历史软删行（deleted_at 为 NULL 的 v3.2 时代数据）无"删除时活跃"
+      // 关联行可精确匹配，复活其全部软删关联行（当时物理删改软删前的
+      // 历史行为无法追溯，全量复活位置最接近原状）。
+      if (deletedAt == null) {
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{columnIsDeleted: 0, columnUpdatedAt: now},
+          where: '$columnItemId = ? AND $columnIsDeleted = 1',
+          whereArgs: <Object?>[id],
+        );
+      } else {
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{columnIsDeleted: 0, columnUpdatedAt: now},
+          where: '$columnItemId = ? AND $columnIsDeleted = 1 '
+              'AND $columnUpdatedAt = ?',
+          whereArgs: <Object?>[id, deletedAt],
+        );
+      }
+    });
+  }
+
+  /// V3.6：彻底删除回收站物品（物理 DELETE，不可恢复）。
+  ///
+  /// 物品行与其**全部**关联行（活跃/软删历史一并）物理清除。
+  /// 幂等：物品不存在时无操作。
+  @override
+  Future<void> purgeItem(int id) async {
+    final db = await open();
+    await db.transaction<void>((txn) async {
+      await txn.delete(
+        tableItems,
+        where: '$columnId = ? AND $columnIsDeleted = 1',
+        whereArgs: <Object?>[id],
+      );
       await txn.delete(
         tableItemLocations,
         where: '$columnItemId = ?',
         whereArgs: <Object?>[id],
       );
+    });
+  }
+
+  /// V3.6：清空回收站（物理 DELETE 全部 is_deleted=1 物品行
+  /// 及其全部关联行，不可恢复）。
+  @override
+  Future<void> purgeAll() async {
+    final db = await open();
+    await db.transaction<void>((txn) async {
+      // 先按已删物品删其关联行，再删物品行（顺序无外键约束要求，仅逻辑清晰）。
+      await txn.execute(
+        'DELETE FROM $tableItemLocations WHERE $columnItemId IN '
+        '(SELECT $columnId FROM $tableItems WHERE $columnIsDeleted = 1)',
+      );
+      await txn.delete(tableItems,
+          where: '$columnIsDeleted = 1');
     });
   }
 
@@ -719,17 +855,38 @@ class InventoryDatabase implements InventoryRepository {
   /// 物品明细页：全部未删除物品 + 各自全部未删除位置，按物品名排序。
   /// 两次查询在事务外完成（只读聚合，无一致性要求高于 findByName 的场景）。
   @override
-  Future<List<ItemWithLocations>> getAllItemsWithLocations() async {
+  Future<List<ItemWithLocations>> getAllItemsWithLocations() =>
+      _queryItemsWithLocations(deleted: false);
+
+  /// V3.6：回收站视图复用同一聚合（活跃/已删切换）。
+  @override
+  Future<List<ItemWithLocations>> getDeletedItems() =>
+      _queryItemsWithLocations(deleted: true);
+
+  /// 聚合查询：物品 + 关联位置 + 记账原文/标签。
+  ///
+  /// deleted=false（明细页）：物品 is_deleted=0，仅取活跃关联行
+  /// （assoc.is_deleted=0 且 loc.is_deleted=0），按物品名排序。
+  /// deleted=true（回收站）：物品 is_deleted=1（deleted_at 倒序，NULL 排末尾），
+  /// 取该物品**全部**关联行（含挪位软删历史）对应的有效位置
+  /// （loc.is_deleted=0，按位置 id 去重），记账原文/标签聚合自全部关联行。
+  Future<List<ItemWithLocations>> _queryItemsWithLocations(
+      {required bool deleted}) async {
     final db = await open();
     final itemRows = await db.query(
       tableItems,
-      where: '$columnIsDeleted = 0',
-      orderBy: '$columnName ASC',
+      where: '$columnIsDeleted = ${deleted ? 1 : 0}',
+      orderBy: deleted
+          ? '$columnDeletedAt DESC, $columnUpdatedAt DESC'
+          : '$columnName ASC',
     );
+    if (itemRows.isEmpty) return const <ItemWithLocations>[];
 
-    // 一次取全部有效关联+位置，按 item_id 分组，避免 N+1 查询。
+    // 一次取全部关联+位置，按 item_id 分组，避免 N+1 查询。
     final assocRows = await db.rawQuery(
       'SELECT assoc.$columnItemId AS assoc_item_id, '
+      'assoc.$columnRawText AS assoc_raw_text, '
+      'assoc.$columnTags AS assoc_tags, '
       'loc.$columnId AS loc_id, loc.$columnName AS loc_name, '
       'loc.$columnIsDeleted AS loc_deleted, '
       'loc.$columnCreatedAt AS loc_created, '
@@ -737,33 +894,51 @@ class InventoryDatabase implements InventoryRepository {
       'loc.$columnRemark AS loc_remark '
       'FROM $tableItemLocations AS assoc '
       'INNER JOIN $tableLocations AS loc ON assoc.$columnLocationId = loc.$columnId '
-      'WHERE assoc.$columnIsDeleted = 0 AND loc.$columnIsDeleted = 0 '
+      'WHERE ${deleted ? '' : 'assoc.$columnIsDeleted = 0 AND '}'
+      'loc.$columnIsDeleted = 0 '
       'ORDER BY loc.$columnName ASC',
     );
 
-    final byItem = <int, List<Location>>{};
+    final locationsByItem = <int, Map<int, Location>>{};
+    final rawTextsByItem = <int, Set<String>>{};
+    final tagsByItem = <int, Set<String>>{};
     for (final row in assocRows) {
-      byItem
-          .putIfAbsent(row['assoc_item_id'] as int, () => <Location>[])
-          .add(
-            Location(
-              id: row['loc_id'] as int,
-              name: row['loc_name'] as String,
-              isDeleted: (row['loc_deleted'] as int) == 1,
-              createdAt: (row['loc_created'] as num).toInt(),
-              updatedAt: (row['loc_updated'] as num).toInt(),
-              remark: row['loc_remark'] as String?,
-            ),
-          );
+      final itemId = row['assoc_item_id'] as int;
+      final locId = row['loc_id'] as int;
+      locationsByItem[itemId] ??= <int, Location>{};
+      locationsByItem[itemId]![locId] = Location(
+        id: locId,
+        name: row['loc_name'] as String,
+        isDeleted: (row['loc_deleted'] as int?) == 1,
+        createdAt: (row['loc_created'] as num).toInt(),
+        updatedAt: (row['loc_updated'] as num).toInt(),
+        remark: row['loc_remark'] as String?,
+      );
+      final rawText = row['assoc_raw_text'] as String?;
+      if (rawText != null && rawText.trim().isNotEmpty) {
+        (rawTextsByItem[itemId] ??= <String>{}).add(rawText);
+      }
+      final tag = row['assoc_tags'] as String?;
+      if (tag != null && tag.trim().isNotEmpty) {
+        (tagsByItem[itemId] ??= <String>{}).add(tag);
+      }
     }
 
-    return <ItemWithLocations>[
-      for (final itemRow in itemRows)
-        ItemWithLocations(
-          item: Item.fromMap(itemRow),
-          locations: byItem[itemRow[columnId] as int] ?? const <Location>[],
-        ),
-    ];
+    return itemRows
+        .map((row) {
+          final item = Item.fromMap(row);
+          final locMap = locationsByItem[item.id] ?? const <int, Location>{};
+          final locations = locMap.values.toList(growable: false);
+          return ItemWithLocations(
+            item: item,
+            locations: locations,
+            rawTexts: rawTextsByItem[item.id]?.toList(growable: false) ??
+                const <String>[],
+            tags: tagsByItem[item.id]?.toList(growable: false) ??
+                const <String>[],
+          );
+        })
+        .toList(growable: false);
   }
 
   /// 备份导出：三张表全量行（含软删行，保证还原保真），外加库名、schema 版本、导出时间。

@@ -41,6 +41,10 @@ class MoveResult {
 ///
 /// 物品与位置是多对多关系：一件物品可以放在多个位置，一个位置可以放多件物品。
 /// 关联由 [ItemLocation] 表达，本类只描述物品本身。
+///
+/// V3.6：新增 [deletedAt]（软删进回收站的时间戳，可空）。已删物品 isDeleted=true
+/// 且 deletedAt 非空；正常物品两者均为"未删"。历史数据（v5 旧库）deleted_at 为
+/// NULL，[fromMap] 按 null 读取兼容。
 class Item {
   const Item({
     this.id,
@@ -48,6 +52,7 @@ class Item {
     this.isDeleted = false,
     required this.createdAt,
     required this.updatedAt,
+    this.deletedAt,
   });
 
   final int? id;
@@ -56,12 +61,17 @@ class Item {
   final int createdAt;
   final int updatedAt;
 
+  /// 软删（进回收站）时间戳；正常物品/历史软删行为 null。
+  final int? deletedAt;
+
   Map<String, Object?> toMap() => <String, Object?>{
         if (id != null) 'id': id,
         'name': name,
         'is_deleted': isDeleted ? 1 : 0,
         'created_at': createdAt,
         'updated_at': updatedAt,
+        // null 时省略列：兼容尚未 ALTER 加列的 v5 旧库直接插入。
+        if (deletedAt != null) 'deleted_at': deletedAt,
       };
 
   factory Item.fromMap(Map<String, Object?> map) => Item(
@@ -70,6 +80,7 @@ class Item {
         isDeleted: (map['is_deleted'] as int?) == 1,
         createdAt: (map['created_at'] as num).toInt(),
         updatedAt: (map['updated_at'] as num).toInt(),
+        deletedAt: (map['deleted_at'] as num?)?.toInt(),
       );
 }
 
@@ -165,9 +176,24 @@ class ItemLocation {
 }
 
 /// 查询视图：一件物品及其全部位置（同名多位置全量展示）。
+///
+/// V3.6：新增 [rawTexts]（该物品各关联行的记账原文聚合，如「梯子放阳台」）
+/// 与 [tags]（关联行标签聚合），供明细展示与 Excel 导出；两列表为可空列，
+/// 无值时为空列表。
 class ItemWithLocations {
-  const ItemWithLocations({required this.item, required this.locations});
+  const ItemWithLocations({
+    required this.item,
+    required this.locations,
+    this.rawTexts = const <String>[],
+    this.tags = const <String>[],
+  });
 
   final Item item;
   final List<Location> locations;
+
+  /// 该物品全部关联行的记账原文（raw_text 非空去重）。
+  final List<String> rawTexts;
+
+  /// 该物品全部关联行的标签（tags 非空去重）。
+  final List<String> tags;
 }

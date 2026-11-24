@@ -80,9 +80,14 @@ class ParseUnrecognized extends ParseResult {
 ///
 /// PM 原话「东西废弃的话能语音输入，说一句话就把物品从明细里转到回收站」。
 class ParseDiscard extends ParseResult {
-  const ParseDiscard({required this.item});
+  const ParseDiscard({required this.item, this.borrower});
 
   final String item;
+
+  /// 句中指名的借阅人（「借给王五的梯子废弃了」→ 王五）；没指名为 null。
+  ///
+  /// V3.9.2：指名时只废弃该借阅人那一笔借出，不连带销掉别人的账。
+  final String? borrower;
 }
 
 /// 恢复意图（V3.9）：把回收站里的物品恢复到明细。
@@ -405,6 +410,21 @@ String _stripLendModifier(String text) {
     }
   }
   return s;
+}
+
+/// 从借出修饰语里摘出借阅人：「借给王五的」→「王五」、「被张三借走的」→「张三」。
+///
+/// V3.9.2：摘人名与 [_stripLendModifier] 剥修饰语必须成对使用——
+/// 只剥不留就会把「王五」连同修饰语一起丢掉，用户指名了谁就再也分不清。
+/// 返回 null 表示句中没指名借阅人。
+String? _extractModifierPerson(String text) {
+  final give = RegExp(r'借给([^的]+)').firstMatch(text);
+  final take = RegExp(r'被?([^的]*?)借走的').firstMatch(text);
+  final giveName = give?.group(1)?.trim();
+  final takeName = take?.group(1)?.trim();
+  if (giveName != null && giveName.isNotEmpty) return normalizeName(giveName);
+  if (takeName != null && takeName.isNotEmpty) return normalizeName(takeName);
+  return null;
 }
 
 /// 中文数字 → 整数。仅覆盖 1-20（家庭场景够用）。
@@ -804,13 +824,16 @@ ParseResult? _parseDiscard(String text) {
   head = _stripBaPrefix(head);
   // V3.9.1：剥掉借出修饰语——「借给张三的梯子废弃了」→ 物品名应是「梯子」，
   // 不能是「借给张三的梯子」（真机打回场景②的根因）。
+  // V3.9.2：剥之前先摘出借阅人——「借给王五的梯子废弃了」指名了王五，
+  // UI 才能只还他那一笔，不连带清零李四张三的账（PM 真机复验新缺陷）。
+  final modifierPerson = _extractModifierPerson(head);
   head = _stripLendModifier(head);
   final item = normalizeName(_stripTrailingParticle(head));
   if (item.isEmpty) return null; // 「不要了」这类没有物品名的句子不是废弃句。
 
   var tail = text.substring(markerIdx + marker.length).trim();
   tail = _stripTrailingParticle(tail);
-  if (tail.isEmpty) return ParseDiscard(item: item);
+  if (tail.isEmpty) return ParseDiscard(item: item, borrower: modifierPerson);
 
   // 单字丢弃动词（扔/丢）后面还带东西 → 是"放到某处"不是丢弃，
   // 例如「梯子扔阳台」。这层不认废弃，交给后面的放置/未识别分支，
@@ -820,7 +843,7 @@ ParseResult? _parseDiscard(String text) {
   // 动词后面还有内容 → 报歧义：既可能是「放弃这件东西」，也可能是
   // 「放到某个位置」。
   final location = _extractPlacementLocation(tail);
-  final candidates = <ParseResult>[ParseDiscard(item: item)];
+  final candidates = <ParseResult>[ParseDiscard(item: item, borrower: modifierPerson)];
   if (location != null) {
     candidates.add(ParseUpsert(item: item, location: normalizeName(location)));
   }
@@ -916,16 +939,8 @@ ParseDueChange? _parseDueChange(String text) {
 
   // V3.9.1：借出修饰语里可能藏着借阅人——「借给张三的梯子借期改成5天」。
   // 先把人名摘出来，再把修饰语整段剥掉，物品名才干净。
-  String? modifierPerson;
-  final givePerson = RegExp(r'借给([^的]+)').firstMatch(rest);
-  final takePerson = RegExp(r'被?([^的]*?)借走的').firstMatch(rest);
-  final giveName = givePerson?.group(1)?.trim();
-  final takeName = takePerson?.group(1)?.trim();
-  if (giveName != null && giveName.isNotEmpty) {
-    modifierPerson = giveName;
-  } else if (takeName != null && takeName.isNotEmpty) {
-    modifierPerson = takeName;
-  }
+  // V3.9.2：与废弃分支共用 [_extractModifierPerson]，避免两套正则走偏。
+  final modifierPerson = _extractModifierPerson(rest);
   rest = _stripLendModifier(rest);
 
   String? borrower;

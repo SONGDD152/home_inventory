@@ -1,7 +1,7 @@
 name: home_inventory
 description: 家庭仓储 APP 第一阶段数据层：物品位置的本地持久化。不含语音与界面。
 publish_to: none
-version: 3.9.1+17
+version: 3.9.2+18
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

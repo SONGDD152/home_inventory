@@ -1574,8 +1574,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
-      expect(find.textContaining('现在借给张三'), findsOneWidget);
-      expect(find.textContaining('先自动归还'), findsWidgets);
+      // V3.9.2：指名废弃的文案改成「会先归还张三」——只还被他点名的那笔。
+      expect(find.textContaining('会先归还张三'), findsOneWidget);
+      expect(find.textContaining('会先自动归还'), findsNothing,
+          reason: '指名时不能写成"全部自动归还"');
 
       await tester.tap(find.byKey(const Key('action_confirm_ok')));
       await settle(tester);
@@ -1662,4 +1664,113 @@ void main() {
     });
   });
 
+  // ============ V3.9.2 指名废弃只处理被点名那一笔 ============
+  //
+  // PM 真机复验新缺陷：梯子借给张三、李四、王五各 1 个，说「借给王五的梯子
+  // 废弃了」，旧实现把三笔借出全量归还——李四和张三的账被无辜清零，账乱了。
+  group('V3.9.2 指名废弃只处理被点名那一笔', () {
+    testWidgets('指名王五废弃：只归还王五那一笔，李四张三保持原样',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await repo.lendItem('梯子', '李四');
+      await repo.lendItem('梯子', '王五');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '借给王五的梯子废弃了');
+      await tester.pumpAndSettle();
+
+      // 确认框只提王五，不该把另外两个人也列进"要归还"里。
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('会先归还王五'), findsOneWidget);
+      expect(find.textContaining('张三借的那几笔不动'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      final byBorrower = <String, bool>{
+        for (final l in loans) l.borrowerName: l.isReturned,
+      };
+      expect(byBorrower['王五'], isTrue, reason: '被点名的那笔要归还');
+      expect(byBorrower['李四'], isFalse, reason: '没点名的人账不能被清零');
+      expect(byBorrower['张三'], isFalse, reason: '没点名的人账不能被清零');
+    });
+
+    testWidgets('指名废弃：确认框写明其余在借记录不动', (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await repo.lendItem('梯子', '王五');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '借给王五的梯子废弃了');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('张三借的那几笔不动'), findsOneWidget);
+      expect(find.textContaining('他们还借着'), findsOneWidget);
+    });
+
+    testWidgets('指名废弃：被点名的人没有在借记录，如实提示而不是全量归还',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '借给王五的梯子废弃了');
+      await settle(tester);
+
+      expect(find.textContaining('没有王五的借出记录'), findsOneWidget);
+      final loans = await repo.getAllLoans();
+      expect(loans.single.isReturned, isFalse, reason: '张三的账不该被动');
+      expect(await repo.getDeletedItems(), isEmpty, reason: '没确认就不该废弃');
+    });
+
+    testWidgets('没指名时仍是全量归还（PM V3.9 拍板口径不变）',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await repo.lendItem('梯子', '王五');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子废弃了');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('现在借给'), findsOneWidget);
+      expect(find.textContaining('张三'), findsWidgets);
+      expect(find.textContaining('王五'), findsWidgets);
+      expect(find.textContaining('会先自动归还'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+      final loans = await repo.getAllLoans();
+      expect(loans.every((l) => l.isReturned), isTrue);
+    });
+
+    testWidgets('指名同一人多笔在借：弹候选问是哪一笔，不替用户猜',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '王五');
+      await repo.lendItem('梯子', '王五');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '借给王五的梯子废弃了');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('discard_picker_dialog')), findsOneWidget);
+      expect(find.byKey(const Key('action_confirm_dialog')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('discard_picker_cancel')));
+      await settle(tester);
+      expect(find.textContaining('已取消废弃'), findsOneWidget);
+      final loans = await repo.getAllLoans();
+      expect(loans.every((l) => !l.isReturned), isTrue, reason: '取消零副作用');
+    });
+  });
 }

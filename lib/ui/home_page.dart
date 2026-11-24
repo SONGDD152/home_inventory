@@ -462,14 +462,57 @@ class _HomePageState extends State<HomePage> {
     // 按物品名匹配未还清借出（语音本来就是按名字说的，不依赖 item_id 一致性）。
     final loans = await widget.repository.getAllLoans();
     if (!mounted) return;
-    final outstanding = loans
+    final sameItem = loans
         .where((l) => itemNamesMatch(l.itemName, key) && !l.isReturned)
         .toList(growable: false);
-    final who = outstanding.map((l) => l.borrowerName).toSet().join('、');
+
+    // V3.9.2（PM 真机复验新缺陷）：句中指名了借阅人时，**只处理他那一笔**。
+    // 旧实现把同词根所有在借记录全量归还——用户说「借给王五的梯子废弃了」，
+    // 却把李四、张三的账也一并清零，别人在借的记录被无辜清零，账乱了。
+    // 无指名时才沿用全量归还（PM V3.9 拍板口径：借出中的物品废弃 → 先自动归还）。
+    final wanted = parsed.borrower;
+    var toReturn = sameItem;
+    if (wanted != null) {
+      final mine =
+          sameItem.where((l) => l.borrowerName == wanted).toList(growable: false);
+      if (mine.isEmpty) {
+        final who = sameItem.map((l) => l.borrowerName).toSet().join('、');
+        setState(() {
+          _busy = false;
+          _notice = sameItem.isEmpty
+              ? '「${parsed.item}」现在没有借出去，没有要归还的记录。'
+              : '「${parsed.item}」现在借给$who，没有$wanted的借出记录。';
+          _result = null;
+        });
+        return;
+      }
+      if (mine.length == 1) {
+        toReturn = mine;
+      } else {
+        // 同一借阅人多笔在借 → 弹候选问是哪一笔，不替他猜。
+        final picked = await _pickDiscardLoan(mine, wanted);
+        if (!mounted) return;
+        if (picked == null) {
+          setState(() {
+            _busy = false;
+            _notice = '已取消废弃，什么都没改。';
+            _result = null;
+          });
+          return;
+        }
+        toReturn = <Loan>[picked];
+      }
+    }
+    // 本次不动、仍留在「在借」里的记录（点名场景下的其他人）。
+    final untouched = sameItem
+        .where((l) => !toReturn.any((r) => r.id == l.id))
+        .toList(growable: false);
+
+    final who = toReturn.map((l) => l.borrowerName).toSet().join('、');
     // 可能同时命中干净名与历史脏名（"梯子"与"梯子借"），都摆出来，
     // 别让用户以为只处理了一条。
     final loanNames =
-        outstanding.map((l) => l.itemName).toSet().toList(growable: false);
+        toReturn.map((l) => l.itemName).toSet().toList(growable: false);
     final loanNameText = loanNames.length <= 1
         ? (loanNames.isEmpty ? parsed.item : loanNames.first)
         : loanNames.join('、');
@@ -477,12 +520,30 @@ class _HomePageState extends State<HomePage> {
         ? ''
         : '\n（另有一条历史记录「${extraNames.join('、')}」是同一件东西，会一起转入回收站）';
 
+    // 指名时写明"只还这一笔、其余不动"；未指名时写明"全部自动归还"。
+    final String body;
+    if (wanted != null && toReturn.length == 1) {
+      final hit = toReturn.first;
+      final others = untouched
+          .map((l) => l.borrowerName)
+          .toSet()
+          .where((n) => n != wanted)
+          .toList(growable: false);
+      final othersNote = others.isEmpty
+          ? ''
+          : '\n（${others.join('、')}借的那几笔不动，他们还借着。）';
+      body = '「$loanNameText」借给$who（${hit.quantity - hit.returnedQty} 个）。\n'
+          '会先归还$wanted，再转入回收站。$othersNote$extraNote\n确定吗？';
+    } else if (toReturn.isEmpty) {
+      body = '把「${parsed.item}」转入回收站？$extraNote\n之后可以在回收站里恢复。';
+    } else {
+      body = '「$loanNameText」现在借给$who。\n'
+          '会先自动归还，再转入回收站。$extraNote\n确定吗？';
+    }
+
     final confirmed = await _confirmAction(
       '废弃「${parsed.item}」',
-      outstanding.isEmpty
-          ? '把「${parsed.item}」转入回收站？$extraNote\n之后可以在回收站里恢复。'
-          : '「$loanNameText」现在借给$who。\n'
-              '会先自动归还，再转入回收站。$extraNote\n确定吗？',
+      body,
       confirmLabel: '转入回收站',
     );
     if (!mounted) return;
@@ -495,7 +556,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    for (final loan in outstanding) {
+    for (final loan in toReturn) {
       await widget.repository.returnLoan(
         loan.id!,
         quantity: loan.quantity - loan.returnedQty,
@@ -507,13 +568,60 @@ class _HomePageState extends State<HomePage> {
       await widget.repository.deleteItem(targetId);
     }
     if (!mounted) return;
+    final others = untouched
+        .map((l) => l.borrowerName)
+        .toSet()
+        .where((n) => n != wanted)
+        .toList(growable: false);
     setState(() {
       _busy = false;
-      _notice = outstanding.isEmpty
+      final untouchedNote = others.isEmpty ? '' : '，${others.join('、')}的借出没动';
+      _notice = toReturn.isEmpty
           ? '已把「${parsed.item}」转入回收站。'
-          : '已先归还给$who，再把「${parsed.item}」转入回收站。';
+          : '已先归还给$who，再把「${parsed.item}」转入回收站$untouchedNote。';
       _result = null;
     });
+  }
+
+  /// 废弃候选框：同一借阅人多笔在借时让用户点是哪一笔
+  /// （与改借期候选同一口径，不替用户猜）。
+  Future<Loan?> _pickDiscardLoan(List<Loan> candidates, String borrower) async {
+    return showDialog<Loan>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('discard_picker_dialog'),
+        title: Text('废弃$borrower的哪一笔？'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              for (final loan in candidates)
+                ListTile(
+                  key: Key('discard_pick_${loan.borrowerName}_${loan.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('${loan.itemName} → ${loan.borrowerName}',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    '借出 ${_loanDate(loan.borrowedAt)} · 到期 ${_loanDate(loan.dueAt)}',
+                    style: const TextStyle(
+                        fontSize: 12.5, color: Color(0xff607d8b)),
+                  ),
+                  onTap: () => Navigator.of(context).pop(loan),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('discard_picker_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// V3.9：语音恢复——「恢复梯子」→ 从回收站回到明细。
@@ -912,10 +1020,15 @@ class _HomePageState extends State<HomePage> {
           _syntaxRow('归还', '张三还了1个梯子｜还了1个梯子给张三'),
           // V3.9 语音化第一批：三个新意图的句式一并列进来，
           // 否则用户不知道能这么说。
+          // V3.9.2：废弃句补指名说法——「借给王五的梯子废弃了」只动王五那笔账。
+          _syntaxRow('废弃', '梯子废弃了｜借给王五的梯子废弃了'),
+          _syntaxRow('恢复', '恢复梯子'),
+          _syntaxRow('改借期', '梯子借期改成5天｜再借3天'),
           const SizedBox(height: 2),
           const Text(
             '借出/归还都建议带上人名；不说人名时，若同一件东西有多笔没还，'
-            '会问你是谁还的。废弃/恢复/改借期会先弹确认框，点头才执行。',
+            '会问你是谁还的。废弃/恢复/改借期会先弹确认框，点头才执行；'
+            '废弃带人名时只处理那一个人的账，别人的借出不动。',
             style: TextStyle(fontSize: 12, color: Color(0xff607d8b)),
           ),
         ],

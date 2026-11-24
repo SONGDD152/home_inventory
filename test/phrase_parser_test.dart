@@ -808,4 +808,42 @@ void main() {
       expect(r.borrower, '张三');
     });
   });
+
+  // ============ V3.9.2 指名废弃只处理被点名那一笔 ============
+  //
+  // PM 真机复验新缺陷：说「借给王五的梯子废弃了」，系统却把李四、张三的
+  // 借出记录也一并归还——点名了谁，账上就只该动谁的。
+  group('V3.9.2 指名废弃只处理被点名那一笔', () {
+    test('「借给王五的梯子废弃了」→ 物品=梯子、借阅人=王五', () {
+      final r = parsePhrase('借给王五的梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, '王五',
+          reason: '指名的人必须带出来，否则 UI 只能全量归还');
+    });
+
+    test('「张三借走的梯子废弃了」→ 借阅人=张三', () {
+      final r = parsePhrase('张三借走的梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+    });
+
+    test('「被张三借走的梯子废弃了」→ 借阅人=张三', () {
+      final r = parsePhrase('被张三借走的梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+    });
+
+    test('没指名借阅人时 borrower 为 null（沿用全量归还口径）', () {
+      final r = parsePhrase('梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, isNull);
+    });
+
+    test('借期分支共用同一套摘人名逻辑，不受影响', () {
+      final r = parsePhrase('借给王五的梯子借期改成5天') as ParseDueChange;
+      expect(r.item, '梯子');
+      expect(r.borrower, '王五');
+      expect(r.days, 5);
+    });
+  });
 }

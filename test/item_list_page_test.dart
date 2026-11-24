@@ -789,6 +789,37 @@ void main() {
     expect(find.byKey(const Key('trash_empty')), findsOneWidget);
   });
 
+  // 元宝 V3.8 批复补充要求：purgeAll() 连带清空已删借出记录，
+  // 二次确认文案必须写明「已删除的借出记录」，不能让用户误删。
+  testWidgets('V3.8.1 回收站：全部清空二次确认写明含已删除的借出记录',
+      (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await repo.deleteItem(1);
+    repo.deletedLoans.add(Loan(
+      id: 9,
+      itemId: 1,
+      itemName: '梯子',
+      borrowerName: '张三',
+      quantity: 1,
+      borrowedAt: 1000,
+      dueAt: 1000 + 3 * 86400000,
+      isDeleted: true,
+      deletedAt: 2000,
+    ));
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('trash_purge_all')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('全部物品'), findsOneWidget);
+    // 用「· 」前缀锁定弹窗正文（页面区块标题是「已删除的借出记录（1）」）。
+    expect(find.textContaining('· 已删除的借出记录'), findsOneWidget);
+  });
+
   testWidgets('左滑软删：二次确认后条目从正常列表消失（V3.6）', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台'], id: 1),

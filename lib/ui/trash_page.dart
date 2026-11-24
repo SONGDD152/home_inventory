@@ -121,9 +121,14 @@ class _TrashPageState extends State<TrashPage> {
   }
 
   Future<void> _purgeAll() async {
+    // 元宝 V3.8 批复补充要求：purgeAll() 连带清空已删借出记录，
+    // 二次确认文案必须写明「包括已删除的借出记录」，不能让用户误删。
     final confirmed = await _confirm(
       '全部清空',
-      '将彻底删除回收站全部物品（含其位置记录），此操作不可恢复。',
+      '将彻底删除回收站全部内容：\n'
+          '· 全部物品（含其位置记录）\n'
+          '· 已删除的借出记录\n'
+          '此操作不可恢复。',
       confirmLabel: '全部清空',
     );
     if (!confirmed || !mounted) return;

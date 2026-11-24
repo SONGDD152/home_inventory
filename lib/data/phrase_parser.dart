@@ -316,6 +316,97 @@ String _stripLeadingParticle(String text) {
   return rest;
 }
 
+/// 剥掉片段**尾部**的借出动词：「梯子借」→「梯子」。
+///
+/// V3.9.1 真机打回（PM 场景②）：口语里「物品 + 借 + 给/走 + 人」很常见
+/// ——「梯子借给张三」。旧解析器只认「动词在前」的语序（借2个梯子给张三），
+/// 遇到「梯子借给张三」时 head 切出来是「梯子借」，借出动词「借」被留在了
+/// 物品名里 → 物品被建成「梯子借」，借出记录也挂在这个脏名上，
+/// 之后说「梯子借期改成5天」按「梯子」就再也查不到那条记录。
+///
+/// 只剥词尾动词，剥完为空（片段本身就是「借」）时返回原名。
+String _stripLendVerbSuffix(String text) {
+  var rest = text.trim();
+  if (rest.isEmpty) return rest;
+  for (final marker in _lendMarkers) {
+    if (!rest.endsWith(marker)) continue;
+    final head = rest.substring(0, rest.length - marker.length).trim();
+    if (head.isEmpty) break;
+    rest = head;
+    break;
+  }
+  return rest;
+}
+
+/// 从片段**尾部**剥出数量：「张三1个」→ (1, "张三")。
+///
+/// 用于「梯子借给张三1个」这种「数量跟在人后面」的口语。
+({int value, String rest})? _extractTrailingQuantity(String text) {
+  final m = RegExp(
+          r'(\d+|[一两二三四五六七八九十]+)\s*[个本把件只张]\s*$')
+      .firstMatch(text);
+  if (m == null) return null;
+  final value = int.tryParse(m.group(1)!) ?? _cnNumbers[m.group(1)!];
+  if (value == null || value < 1) return null;
+  return (value: value, rest: text.substring(0, m.start).trim());
+}
+
+/// 剥掉物品名周围表示「借出状态」的修饰语。
+///
+/// V3.9.1 真机打回（PM 场景②）：说「借给张三的梯子废弃了」时，
+/// 旧解析器把「借给张三的」当成了物品名的一部分 → 物品名 = 「借给张三的梯子」，
+/// 查库自然找不到，PM 看到的是"没有找到「借给张三的梯子」"。
+///
+/// 处理后：
+///  * 前缀「借给张三的」「被张三借走的」「张三借走的」「借出的」「借的」→ 剥掉；
+///  * 尾部「借给张三的」「借走的」「借出的」「借的」→ 剥掉。
+///
+/// 「借书」「借款单」这类真名不受影响——只匹配「借 + 走/出/了/的/给…」这类
+/// 明确的动词组合。
+String _stripLendModifier(String text) {
+  var s = text.trim();
+  if (s.isEmpty) return s;
+
+  final prefixPatterns = <RegExp>[
+    RegExp(r'^借给[^的]*的'), // 借给张三的
+    RegExp(r'^被[^的]*借走的'), // 被张三借走的
+    RegExp(r'^[^的]*借走的'), // 张三借走的
+    RegExp(r'^借走的'),
+    RegExp(r'^借出的'),
+    RegExp(r'^借的'),
+  ];
+  final suffixPatterns = <RegExp>[
+    RegExp(r'借给[^的]*的$'), // 梯子借给张三的
+    RegExp(r'借走的$'),
+    RegExp(r'借出的$'),
+    RegExp(r'借的$'),
+  ];
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (final p in prefixPatterns) {
+      final m = p.firstMatch(s);
+      // 不允许剥到空（m.end == s.length 说明整串都是修饰语，无物品名）。
+      if (m != null && m.end < s.length) {
+        s = s.substring(m.end).trim();
+        changed = true;
+        break;
+      }
+    }
+    if (changed) continue;
+    for (final p in suffixPatterns) {
+      final m = p.firstMatch(s);
+      if (m != null && m.start > 0) {
+        s = s.substring(0, m.start).trim();
+        changed = true;
+        break;
+      }
+    }
+  }
+  return s;
+}
+
 /// 中文数字 → 整数。仅覆盖 1-20（家庭场景够用）。
 const Map<String, int> _cnNumbers = <String, int>{
   '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5,
@@ -378,6 +469,9 @@ ParseLend? _parseLend(String text) {
     // V3.7.2 修复②：整体剥「借给」及紧随其后的「了」，避免人名被切成「了张三」。
     var tail = _stripLendVerbPrefix(text);
     if (tail.isEmpty) return null;
+    // 口语尾巴的语气词（"借给张三吧"）不能粘进人名。
+    tail = _stripTrailingParticle(tail);
+    if (tail.isEmpty) return null;
 
     // 先剥尾部天数（"张三2个梯子5天"）。
     int? days;
@@ -405,9 +499,21 @@ ParseLend? _parseLend(String text) {
   final giveIdx = text.indexOf('给');
   if (giveIdx > 0) {
     // 形态2：借[了/走/出]<数量><物品>给<人>(借2个梯子给张三)
-    final head = text.substring(0, giveIdx).trim(); // "借2个梯子"
-    var tail = text.substring(giveIdx + 1).trim(); // "张三"
+    // V3.9.1：也覆盖「物品 + 借 + 给 + 人」（梯子借给张三）——此时 head 尾巴
+    // 带着借出动词，必须剥掉，否则物品名被建成「梯子借」（真机打回场景②）。
+    final head = text.substring(0, giveIdx).trim(); // "借2个梯子" / "梯子借"
+    var tail = text.substring(giveIdx + 1).trim(); // "张三" / "张三1个"
     if (tail.isEmpty) return null;
+    // 口语尾巴的语气词（"梯子借给张三吧"）不能粘进人名。
+    tail = _stripTrailingParticle(tail);
+    if (tail.isEmpty) return null;
+    // 「数量跟在人后面」：梯子借给张三1个 → 数量=1、人=张三。
+    var tailQuantity = 1;
+    final tailQty = _extractTrailingQuantity(tail);
+    if (tailQty != null && tailQty.rest.isNotEmpty) {
+      tailQuantity = tailQty.value;
+      tail = tailQty.rest;
+    }
     int? days;
     final dayMatch = RegExp(r'^(.+?)(\d+)\s*天$').firstMatch(tail);
     if (dayMatch != null && dayMatch.group(1)!.trim().isNotEmpty) {
@@ -419,7 +525,11 @@ ParseLend? _parseLend(String text) {
     // V3.7.2 修复①：整体剥借出动词（含「借了/借走/借出」）与其后的「了」。
     // 此前只剥「借」一个字，"借了3个钉子" 剩 "了3个钉子" → 数量匹配失败
     // 静默丢成 1、物品名被污染成「了3个钉子」。
-    final itemPart = _stripLendVerbPrefix(head);
+    var itemPart = _stripLendVerbPrefix(head);
+    // V3.9.1：再剥尾部借出动词——「梯子借」→「梯子」。
+    itemPart = _stripLendVerbSuffix(itemPart);
+    // 「把梯子借给张三」——把字句的"把"不能留在物品名里。
+    itemPart = _stripBaPrefix(itemPart);
     var quantity = 1;
     var rest2 = itemPart;
     final q = _extractLeadingQuantity(rest2);
@@ -427,6 +537,8 @@ ParseLend? _parseLend(String text) {
       quantity = q.value;
       rest2 = q.rest;
     }
+    // 尾部数量（跟在人后面）仅在物品本身没给数量时采用。
+    if (quantity == 1 && tailQuantity > 1) quantity = tailQuantity;
     final item = normalizeName(_stripTrailingParticle(rest2));
     // V3.9 加固：物品名被剥空时不再返回（空物品名的借出单是乱账）。
     if (item.isEmpty) return null;
@@ -690,6 +802,9 @@ ParseResult? _parseDiscard(String text) {
 
   var head = text.substring(0, markerIdx).trim();
   head = _stripBaPrefix(head);
+  // V3.9.1：剥掉借出修饰语——「借给张三的梯子废弃了」→ 物品名应是「梯子」，
+  // 不能是「借给张三的梯子」（真机打回场景②的根因）。
+  head = _stripLendModifier(head);
   final item = normalizeName(_stripTrailingParticle(head));
   if (item.isEmpty) return null; // 「不要了」这类没有物品名的句子不是废弃句。
 
@@ -750,7 +865,9 @@ ParseRestore? _parseRestore(String text) {
   for (final marker in _restoreMarkers) {
     final idx = text.indexOf(marker);
     if (idx < 0) continue;
-    final head = _stripBaPrefix(text.substring(0, idx).trim());
+    var head = _stripBaPrefix(text.substring(0, idx).trim());
+    // V3.9.1：剥借出修饰语——「把借给张三的梯子恢复」→ 物品名是「梯子」。
+    head = _stripLendModifier(head);
     // 尾部「到明细 / 回明细 / 到物品明细 / 到首页」等去处说明语。
     var tail = text.substring(idx + marker.length).trim();
     tail = tail.replaceAll(RegExp(r'(到|回)(物品)?明细.*$'), '');
@@ -763,7 +880,7 @@ ParseRestore? _parseRestore(String text) {
       continue;
     }
     // 动词开头：「恢复梯子」——物品在动词后面。
-    final tailItem = normalizeName(_stripTrailingParticle(tail));
+    final tailItem = normalizeName(_stripTrailingParticle(_stripLendModifier(tail)));
     if (tailItem.isNotEmpty) return ParseRestore(item: tailItem);
   }
   return null;
@@ -797,6 +914,20 @@ ParseDueChange? _parseDueChange(String text) {
   }
   rest = rest.replaceAll(RegExp(r'[\s，,。.、]'), '').trim();
 
+  // V3.9.1：借出修饰语里可能藏着借阅人——「借给张三的梯子借期改成5天」。
+  // 先把人名摘出来，再把修饰语整段剥掉，物品名才干净。
+  String? modifierPerson;
+  final givePerson = RegExp(r'借给([^的]+)').firstMatch(rest);
+  final takePerson = RegExp(r'被?([^的]*?)借走的').firstMatch(rest);
+  final giveName = givePerson?.group(1)?.trim();
+  final takeName = takePerson?.group(1)?.trim();
+  if (giveName != null && giveName.isNotEmpty) {
+    modifierPerson = giveName;
+  } else if (takeName != null && takeName.isNotEmpty) {
+    modifierPerson = takeName;
+  }
+  rest = _stripLendModifier(rest);
+
   String? borrower;
   String? item;
   if (rest.isEmpty) {
@@ -815,6 +946,11 @@ ParseDueChange? _parseDueChange(String text) {
     } else {
       item = normalizeName(rest);
     }
+  }
+  // 修饰语里摘出的借阅人优先（比「X的Y」切分更可靠：
+  // 「借给张三的梯子」里「张三」不是物品的一部分）。
+  if (borrower == null && modifierPerson != null && modifierPerson.isNotEmpty) {
+    borrower = normalizeName(modifierPerson);
   }
   if (item != null && item.isEmpty) item = null;
 

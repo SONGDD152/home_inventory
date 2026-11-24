@@ -1538,4 +1538,128 @@ void main() {
     });
   });
 
+  // ============ V3.9.1 真机打回修复（PM 复验场景②④） ============
+  //
+  // 根因：口语「梯子借给张三」（物品在前、动词在后）旧解析器不认，
+  // 借出动词「借」留在了物品名里 → 物品被建成「梯子借」、借出记录挂在脏名上，
+  // 之后说「借给张三的梯子废弃了」「梯子借期改成5天」全都对不上。
+  group('V3.9.1 真机打回修复', () {
+    testWidgets('说「梯子借给张三」物品名不再被污染成「梯子借」',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借给张三');
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      expect(loans.single.itemName, '梯子',
+          reason: '借出记录必须挂在干净物品名上');
+      final items = await repo.getAllItemsWithLocations();
+      expect(items.map((i) => i.item.name), isNot(contains('梯子借')),
+          reason: '不能凭空多出一个叫「梯子借」的物品');
+    });
+
+    testWidgets('废弃：「借给张三的梯子废弃了」认得出是梯子，并明说先归还',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '借给张三的梯子废弃了');
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('现在借给张三'), findsOneWidget);
+      expect(find.textContaining('先自动归还'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      expect(loans.single.isReturned, isTrue, reason: '先自动归还');
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name), contains('梯子'));
+    });
+
+    testWidgets('改借期：单笔在借时说改借期直接改，不弹候选', (tester) async {
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借期改成5天');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('due_picker_dialog')), findsNothing);
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      expect(loans.single.dueAt, loans.single.borrowedAt + 5 * 86400000);
+    });
+
+    testWidgets('改借期：历史脏名「梯子借」的记录也能被说「梯子」找到',
+        (tester) async {
+      // 复刻 PM 真机脏数据：V3.9 之前说「梯子借给张三」会建成「梯子借」。
+      await repo.lendItem('梯子借', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借期改成5天');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('没有找到可以改借期的借出记录'), findsNothing);
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('梯子借'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+      final loans = await repo.getAllLoans();
+      expect(loans.single.dueAt, loans.single.borrowedAt + 5 * 86400000);
+    });
+
+    testWidgets('废弃：历史脏名「梯子借」借出中，说「梯子废弃了」也要先归还',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子借', loc);
+      await repo.lendItem('梯子借', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子废弃了');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('现在借给张三'), findsOneWidget);
+      expect(find.textContaining('先自动归还'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+      final loans = await repo.getAllLoans();
+      expect(loans.single.isReturned, isTrue);
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name), contains('梯子借'));
+    });
+
+    testWidgets('废弃：同词根的历史脏记录一起进回收站，不留幽灵物品',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.upsertItemLocation('梯子借', loc);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子废弃了');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('同一件东西'), findsWidgets);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name),
+          containsAll(<String>['梯子', '梯子借']));
+    });
+  });
+
 }

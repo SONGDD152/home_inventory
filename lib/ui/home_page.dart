@@ -425,11 +425,19 @@ class _HomePageState extends State<HomePage> {
     final key = normalizeName(parsed.item);
     final all = await widget.repository.getAllItemsWithLocations();
     if (!mounted) return;
-    final hit = all.where((i) => i.item.name == key).firstOrNull;
-    if (hit == null || hit.item.id == null) {
+    // V3.9.1 真机打回（PM 场景②）：精确优先，找不到再按词根兜底——
+    // 历史脏数据把物品建成「梯子借」，用户说「梯子」也要能命中它。
+    var hits =
+        all.where((i) => i.item.name == key).toList(growable: false);
+    if (hits.isEmpty) {
+      hits = all.where((i) => itemNamesMatch(i.item.name, key)).toList(growable: false);
+    }
+    if (hits.isEmpty || hits.first.item.id == null) {
       final deleted = await widget.repository.getDeletedItems();
       if (!mounted) return;
-      final inTrash = deleted.where((i) => i.item.name == key).firstOrNull;
+      final inTrash = deleted
+          .where((i) => i.item.name == key || itemNamesMatch(i.item.name, key))
+          .firstOrNull;
       setState(() {
         _busy = false;
         _notice = inTrash != null
@@ -439,23 +447,42 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    final id = hit.item.id!;
+    // 同词根的其它记录（如历史脏名「梯子借」）是同一件东西的两条记录，
+    // 一并处理掉，别让脏副本继续挂在明细里。
+    final primary = hits.first;
+    final targets = all
+        .where((i) => hits.any((h) => h.item.id == i.item.id) ||
+            itemNamesMatch(i.item.name, key))
+        .toList(growable: false);
+    final names = targets.map((t) => t.item.name).toSet().toList(growable: false);
+    final extraNames =
+        names.where((n) => n != primary.item.name).toList(growable: false);
 
     // 借出中的物品：先自动归还（PM 拍板）。
     // 按物品名匹配未还清借出（语音本来就是按名字说的，不依赖 item_id 一致性）。
     final loans = await widget.repository.getAllLoans();
     if (!mounted) return;
     final outstanding = loans
-        .where((l) => l.itemName == key && !l.isReturned)
+        .where((l) => itemNamesMatch(l.itemName, key) && !l.isReturned)
         .toList(growable: false);
     final who = outstanding.map((l) => l.borrowerName).toSet().join('、');
+    // 可能同时命中干净名与历史脏名（"梯子"与"梯子借"），都摆出来，
+    // 别让用户以为只处理了一条。
+    final loanNames =
+        outstanding.map((l) => l.itemName).toSet().toList(growable: false);
+    final loanNameText = loanNames.length <= 1
+        ? (loanNames.isEmpty ? parsed.item : loanNames.first)
+        : loanNames.join('、');
+    final extraNote = extraNames.isEmpty
+        ? ''
+        : '\n（另有一条历史记录「${extraNames.join('、')}」是同一件东西，会一起转入回收站）';
 
     final confirmed = await _confirmAction(
       '废弃「${parsed.item}」',
       outstanding.isEmpty
-          ? '把「${parsed.item}」转入回收站？\n之后可以在回收站里恢复。'
-          : '「${parsed.item}」现在借给$who。\n'
-              '会先自动归还，再转入回收站。\n确定吗？',
+          ? '把「${parsed.item}」转入回收站？$extraNote\n之后可以在回收站里恢复。'
+          : '「$loanNameText」现在借给$who。\n'
+              '会先自动归还，再转入回收站。$extraNote\n确定吗？',
       confirmLabel: '转入回收站',
     );
     if (!mounted) return;
@@ -474,7 +501,11 @@ class _HomePageState extends State<HomePage> {
         quantity: loan.quantity - loan.returnedQty,
       );
     }
-    await widget.repository.deleteItem(id);
+    for (final target in targets) {
+      final targetId = target.item.id;
+      if (targetId == null) continue;
+      await widget.repository.deleteItem(targetId);
+    }
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -493,7 +524,9 @@ class _HomePageState extends State<HomePage> {
     final key = normalizeName(parsed.item);
     final deleted = await widget.repository.getDeletedItems();
     if (!mounted) return;
-    final hit = deleted.where((i) => i.item.name == key).firstOrNull;
+    // V3.9.1：精确优先，找不到再按词根兜底（历史脏名「梯子借」）。
+    var hit = deleted.where((i) => i.item.name == key).firstOrNull;
+    hit ??= deleted.where((i) => itemNamesMatch(i.item.name, key)).firstOrNull;
     if (hit == null || hit.item.id == null) {
       setState(() {
         _busy = false;
@@ -504,8 +537,8 @@ class _HomePageState extends State<HomePage> {
     }
     final all = await widget.repository.getAllItemsWithLocations();
     if (!mounted) return;
-    final live = all.where((i) => i.item.name == key).firstOrNull;
-
+    var live = all.where((i) => i.item.name == key).firstOrNull;
+    live ??= all.where((i) => itemNamesMatch(i.item.name, key)).firstOrNull;
     final confirmed = await _confirmAction(
       '恢复「${parsed.item}」',
       live == null
@@ -546,8 +579,15 @@ class _HomePageState extends State<HomePage> {
         loans.where((l) => !l.isReturned).toList(growable: false);
     if (parsed.item != null) {
       final key = normalizeName(parsed.item!);
-      candidates =
+      final exact =
           candidates.where((l) => l.itemName == key).toList(growable: false);
+      // V3.9.1 真机打回（PM 场景④）：兜底按词根匹配——历史脏数据把借出记录
+      // 挂在「梯子借」上，用户说「梯子」也必须能找到那笔，否则改不了借期。
+      candidates = exact.isNotEmpty
+          ? exact
+          : candidates
+              .where((l) => itemNamesMatch(l.itemName, key))
+              .toList(growable: false);
     }
     if (parsed.borrower != null) {
       candidates = candidates
@@ -559,7 +599,8 @@ class _HomePageState extends State<HomePage> {
       final doneHit = loans.any((l) =>
           l.isReturned &&
           (parsed.item == null ||
-              l.itemName == normalizeName(parsed.item!)) &&
+              (l.itemName == normalizeName(parsed.item!) ||
+                  itemNamesMatch(l.itemName, parsed.item!))) &&
           (parsed.borrower == null || l.borrowerName == parsed.borrower));
       setState(() {
         _busy = false;

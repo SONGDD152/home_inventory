@@ -45,4 +45,39 @@ void main() {
       expect(normalizeName('　ＡＢＣ '), 'abc');
     });
   });
+
+  // ============ V3.9.1 词根工具：历史脏名「梯子借」的兼容查找 ============
+  group('词根工具（V3.9.1）', () {
+    test('stripLoanSuffix 剥掉尾部的借出动词', () {
+      expect(stripLoanSuffix('梯子借'), '梯子');
+      expect(stripLoanSuffix('梯子借给'), '梯子');
+      expect(stripLoanSuffix('梯子借走'), '梯子');
+      expect(stripLoanSuffix('梯子借出'), '梯子');
+      expect(stripLoanSuffix('梯子借了'), '梯子');
+    });
+
+    test('stripLoanSuffix 不动真名：借书/借款单/借记本原样保留', () {
+      expect(stripLoanSuffix('借书'), '借书');
+      expect(stripLoanSuffix('借款单'), '借款单');
+      expect(stripLoanSuffix('借记本'), '借记本');
+    });
+
+    test('stripLoanSuffix 名字本身就是「借」时不剥空', () {
+      expect(stripLoanSuffix('借'), '借');
+    });
+
+    test('itemNamesMatch：精确相等与词根相等都算命中', () {
+      expect(itemNamesMatch('梯子', '梯子'), isTrue);
+      expect(itemNamesMatch('梯子', '梯子借'), isTrue,
+          reason: '历史脏名要能被说「梯子」时找到');
+      expect(itemNamesMatch('梯子借', '梯子'), isTrue);
+      expect(itemNamesMatch('梯子', '梯子架'), isFalse);
+      expect(itemNamesMatch('梯子', '借书'), isFalse);
+    });
+
+    test('itemNameRoot 给出统一词根', () {
+      expect(itemNameRoot('梯子'), '梯子');
+      expect(itemNameRoot('梯子借'), '梯子');
+    });
+  });
 }

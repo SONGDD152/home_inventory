@@ -500,7 +500,9 @@ void main() {
       test('「借给张三的梯子不要了」不被借出抢答', () {
         final r = parsePhrase('借给张三的梯子不要了');
         expect(r, isA<ParseDiscard>());
-        expect((r as ParseDiscard).item, '借给张三的梯子');
+        // V3.9.1 真机打回（PM 场景②）：物品名此前是「借给张三的梯子」——
+        // 借出修饰语被当成了名字的一部分，查库必然找不到。已剥成「梯子」。
+        expect((r as ParseDiscard).item, '梯子');
       });
 
       test('「梯子放回明细」不被放置抢答（位置不变成「回明细」）', () {
@@ -615,7 +617,9 @@ void main() {
       test('「借给张三的梯子不要了」不被借出抢答', () {
         final r = parsePhrase('借给张三的梯子不要了');
         expect(r, isA<ParseDiscard>());
-        expect((r as ParseDiscard).item, '借给张三的梯子');
+        // V3.9.1 真机打回（PM 场景②）：物品名此前是「借给张三的梯子」——
+        // 借出修饰语被当成了名字的一部分，查库必然找不到。已剥成「梯子」。
+        expect((r as ParseDiscard).item, '梯子');
       });
 
       test('「梯子放回明细」不被放置抢答（位置不变成「回明细」）', () {
@@ -720,6 +724,88 @@ void main() {
     test('V3.8：物品名带「收」不被误伤：「还了收纳盒」→ 物品=收纳盒', () {
       final r = parsePhrase('还了收纳盒') as ParseReturn;
       expect(r.item, '收纳盒');
+    });
+  });
+
+  // ============ V3.9.1 真机打回修复 ============
+  //
+  // PM 真机复验打回（场景②④）的根因：口语「梯子借给张三」是「物品在前、
+  // 动词在后」的语序，旧解析器只认「动词在前」，借出动词「借」留在了物品名里，
+  // 物品被建成「梯子借」；再者废弃/改借期分支没剥「借给张三的」这类修饰语，
+  // 物品名成了「借给张三的梯子」。
+  group('V3.9.1 真机打回修复', () {
+    test('「梯子借给张三」→ 物品=梯子、借阅人=张三（物品在前、动词在后）', () {
+      final r = parsePhrase('梯子借给张三') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.quantity, 1);
+    });
+
+    test('「梯子借给张三3个」→ 数量跟在人后面也不能丢', () {
+      final r = parsePhrase('梯子借给张三3个') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.quantity, 3);
+    });
+
+    test('「借给张三的梯子废弃了」→ 剥掉借出修饰语，物品=梯子', () {
+      final r = parsePhrase('借给张三的梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+    });
+
+    test('「张三借走的梯子废弃了」→ 剥掉借出修饰语，物品=梯子', () {
+      final r = parsePhrase('张三借走的梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+    });
+
+    test('「借给张三的梯子借期改成5天」→ 物品=梯子、借阅人=张三', () {
+      final r = parsePhrase('借给张三的梯子借期改成5天') as ParseDueChange;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.days, 5);
+    });
+
+    test('借出老句式零回归（动词在前那几种照旧）', () {
+      final a = parsePhrase('借给张三1个梯子') as ParseLend;
+      expect(a.item, '梯子');
+      expect(a.borrower, '张三');
+      expect(a.quantity, 1);
+
+      final b = parsePhrase('借了3个钉子给张三') as ParseLend;
+      expect(b.item, '钉子');
+      expect(b.borrower, '张三');
+      expect(b.quantity, 3);
+
+      final c = parsePhrase('借2个梯子给张三') as ParseLend;
+      expect(c.item, '梯子');
+      expect(c.quantity, 2);
+
+      final d = parsePhrase('张三借了2个梯子') as ParseLend;
+      expect(d.item, '梯子');
+      expect(d.borrower, '张三');
+      expect(d.quantity, 2);
+
+      final e = parsePhrase('梯子被张三借走了1天') as ParseLend;
+      expect(e.item, '梯子');
+      expect(e.borrower, '张三');
+      expect(e.days, 1);
+    });
+
+    test('真名里带「借」不被误剥：「借书」「借款单」原样保留', () {
+      final r = parsePhrase('借书不要了') as ParseDiscard;
+      expect(r.item, '借书');
+    });
+
+    test('口语变体：「把梯子借给张三」不把「把」留在物品名里', () {
+      final r = parsePhrase('把梯子借给张三') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+    });
+
+    test('口语变体：「梯子借给张三吧」的语气词不粘进人名', () {
+      final r = parsePhrase('梯子借给张三吧') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
     });
   });
 }

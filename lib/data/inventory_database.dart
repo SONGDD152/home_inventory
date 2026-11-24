@@ -1260,6 +1260,12 @@ class InventoryDatabase implements InventoryRepository {
     int? days,
   }) async {
     final validItem = _normalizeName(itemName, '物品名称');
+    // V3.9.1 真机打回：解析器漏掉的一路（口语「梯子借给张三」）会把「借」
+    // 留在名字里，物品被建成「梯子借」，借出记录也挂在这个脏名上，之后说
+    // 「梯子借期改成5天」按「梯子」就再也查不到。落库前统一按词根归一，
+    // 与解析器的修复构成双保险。
+    final rootItem = stripLoanSuffix(validItem);
+    final storeItem = rootItem.isEmpty ? validItem : rootItem;
     final validBorrower = _normalizeName(borrowerName, '借阅人姓名');
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', '借出数量至少为 1');
@@ -1275,7 +1281,7 @@ class InventoryDatabase implements InventoryRepository {
     final due = nowUtc.add(Duration(days: loanDays)).millisecondsSinceEpoch;
 
     return db.transaction<Loan>((txn) async {
-      final itemId = await _findOrCreateItem(txn, validItem, now);
+      final itemId = await _findOrCreateItem(txn, storeItem, now);
       // 借阅人：复用活跃行，软删的不复用（同名会新建）。
       final borrowerRows = await txn.query(
         tableBorrowers,
@@ -1293,7 +1299,7 @@ class InventoryDatabase implements InventoryRepository {
       final loan = Loan(
         itemId: itemId,
         updatedAt: now,
-        itemName: validItem,
+        itemName: storeItem,
         borrowerName: validBorrower,
         quantity: quantity,
         borrowedAt: now,
@@ -1304,7 +1310,7 @@ class InventoryDatabase implements InventoryRepository {
         id: id,
         itemId: itemId,
         updatedAt: now,
-        itemName: validItem,
+        itemName: storeItem,
         borrowerName: validBorrower,
         quantity: quantity,
         borrowedAt: now,

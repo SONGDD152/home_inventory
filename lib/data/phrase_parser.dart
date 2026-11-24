@@ -74,6 +74,72 @@ class ParseUnrecognized extends ParseResult {
   final String? guess;
 }
 
+// ==================== V3.9 语音化第一批 ====================
+
+/// 废弃意图（V3.9）：把物品从明细转入回收站。
+///
+/// PM 原话「东西废弃的话能语音输入，说一句话就把物品从明细里转到回收站」。
+class ParseDiscard extends ParseResult {
+  const ParseDiscard({required this.item});
+
+  final String item;
+}
+
+/// 恢复意图（V3.9）：把回收站里的物品恢复到明细。
+class ParseRestore extends ParseResult {
+  const ParseRestore({required this.item});
+
+  final String item;
+}
+
+/// 改借期模式。
+enum DueChangeMode {
+  /// 「改成 5 天 / 延长到 7 天」——设为总天数。
+  set,
+
+  /// 「再借 3 天 / 续借 3 天」——在当前借期上追加。
+  extendBy,
+}
+
+/// 改借期意图（V3.9）。
+///
+/// 元宝口径：本批只支持「改成 N 天 / 延长到 N 天 / 再借 N 天」三种；
+/// 「缩短」暂不支持（没有催还机制，支持了也无效）。
+class ParseDueChange extends ParseResult {
+  const ParseDueChange({
+    required this.days,
+    this.item,
+    this.borrower,
+    this.mode = DueChangeMode.set,
+  });
+
+  /// 目标天数（[DueChangeMode.set] 时为总天数；[DueChangeMode.extendBy]
+  /// 时为追加天数）。
+  final int days;
+
+  /// 物品名；句中没指名时为 null（由 UI 按未还清候选收敛）。
+  final String? item;
+
+  /// 借阅人；句中没指名时为 null。
+  final String? borrower;
+
+  final DueChangeMode mode;
+}
+
+/// 歧义意图（V3.9）：一句话有两种合理解释，交由用户点选。
+///
+/// 元宝补充①：句子同时含废弃动词与位置词（如「梯子不要了放阳台」）时，
+/// 不强行选废弃，而是报歧义弹确认框让用户选意图。
+class ParseAmbiguous extends ParseResult {
+  const ParseAmbiguous({required this.candidates, required this.hint});
+
+  /// 候选意图（第一个是首选）。
+  final List<ParseResult> candidates;
+
+  /// 展示给用户的说明（如「这句有两种理解：…」）。
+  final String hint;
+}
+
 const List<String> _trailingParticles = <String>['了', '呢', '吧'];
 
 /// 查询触发词（后缀）。按长度降序匹配，长的优先（「在哪里」先于「哪里」）。
@@ -362,6 +428,7 @@ ParseLend? _parseLend(String text) {
       rest2 = q.rest;
     }
     final item = normalizeName(_stripTrailingParticle(rest2));
+    // V3.9 加固：物品名被剥空时不再返回（空物品名的借出单是乱账）。
     if (item.isEmpty) return null;
     return ParseLend(item: item, borrower: borrower, quantity: quantity, days: days);
   }
@@ -566,9 +633,203 @@ bool _looksLikeBorrowerName(String head) {
   return true;
 }
 
+// ==================== V3.9 语音化第一批：废弃 / 恢复 / 改借期 ====================
+
+/// 废弃动词词表（长词优先）。
+///
+/// 词表覆盖 PM 提的「不要了 / 废弃了 / 扔了 / 报废了 / 不用了」等口语。
+/// 长词在前，命中时先剥长的（「不要了」优先于「不要」），避免把
+/// 「梯子不要了」切成「梯子不」+「要了」。
+///
+/// 只收**表示丢弃已完成**的词（扔了/扔掉/丢掉了）与「不要了/废弃了」
+/// 这类明确否定词；单字「扔/丢」不收——「梯子扔阳台」是"放到阳台"，
+/// 不是丢弃，收进来会把这类句子抢答成废弃（V1「精确模板外未识别」）。
+const List<String> _discardMarkers = <String>[
+  '不需要了', '不要了', '不用了', '废弃了', '报废了', '丢掉了', '扔了', '扔掉',
+  '不需要', '不要', '不用', '废弃', '报废', '扔', '丢',
+];
+
+/// 恢复动词词表（长词优先）。
+///
+/// 不用「还回」——那是归还语义（V3.7 已占用），混用会把「还回梯子」
+/// 记成归还而不是恢复。
+const List<String> _restoreMarkers = <String>['恢复', '还原'];
+
+/// 改借期句的特征词。命中其一才尝试按改借期解析。
+const List<String> _dueMarkers = <String>['借期', '到期', '延期', '续借', '再借'];
+
+/// 改借期句里要剥掉的修饰词（剥完剩下的就是物品名/人名）。
+const List<String> _dueKeywords = <String>[
+  '借期', '到期日', '到期', '延期', '续借', '再借', '多借',
+  '延长到', '延长', '改成', '改为', '改到', '调到', '设为', '变成', '借到',
+];
+
+/// 「放回明细」——恢复的特例说法。
+const String _putBackSuffix = '放回明细';
+
+/// 解析废弃句式。
+///
+/// 支持：梯子废弃了 / 梯子不要了 / 把梯子扔了 / 梯子报废了 / 梯子不用了。
+///
+/// 元宝补充①：句中**同时**含位置信息时（「梯子不要了放阳台」）不强行
+/// 判废弃，而是返回 [ParseAmbiguous]（废弃 vs 放置）交给用户点选——
+/// 两种理解都合理，替用户猜就是替他做决定。
+ParseResult? _parseDiscard(String text) {
+  String? marker;
+  int? markerIdx;
+  for (final m in _discardMarkers) {
+    final i = text.indexOf(m);
+    if (i < 0) continue;
+    // 取最靠前的动词；同位置时保留词表里更长的那个（词表已按长度降序）。
+    if (markerIdx == null || i < markerIdx) {
+      markerIdx = i;
+      marker = m;
+    }
+  }
+  if (markerIdx == null || marker == null) return null;
+
+  var head = text.substring(0, markerIdx).trim();
+  head = _stripBaPrefix(head);
+  final item = normalizeName(_stripTrailingParticle(head));
+  if (item.isEmpty) return null; // 「不要了」这类没有物品名的句子不是废弃句。
+
+  var tail = text.substring(markerIdx + marker.length).trim();
+  tail = _stripTrailingParticle(tail);
+  if (tail.isEmpty) return ParseDiscard(item: item);
+
+  // 单字丢弃动词（扔/丢）后面还带东西 → 是"放到某处"不是丢弃，
+  // 例如「梯子扔阳台」。这层不认废弃，交给后面的放置/未识别分支，
+  // 保持 V1「精确模板之外一律未识别」的老口径不被扩大。
+  if (marker == '扔' || marker == '丢') return null;
+
+  // 动词后面还有内容 → 报歧义：既可能是「放弃这件东西」，也可能是
+  // 「放到某个位置」。
+  final location = _extractPlacementLocation(tail);
+  final candidates = <ParseResult>[ParseDiscard(item: item)];
+  if (location != null) {
+    candidates.add(ParseUpsert(item: item, location: normalizeName(location)));
+  }
+  return ParseAmbiguous(
+    candidates: candidates,
+    hint: '「$item」这句有两种理解：'
+        '${location != null ? '放到$location，或' : ''}把它转入回收站？',
+  );
+}
+
+/// 从片段里取出放置位置（动词 + 介词之后的干净部分）。
+///
+/// 用于歧义分支：废弃动词之后的尾巴若还带位置（如「不要了放阳台」），
+/// 就把它还原成位置候选。
+String? _extractPlacementLocation(String tail) {
+  for (final verb in _placeVerbs) {
+    final i = tail.indexOf(verb);
+    if (i < 0) continue;
+    var loc = tail.substring(i + 1).trim();
+    if (_isPreposition(loc)) loc = loc.substring(1).trim();
+    loc = _stripTrailingParticle(loc);
+    if (loc.isEmpty) continue;
+    return loc;
+  }
+  return null;
+}
+
+/// 解析恢复句式（回收站 → 明细）。
+///
+/// 支持：恢复梯子 / 把梯子恢复 / 梯子恢复到明细 / 还原梯子 / 梯子放回明细。
+///
+/// 「放回明细」是特例——它含放置动词「放」，若放给录入分支会被解析成
+/// 「把梯子放到'回明细'」这种垃圾位置，所以在这里单独拦下。
+ParseRestore? _parseRestore(String text) {
+  if (text.endsWith(_putBackSuffix)) {
+    final head = _stripBaPrefix(
+        text.substring(0, text.length - _putBackSuffix.length).trim());
+    final item = normalizeName(_stripTrailingParticle(head));
+    if (item.isEmpty) return null;
+    return ParseRestore(item: item);
+  }
+  for (final marker in _restoreMarkers) {
+    final idx = text.indexOf(marker);
+    if (idx < 0) continue;
+    final head = _stripBaPrefix(text.substring(0, idx).trim());
+    // 尾部「到明细 / 回明细 / 到物品明细 / 到首页」等去处说明语。
+    var tail = text.substring(idx + marker.length).trim();
+    tail = tail.replaceAll(RegExp(r'(到|回)(物品)?明细.*$'), '');
+    tail = tail.replaceAll(RegExp(r'到首页.*$'), '');
+    tail = _stripTrailingParticle(tail.trim());
+
+    if (head.isNotEmpty) {
+      final item = normalizeName(_stripTrailingParticle(head));
+      if (item.isNotEmpty) return ParseRestore(item: item);
+      continue;
+    }
+    // 动词开头：「恢复梯子」——物品在动词后面。
+    final tailItem = normalizeName(_stripTrailingParticle(tail));
+    if (tailItem.isNotEmpty) return ParseRestore(item: tailItem);
+  }
+  return null;
+}
+
+/// 解析改借期句式。
+///
+/// 支持三种（元宝口径）：
+///  * 「梯子借期改成 5 天」「梯子借期延长到 7 天」→ 总天数设为 N；
+///  * 「梯子再借 3 天」「梯子续借 3 天」→ 在当前借期上追加 N 天。
+/// 「缩短」暂不支持（没有催还机制，支持了也无效）。
+ParseDueChange? _parseDueChange(String text) {
+  final isExtendBy = text.contains('再借') ||
+      text.contains('续借') ||
+      text.contains('多借');
+  final hasDueWord =
+      _dueMarkers.any((m) => text.contains(m)) || isExtendBy;
+  if (!hasDueWord) return null;
+
+  final dayMatch =
+      RegExp(r'(\d+|[一两二三四五六七八九十]+)\s*天').firstMatch(text);
+  if (dayMatch == null) return null;
+  final raw = dayMatch.group(1)!;
+  final days = int.tryParse(raw) ?? _cnNumbers[raw];
+  if (days == null || days < 1) return null;
+
+  // 剥掉天数与各类修饰词，剩下的就是「谁的东西」。
+  var rest = text.replaceAll(dayMatch.group(0)!, ' ');
+  for (final kw in _dueKeywords) {
+    rest = rest.replaceAll(kw, ' ');
+  }
+  rest = rest.replaceAll(RegExp(r'[\s，,。.、]'), '').trim();
+
+  String? borrower;
+  String? item;
+  if (rest.isEmpty) {
+    item = null; // 「借期改成5天」——没指名，交给 UI 按候选收敛。
+  } else {
+    final deIdx = rest.indexOf('的');
+    if (deIdx > 0) {
+      final head = rest.substring(0, deIdx);
+      final tail = rest.substring(deIdx + 1);
+      if (tail.isEmpty) {
+        item = normalizeName(head); // 「梯子的借期…」——没有借阅人。
+      } else {
+        borrower = normalizeName(head);
+        item = normalizeName(tail);
+      }
+    } else {
+      item = normalizeName(rest);
+    }
+  }
+  if (item != null && item.isEmpty) item = null;
+
+  return ParseDueChange(
+    days: days,
+    item: item,
+    borrower: borrower,
+    mode: isExtendBy ? DueChangeMode.extendBy : DueChangeMode.set,
+  );
+}
+
 /// 把一句中文口语解析成结构化意图。
 ///
 /// 纯函数：只接收一个 String，只调用 [normalizeName]，不碰仓储、数据库、UI。
+
 /// 归一化在入口与出口各强制执行一次，出口字段不依赖「入口已归一」的隐含前提。
 ///
 /// V3 交互说明：在 V1/V2 基础上扩展
@@ -612,6 +873,21 @@ ParseResult parsePhrase(String input) {
   if (text.isEmpty || _endsWithParticle(text)) {
     return const ParseUnrecognized();
   }
+
+  // ===== V3.9 语音化第一批：守卫优先级 =====
+  // 改借期 → 废弃 → 恢复 → 借出 → 归还 → 查询 → 录入 → 未识别
+  //
+  // 为什么改借期排最前：「梯子借期改成5天」含「借」，若先跑借出分支，
+  // 会被切成 borrower=梯子 / item=期改成5天 的乱账。
+  // 为什么废弃排借出之前：「借给张三的梯子不要了」含借出动词。
+  // 为什么恢复排录入之前：「梯子放回明细」含放置动词「放」，
+  // 放给录入分支会变成「把梯子放到'回明细'」这种垃圾位置。
+  final due = _parseDueChange(text);
+  if (due != null) return due;
+  final discard = _parseDiscard(text);
+  if (discard != null) return discard;
+  final restore = _parseRestore(text);
+  if (restore != null) return restore;
 
   // V3.7：借/还语义优先于录入。解析函数内部已排除含放置动词的录入句
   // （如「借条放阳台」），以及查询句式由后续 query 分支兜底。

@@ -406,6 +406,236 @@ void main() {
       expect(parsePhrase('查:梯子'), isA<ParseQuery>());
     });
 
+    // ===== V3.9 语音化第一批：废弃 / 恢复 / 改借期 =====
+    group('V3.9 新增意图', () {
+      test('废弃：「梯子废弃了/不要了/不用了」→ 物品=梯子', () {
+        for (final phrase in <String>['梯子废弃了', '梯子不要了', '梯子不用了']) {
+          final r = parsePhrase(phrase) as ParseDiscard;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('废弃：「把梯子扔了/梯子报废了」→ 剥掉把字，物品=梯子', () {
+        for (final phrase in <String>['把梯子扔了', '梯子报废了']) {
+          final r = parsePhrase(phrase) as ParseDiscard;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('废弃：多字物品名不被切坏', () {
+        final r = parsePhrase('旧充电器不要了') as ParseDiscard;
+        expect(r.item, '旧充电器');
+      });
+
+      test('废弃 + 位置词共存 → 报歧义，不擅自选废弃（元宝补充①）', () {
+        final r = parsePhrase('梯子不要了放阳台');
+        expect(r, isA<ParseAmbiguous>());
+        final amb = r as ParseAmbiguous;
+        expect(amb.candidates.first, isA<ParseDiscard>());
+        expect(amb.candidates.any((c) => c is ParseUpsert), isTrue);
+      });
+
+      test('恢复：「恢复梯子/把梯子恢复/梯子恢复到明细」→ 物品=梯子', () {
+        for (final phrase in <String>['恢复梯子', '把梯子恢复', '梯子恢复到明细']) {
+          final r = parsePhrase(phrase) as ParseRestore;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('恢复：「还原梯子」「梯子放回明细」→ 物品=梯子', () {
+        expect((parsePhrase('还原梯子') as ParseRestore).item, '梯子');
+        expect((parsePhrase('梯子放回明细') as ParseRestore).item, '梯子');
+      });
+
+      test('改借期：「梯子借期改成5天」→ 物品=梯子 天数=5 set', () {
+        final r = parsePhrase('梯子借期改成5天') as ParseDueChange;
+        expect(r.item, '梯子');
+        expect(r.days, 5);
+        expect(r.mode, DueChangeMode.set);
+      });
+
+      test('改借期：「借期延长到7天」→ 总天数 7', () {
+        final r = parsePhrase('梯子借期延长到7天') as ParseDueChange;
+        expect(r.item, '梯子');
+        expect(r.days, 7);
+        expect(r.mode, DueChangeMode.set);
+      });
+
+      test('改借期：「再借3天/续借3天」→ 追加模式', () {
+        for (final phrase in <String>['梯子再借3天', '梯子续借3天']) {
+          final r = parsePhrase(phrase) as ParseDueChange;
+          expect(r.item, '梯子', reason: phrase);
+          expect(r.days, 3);
+          expect(r.mode, DueChangeMode.extendBy);
+        }
+      });
+
+      test('改借期：「张三的梯子借期改成5天」→ 指名借阅人=张三', () {
+        final r = parsePhrase('张三的梯子借期改成5天') as ParseDueChange;
+        expect(r.borrower, '张三');
+        expect(r.item, '梯子');
+        expect(r.days, 5);
+      });
+
+      test('改借期：没说物品 → item 为 null（交 UI 按候选收敛）', () {
+        final r = parsePhrase('借期改成5天') as ParseDueChange;
+        expect(r.item, isNull);
+        expect(r.borrower, isNull);
+        expect(r.days, 5);
+      });
+
+      test('改借期：中文数字也认（借期改成五天）', () {
+        final r = parsePhrase('梯子借期改成五天') as ParseDueChange;
+        expect(r.days, 5);
+      });
+    });
+
+    // ===== V3.9 守卫优先级（防抢答） =====
+    group('V3.9 守卫优先级', () {
+      test('「梯子借期改成5天」不被借出抢答（item 不会被切成「期改成5天」）', () {
+        final r = parsePhrase('梯子借期改成5天');
+        expect(r, isA<ParseDueChange>());
+      });
+
+      test('「借给张三的梯子不要了」不被借出抢答', () {
+        final r = parsePhrase('借给张三的梯子不要了');
+        expect(r, isA<ParseDiscard>());
+        expect((r as ParseDiscard).item, '借给张三的梯子');
+      });
+
+      test('「梯子放回明细」不被放置抢答（位置不变成「回明细」）', () {
+        final r = parsePhrase('梯子放回明细');
+        expect(r, isA<ParseRestore>());
+        expect((r as ParseRestore).item, '梯子');
+      });
+
+      test('V3.8 老句式零回归：借出/归还/查询/录入都不受影响', () {
+        expect(parsePhrase('梯子放阳台'), isA<ParseUpsert>());
+        expect(parsePhrase('梯子在哪'), isA<ParseQuery>());
+        final lend = parsePhrase('借给张三1个梯子') as ParseLend;
+        expect(lend.item, '梯子');
+        expect(lend.borrower, '张三');
+        final ret = parsePhrase('还了1个梯子') as ParseReturn;
+        expect(ret.item, '梯子');
+        expect(ret.quantity, 1);
+      });
+    });
+
+    // ===== V3.9 语音化第一批：废弃 / 恢复 / 改借期 =====
+    group('V3.9 新增意图', () {
+      test('废弃：「梯子废弃了/不要了/不用了」→ 物品=梯子', () {
+        for (final phrase in <String>['梯子废弃了', '梯子不要了', '梯子不用了']) {
+          final r = parsePhrase(phrase) as ParseDiscard;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('废弃：「把梯子扔了/梯子报废了」→ 剥掉把字，物品=梯子', () {
+        for (final phrase in <String>['把梯子扔了', '梯子报废了']) {
+          final r = parsePhrase(phrase) as ParseDiscard;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('废弃：多字物品名不被切坏', () {
+        final r = parsePhrase('旧充电器不要了') as ParseDiscard;
+        expect(r.item, '旧充电器');
+      });
+
+      test('废弃 + 位置词共存 → 报歧义，不擅自选废弃（元宝补充①）', () {
+        final r = parsePhrase('梯子不要了放阳台');
+        expect(r, isA<ParseAmbiguous>());
+        final amb = r as ParseAmbiguous;
+        expect(amb.candidates.first, isA<ParseDiscard>());
+        expect(amb.candidates.any((c) => c is ParseUpsert), isTrue);
+      });
+
+      test('恢复：「恢复梯子/把梯子恢复/梯子恢复到明细」→ 物品=梯子', () {
+        for (final phrase in <String>['恢复梯子', '把梯子恢复', '梯子恢复到明细']) {
+          final r = parsePhrase(phrase) as ParseRestore;
+          expect(r.item, '梯子', reason: phrase);
+        }
+      });
+
+      test('恢复：「还原梯子」「梯子放回明细」→ 物品=梯子', () {
+        expect((parsePhrase('还原梯子') as ParseRestore).item, '梯子');
+        expect((parsePhrase('梯子放回明细') as ParseRestore).item, '梯子');
+      });
+
+      test('改借期：「梯子借期改成5天」→ 物品=梯子 天数=5 set', () {
+        final r = parsePhrase('梯子借期改成5天') as ParseDueChange;
+        expect(r.item, '梯子');
+        expect(r.days, 5);
+        expect(r.mode, DueChangeMode.set);
+      });
+
+      test('改借期：「借期延长到7天」→ 总天数 7', () {
+        final r = parsePhrase('梯子借期延长到7天') as ParseDueChange;
+        expect(r.item, '梯子');
+        expect(r.days, 7);
+        expect(r.mode, DueChangeMode.set);
+      });
+
+      test('改借期：「再借3天/续借3天」→ 追加模式', () {
+        for (final phrase in <String>['梯子再借3天', '梯子续借3天']) {
+          final r = parsePhrase(phrase) as ParseDueChange;
+          expect(r.item, '梯子', reason: phrase);
+          expect(r.days, 3);
+          expect(r.mode, DueChangeMode.extendBy);
+        }
+      });
+
+      test('改借期：「张三的梯子借期改成5天」→ 指名借阅人=张三', () {
+        final r = parsePhrase('张三的梯子借期改成5天') as ParseDueChange;
+        expect(r.borrower, '张三');
+        expect(r.item, '梯子');
+        expect(r.days, 5);
+      });
+
+      test('改借期：没说物品 → item 为 null（交 UI 按候选收敛）', () {
+        final r = parsePhrase('借期改成5天') as ParseDueChange;
+        expect(r.item, isNull);
+        expect(r.borrower, isNull);
+        expect(r.days, 5);
+      });
+
+      test('改借期：中文数字也认（借期改成五天）', () {
+        final r = parsePhrase('梯子借期改成五天') as ParseDueChange;
+        expect(r.days, 5);
+      });
+    });
+
+    // ===== V3.9 守卫优先级（防抢答） =====
+    group('V3.9 守卫优先级', () {
+      test('「梯子借期改成5天」不被借出抢答（item 不会被切成「期改成5天」）', () {
+        final r = parsePhrase('梯子借期改成5天');
+        expect(r, isA<ParseDueChange>());
+      });
+
+      test('「借给张三的梯子不要了」不被借出抢答', () {
+        final r = parsePhrase('借给张三的梯子不要了');
+        expect(r, isA<ParseDiscard>());
+        expect((r as ParseDiscard).item, '借给张三的梯子');
+      });
+
+      test('「梯子放回明细」不被放置抢答（位置不变成「回明细」）', () {
+        final r = parsePhrase('梯子放回明细');
+        expect(r, isA<ParseRestore>());
+        expect((r as ParseRestore).item, '梯子');
+      });
+
+      test('V3.8 老句式零回归：借出/归还/查询/录入都不受影响', () {
+        expect(parsePhrase('梯子放阳台'), isA<ParseUpsert>());
+        expect(parsePhrase('梯子在哪'), isA<ParseQuery>());
+        final lend = parsePhrase('借给张三1个梯子') as ParseLend;
+        expect(lend.item, '梯子');
+        expect(lend.borrower, '张三');
+        final ret = parsePhrase('还了1个梯子') as ParseReturn;
+        expect(ret.item, '梯子');
+        expect(ret.quantity, 1);
+      });
+    });
+
     // ===== V3.8 真机验收打回修复回归 =====
     // 根因：形态2 只剥「借」一个字，「了」留在数量前 → 数量静默丢成 1、
     // 物品名被污染成「了3个钉子」；形态1 固定剥 2 字符 → 借阅人成「了张三」。

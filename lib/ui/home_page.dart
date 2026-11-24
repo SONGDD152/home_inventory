@@ -109,6 +109,18 @@ class _HomePageState extends State<HomePage> {
         await _handleLend(parsed);
       } else if (parsed is ParseReturn) {
         await _handleReturn(parsed);
+      } else if (parsed is ParseDueChange) {
+        // V3.9：改借期（「梯子借期改成5天」）。
+        await _handleDueChange(parsed);
+      } else if (parsed is ParseDiscard) {
+        // V3.9：废弃（「梯子废弃了」）——借出中的先自动归还再转回收站。
+        await _handleDiscard(parsed);
+      } else if (parsed is ParseRestore) {
+        // V3.9：恢复（「恢复梯子」）——同名则合并数量。
+        await _handleRestore(parsed);
+      } else if (parsed is ParseAmbiguous) {
+        // V3.9：歧义（「梯子不要了放阳台」）——弹框让用户选意图，不替他猜。
+        await _handleAmbiguous(parsed);
       }
       if (!mounted) return;
       _phraseController.clear();
@@ -374,6 +386,357 @@ class _HomePageState extends State<HomePage> {
         '「$item」现在借给：$who。可以改口说：还了1个$item给谁。';
   }
 
+  // ============ V3.9 语音化第一批：废弃 / 恢复 / 改借期 ============
+
+  /// 通用二次确认框（破坏性操作统一走这里）。
+  ///
+  /// 团队原则：破坏性操作必须二次确认——语音说的话不直接落库，
+  /// 尤其"废弃"和"改借期"会改掉账，得让用户看见会发生什么再点头。
+  Future<bool> _confirmAction(String title, String content,
+      {String confirmLabel = '确定'}) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('action_confirm_dialog'),
+        title: Text(title),
+        content: Text(content),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('action_confirm_cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('action_confirm_ok'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  /// V3.9：语音废弃——「梯子废弃了」→ 从明细转入回收站。
+  ///
+  /// PM 拍板（2026-11-24）：借出中的物品**先自动归还再废弃**，
+  /// 不是禁止。确认框里明说会先归还给谁，不搞黑箱。
+  Future<void> _handleDiscard(ParseDiscard parsed) async {
+    final key = normalizeName(parsed.item);
+    final all = await widget.repository.getAllItemsWithLocations();
+    if (!mounted) return;
+    final hit = all.where((i) => i.item.name == key).firstOrNull;
+    if (hit == null || hit.item.id == null) {
+      final deleted = await widget.repository.getDeletedItems();
+      if (!mounted) return;
+      final inTrash = deleted.where((i) => i.item.name == key).firstOrNull;
+      setState(() {
+        _busy = false;
+        _notice = inTrash != null
+            ? '「${parsed.item}」已经在回收站里了。'
+            : '没有找到「${parsed.item}」，没法废弃。';
+        _result = null;
+      });
+      return;
+    }
+    final id = hit.item.id!;
+
+    // 借出中的物品：先自动归还（PM 拍板）。
+    // 按物品名匹配未还清借出（语音本来就是按名字说的，不依赖 item_id 一致性）。
+    final loans = await widget.repository.getAllLoans();
+    if (!mounted) return;
+    final outstanding = loans
+        .where((l) => l.itemName == key && !l.isReturned)
+        .toList(growable: false);
+    final who = outstanding.map((l) => l.borrowerName).toSet().join('、');
+
+    final confirmed = await _confirmAction(
+      '废弃「${parsed.item}」',
+      outstanding.isEmpty
+          ? '把「${parsed.item}」转入回收站？\n之后可以在回收站里恢复。'
+          : '「${parsed.item}」现在借给$who。\n'
+              '会先自动归还，再转入回收站。\n确定吗？',
+      confirmLabel: '转入回收站',
+    );
+    if (!mounted) return;
+    if (!confirmed) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消废弃，什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+
+    for (final loan in outstanding) {
+      await widget.repository.returnLoan(
+        loan.id!,
+        quantity: loan.quantity - loan.returnedQty,
+      );
+    }
+    await widget.repository.deleteItem(id);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _notice = outstanding.isEmpty
+          ? '已把「${parsed.item}」转入回收站。'
+          : '已先归还给$who，再把「${parsed.item}」转入回收站。';
+      _result = null;
+    });
+  }
+
+  /// V3.9：语音恢复——「恢复梯子」→ 从回收站回到明细。
+  ///
+  /// PM 拍板：明细里已有同名物品时**合并数量**（不再报错拒绝），
+  /// 回显要说明"并进去了、现在共几个"。
+  Future<void> _handleRestore(ParseRestore parsed) async {
+    final key = normalizeName(parsed.item);
+    final deleted = await widget.repository.getDeletedItems();
+    if (!mounted) return;
+    final hit = deleted.where((i) => i.item.name == key).firstOrNull;
+    if (hit == null || hit.item.id == null) {
+      setState(() {
+        _busy = false;
+        _notice = '回收站里没有「${parsed.item}」。';
+        _result = null;
+      });
+      return;
+    }
+    final all = await widget.repository.getAllItemsWithLocations();
+    if (!mounted) return;
+    final live = all.where((i) => i.item.name == key).firstOrNull;
+
+    final confirmed = await _confirmAction(
+      '恢复「${parsed.item}」',
+      live == null
+          ? '把「${parsed.item}」恢复到物品明细？'
+          : '明细里已经有一个「${parsed.item}」了。\n'
+              '恢复会并进去（数量合起来）。\n确定吗？',
+      confirmLabel: '恢复',
+    );
+    if (!mounted) return;
+    if (!confirmed) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消恢复，什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+    final outcome = await widget.repository.restoreItem(hit.item.id!);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _notice = outcome.merged
+          ? '已恢复「${outcome.itemName}」，并入明细里已有的同名物品'
+              '（现有 ${outcome.totalQuantity} 个）。'
+          : '已恢复「${outcome.itemName}」到物品明细。';
+      _result = null;
+    });
+  }
+
+  /// V3.9：语音改借期——「梯子借期改成5天」。
+  ///
+  /// 元宝补充③：已还清的记录不允许改借期，如实提示「这笔已还清，改不了」。
+  /// 「缩短」本批不支持（没有催还机制，支持了也无效）。
+  Future<void> _handleDueChange(ParseDueChange parsed) async {
+    final loans = await widget.repository.getAllLoans();
+    if (!mounted) return;
+    var candidates =
+        loans.where((l) => !l.isReturned).toList(growable: false);
+    if (parsed.item != null) {
+      final key = normalizeName(parsed.item!);
+      candidates =
+          candidates.where((l) => l.itemName == key).toList(growable: false);
+    }
+    if (parsed.borrower != null) {
+      candidates = candidates
+          .where((l) => l.borrowerName == parsed.borrower)
+          .toList(growable: false);
+    }
+    if (candidates.isEmpty) {
+      // 元宝补充③：命中的其实是已还清记录 → 如实说改不了。
+      final doneHit = loans.any((l) =>
+          l.isReturned &&
+          (parsed.item == null ||
+              l.itemName == normalizeName(parsed.item!)) &&
+          (parsed.borrower == null || l.borrowerName == parsed.borrower));
+      setState(() {
+        _busy = false;
+        _notice = doneHit ? '这笔已还清，改不了。' : '没有找到可以改借期的借出记录。';
+        _result = null;
+      });
+      return;
+    }
+
+    Loan? target;
+    if (candidates.length == 1) {
+      target = candidates.first;
+    } else {
+      target = await _pickDueLoan(candidates);
+      if (!mounted) return;
+      if (target == null) {
+        setState(() {
+          _busy = false;
+          _notice = '已取消改借期，什么都没改。';
+          _result = null;
+        });
+        return;
+      }
+    }
+    final hit = target;
+
+    // extendBy：在当前借期上追加；set：直接设为总天数。
+    var days = parsed.days;
+    if (parsed.mode == DueChangeMode.extendBy) {
+      final currentDays = ((hit.dueAt - hit.borrowedAt) / 86400000).ceil();
+      days = currentDays + parsed.days;
+    }
+    if (days < 1) days = 1;
+
+    final confirmed = await _confirmAction(
+      '改借期',
+      '把「${hit.itemName}」（借给${hit.borrowerName}）的借期改成 $days 天？\n'
+          '原到期 ${_loanDate(hit.dueAt)}。',
+      confirmLabel: '改借期',
+    );
+    if (!mounted) return;
+    if (!confirmed) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消改借期，什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+    await widget.repository.updateLoanDue(hit.id!, days);
+    if (!mounted) return;
+    final newDue = hit.borrowedAt + days * 86400000;
+    setState(() {
+      _busy = false;
+      _notice = '已改借期：${hit.itemName} → ${hit.borrowerName}'
+          '（$days 天，到期 ${_loanDate(newDue)}）';
+      _result = null;
+    });
+  }
+
+  /// 改借期候选框：多笔未还清时让用户点是哪一笔（与归还候选同一口径）。
+  Future<Loan?> _pickDueLoan(List<Loan> candidates) async {
+    return showDialog<Loan>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('due_picker_dialog'),
+        title: const Text('改哪一笔的借期？'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              for (final loan in candidates)
+                ListTile(
+                  key: Key('due_pick_${loan.borrowerName}_${loan.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('${loan.itemName} → ${loan.borrowerName}',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    '借出 ${_loanDate(loan.borrowedAt)} · 到期 ${_loanDate(loan.dueAt)}',
+                    style: const TextStyle(
+                        fontSize: 12.5, color: Color(0xff607d8b)),
+                  ),
+                  onTap: () => Navigator.of(context).pop(loan),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('due_picker_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// V3.9：歧义处理——「梯子不要了放阳台」有两种理解，弹框让用户选。
+  ///
+  /// 元宝补充①：不强行选废弃，报歧义让用户点。
+  Future<void> _handleAmbiguous(ParseAmbiguous parsed) async {
+    final picked = await showDialog<ParseResult>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('ambiguous_dialog'),
+        title: const Text('这句有两种理解'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Text(parsed.hint,
+                  style: const TextStyle(
+                      fontSize: 13.5, color: Color(0xff37474f))),
+              const SizedBox(height: 8),
+              for (final candidate in parsed.candidates)
+                ListTile(
+                  key: Key('ambiguous_pick_${candidate.runtimeType}'),
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(_ambiguousLabel(candidate),
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  onTap: () => Navigator.of(context).pop(candidate),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('ambiguous_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (picked == null) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消，什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+    if (picked is ParseDiscard) {
+      await _handleDiscard(picked);
+    } else if (picked is ParseUpsert) {
+      await _handleUpsert(picked.item, picked.location, '');
+    } else if (picked is ParseRestore) {
+      await _handleRestore(picked);
+    } else {
+      setState(() {
+        _busy = false;
+        _notice = '没听懂，什么都没改。';
+        _result = null;
+      });
+    }
+  }
+
+  /// 歧义候选项的展示文案。
+  String _ambiguousLabel(ParseResult candidate) {
+    if (candidate is ParseDiscard) {
+      return '把「${candidate.item}」转入回收站（废弃）';
+    }
+    if (candidate is ParseUpsert) {
+      return '把「${candidate.item}」放到${candidate.location}';
+    }
+    if (candidate is ParseRestore) {
+      return '把「${candidate.item}」恢复到明细';
+    }
+    return '按这个理解';
+  }
+
   /// 借出日期（本地显示，月/日）。
   String _loanDate(int ms) {
     final t = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -506,10 +869,12 @@ class _HomePageState extends State<HomePage> {
           _syntaxRow('查东西', '梯子在哪'),
           _syntaxRow('借出', '借给张三2个梯子｜张三借走了2个梯子｜梯子被张三借走了'),
           _syntaxRow('归还', '张三还了1个梯子｜还了1个梯子给张三'),
+          // V3.9 语音化第一批：三个新意图的句式一并列进来，
+          // 否则用户不知道能这么说。
           const SizedBox(height: 2),
           const Text(
             '借出/归还都建议带上人名；不说人名时，若同一件东西有多笔没还，'
-            '会问你是谁还的。',
+            '会问你是谁还的。废弃/恢复/改借期会先弹确认框，点头才执行。',
             style: TextStyle(fontSize: 12, color: Color(0xff607d8b)),
           ),
         ],

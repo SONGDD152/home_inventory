@@ -69,6 +69,26 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   Future<List<Location>> getAllLocations() async =>
       List<Location>.unmodifiable(_locations);
 
+  /// V3.9：改借期内存实现（供首页「说一句改借期」端到端断言）。
+  @override
+  Future<void> updateLoanDue(int loanId, int days) async {
+    final idx = _loans.indexWhere((l) => l.id == loanId);
+    if (idx < 0) return;
+    final old = _loans[idx];
+    _loans[idx] = Loan(
+      id: old.id,
+      itemId: old.itemId,
+      itemName: old.itemName,
+      borrowerName: old.borrowerName,
+      quantity: old.quantity,
+      returnedQty: old.returnedQty,
+      borrowedAt: old.borrowedAt,
+      dueAt: old.borrowedAt + days * 86400000,
+      returnedAt: old.returnedAt,
+      isPartial: old.isPartial,
+    );
+  }
+
   @override
   Future<int> addLocation(String name, {String? remark}) async {
     final key = normalizeName(name);
@@ -176,18 +196,60 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   }
 
   @override
-  Future<void> restoreItem(int id) async {
+  Future<RestoreOutcome> restoreItem(int id) async {
     final idx = _items.indexWhere((i) => i.id == id);
-    if (idx < 0) return;
-    final item = _items[idx];
-    // 撞名预检查（决策点④A：撞名即失败）。
-    if (_items.any((i) => i.id != id && i.name == item.name && !i.isDeleted)) {
-      throw ArgumentError('已存在同名物品，恢复失败');
+    if (idx < 0) {
+      return const RestoreOutcome(itemName: '', merged: false);
     }
+    final item = _items[idx];
     final now = DateTime.now().millisecondsSinceEpoch;
+    // V3.9（PM 拍板）：明细里已有同名物品 → 合并数量，不报错拒绝。
+    final conflictIdx = _items.indexWhere(
+        (i) => i.id != id && i.name == item.name && !i.isDeleted);
+    if (conflictIdx >= 0) {
+      final live = _items[conflictIdx];
+      final total = live.quantity + item.quantity;
+      _items[conflictIdx] = Item(
+        id: live.id,
+        name: live.name,
+        quantity: total,
+        isDeleted: false,
+        createdAt: live.createdAt,
+        updatedAt: now,
+      );
+      // 位置关联并过去（目标已有同位置活跃行则丢弃重复行）。
+      for (var i = 0; i < _links.length; i++) {
+        final l = _links[i];
+        if (l.itemId != id) continue;
+        final dup = _links.any((x) =>
+            x.itemId == live.id && x.locationId == l.locationId && !x.isDeleted);
+        if (dup) {
+          _links.removeAt(i);
+          i--;
+          continue;
+        }
+        _links[i] = ItemLocation(
+          id: l.id,
+          itemId: live.id!,
+          locationId: l.locationId,
+          isDeleted: false,
+          createdAt: l.createdAt,
+          updatedAt: now,
+          rawText: l.rawText,
+          tags: l.tags,
+        );
+      }
+      _items.removeAt(idx);
+      return RestoreOutcome(
+        itemName: item.name,
+        merged: true,
+        totalQuantity: total,
+      );
+    }
     _items[idx] = Item(
       id: item.id,
       name: item.name,
+      quantity: item.quantity,
       createdAt: item.createdAt,
       updatedAt: now,
     );
@@ -207,6 +269,7 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
         );
       }
     }
+    return RestoreOutcome(itemName: item.name, merged: false);
   }
 
   @override
@@ -226,7 +289,9 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText}) async {
     final key = normalizeName(itemName);
-    var item = _items.where((i) => i.name == key).toList();
+    // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
+    // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
+    var item = _items.where((i) => i.name == key && !i.isDeleted).toList();
     final int itemId;
     if (item.isEmpty) {
       itemId = ++_itemId;
@@ -256,7 +321,9 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   Future<MoveResult> moveItem(String itemName, int locationId,
       {String? rawText}) async {
     final key = normalizeName(itemName);
-    var item = _items.where((i) => i.name == key).toList();
+    // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
+    // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
+    var item = _items.where((i) => i.name == key && !i.isDeleted).toList();
     final int itemId;
     if (item.isEmpty) {
       itemId = ++_itemId;
@@ -769,7 +836,13 @@ void main() {
     expect(hint.data, '管理物品 / 位置 / 备份：点左上角 ☰ 菜单');
 
     // 静态文字无任何点击响应：tap 后抽屉不展开。
-    await tester.tap(find.byKey(const Key('home_menu_hint')));
+    // V3.9 加固：这一条用屏幕坐标 tap，而首页高度会随「句式标准」卡片
+    // 增减变化，坐标漂到别处会造成偶发失败（并行跑全量时更易触发）。
+    // tap 前先确保该文字在视口内，去掉对绝对坐标的依赖。
+    final hintFinder = find.byKey(const Key('home_menu_hint'));
+    await tester.ensureVisible(hintFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(hintFinder);
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('home_drawer')), findsNothing,
         reason: '引导文字禁止添加点击响应（审核补充提醒）');
@@ -1253,4 +1326,216 @@ void main() {
     expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
     expect(find.textContaining('在阳台'), findsOneWidget);
   });
+
+  // ============ V3.9 语音化第一批：废弃 / 恢复 / 改借期 ============
+
+  // ============ V3.9 语音化第一批：废弃 / 恢复 / 改借期 ============
+
+  group('V3.9 语音化第一批', () {
+    testWidgets('废弃：物品转入回收站（破坏性操作先二次确认）',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子废弃了');
+      await tester.pumpAndSettle();
+      // 必须先弹确认，不直接落库。
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('转入回收站'), findsWidgets);
+      expect(await repo.getDeletedItems(), isEmpty);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name), contains('梯子'));
+      expect(find.textContaining('已把「梯子」转入回收站'), findsOneWidget);
+    });
+
+    testWidgets('废弃：借出中的物品先自动归还再转回收站（PM 拍板）',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子废弃了');
+      await tester.pumpAndSettle();
+      // 确认框要明说会先自动归还给谁。
+      expect(find.textContaining('先自动归还'), findsWidgets);
+      expect(find.textContaining('现在借给张三'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+      final loans = await repo.getAllLoans();
+      expect(loans.single.returnedQty, 1, reason: '先自动归还');
+      expect(loans.single.isReturned, isTrue);
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name), contains('梯子'));
+      expect(find.textContaining('已先归还给张三'), findsOneWidget);
+    });
+
+    testWidgets('恢复：从回收站回到明细（二次确认）', (tester) async {
+      final loc = await repo.addLocation('阳台');
+      final up = await repo.upsertItemLocation('梯子', loc);
+      await repo.deleteItem(up.itemId);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '恢复梯子');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      expect(await repo.getDeletedItems(), isEmpty);
+      expect(find.textContaining('已恢复'), findsOneWidget);
+    });
+
+    testWidgets('恢复：明细已有同名则合并数量并如实回显（PM 拍板）',
+        (tester) async {
+      final loc = await repo.addLocation('阳台');
+      final up = await repo.upsertItemLocation('梯子', loc);
+      await repo.deleteItem(up.itemId);
+      await repo.upsertItemLocation('梯子', loc); // 明细里同名再一个
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '恢复梯子');
+      await tester.pumpAndSettle();
+      // 确认框要提前说明"会并进去"。
+      expect(find.textContaining('并进去'), findsWidgets);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final live = await repo.getAllItemsWithLocations();
+      expect(live, hasLength(1));
+      expect(live.single.item.quantity, 2, reason: '1 + 1 合并');
+      expect(find.textContaining('并入明细里已有的同名物品'), findsOneWidget);
+    });
+
+    testWidgets('改借期：二次确认后按新天数改到期日', (tester) async {
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借期改成5天');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('5 天'), findsWidgets);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      expect(loans.single.dueAt, loans.single.borrowedAt + 5 * 86400000);
+      expect(find.textContaining('已改借期'), findsOneWidget);
+    });
+
+    testWidgets('改借期：「再借3天」是在当前借期上追加', (tester) async {
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子再借3天');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      final expectDays =
+          ((loans.single.dueAt - loans.single.borrowedAt) / 86400000).round();
+      expect(expectDays, 6, reason: '默认 3 天 + 追加 3 天');
+    });
+
+    testWidgets('改借期：已还清的记录改不了，如实提示（元宝补充③）',
+        (tester) async {
+      final loan = await repo.lendItem('梯子', '张三');
+      await repo.returnLoan(loan.id!);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借期改成5天');
+      await settle(tester);
+      expect(find.textContaining('这笔已还清，改不了'), findsOneWidget);
+    });
+
+    testWidgets('改借期：多笔未还清时弹候选让用户点，不静默 FIFO',
+        (tester) async {
+      await repo.lendItem('梯子', '张三');
+      await repo.lendItem('梯子', '李四');
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子借期改成5天');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('due_picker_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('due_pick_张三_1')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      final zhang = loans.firstWhere((l) => l.borrowerName == '张三');
+      final li = loans.firstWhere((l) => l.borrowerName == '李四');
+      expect(zhang.dueAt, zhang.borrowedAt + 5 * 86400000);
+      expect(li.dueAt, isNot(li.borrowedAt + 5 * 86400000),
+          reason: '没选的那笔不该动');
+    });
+
+    testWidgets('歧义：「梯子不要了放阳台」弹框让用户选意图，不擅自废弃',
+        (tester) async {
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子不要了放阳台');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ambiguous_dialog')), findsOneWidget);
+      expect(find.textContaining('两种理解'), findsWidgets);
+
+      await tester.tap(find.text('把「梯子」放到阳台'));
+      await settle(tester);
+
+      // 选了"放到阳台" → 走放置，没进回收站。
+      final items = await repo.getAllItemsWithLocations();
+      expect(items.single.item.name, '梯子');
+      expect(items.single.locations.map((l) => l.name), contains('阳台'));
+      expect(await repo.getDeletedItems(), isEmpty);
+    });
+
+    testWidgets('歧义：选「转入回收站」则走废弃', (tester) async {
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子不要了放阳台');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('把「梯子」转入回收站（废弃）'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.map((r) => r.item.name), contains('梯子'));
+    });
+
+    testWidgets('歧义选废弃但物品不存在：如实说没法废弃，不弹确认框',
+        (tester) async {
+      await pumpApp(tester);
+      await settle(tester);
+
+      await submit(tester, '梯子不要了放阳台');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('把「梯子」转入回收站（废弃）'));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('action_confirm_dialog')), findsNothing);
+      expect(find.textContaining('没有找到'), findsOneWidget);
+    });
+  });
+
 }

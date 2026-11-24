@@ -567,40 +567,80 @@ class InventoryDatabase implements InventoryRepository {
     });
   }
 
-  /// V3.6：恢复回收站物品（决策点④A：撞名即失败，不自动改名）。
+  /// V3.6/V3.9：恢复回收站物品。
   ///
-  /// 事务内三步：
-  ///  1. 撞名预检查：存在同名**未删除**物品（排除自身）抛 ArgumentError
-  ///     （部分唯一索引 idx_items_name_unique WHERE is_deleted=0 兜底并发）；
-  ///  2. 物品行复活：is_deleted=0、deleted_at 置 NULL；
-  ///  3. 关联行复活：仅复活"删除时活跃"的行——`is_deleted=1 AND
+  /// V3.6 旧口径是"撞名即失败"；**V3.9 按 PM 拍板改为合并数量**——
+  /// 明细里已有同名物品时，把回收站这件的数量累加到同名物品上、
+  /// 位置关联一并并过去，而不是报错拒绝。返回 [RestoreOutcome]
+  /// 如实说明是否发生了合并、合并后总数是多少（供 UI 回显）。
+  ///
+  /// 无同名冲突时走原恢复路径：
+  ///  1. 物品行复活：is_deleted=0、deleted_at 置 NULL；
+  ///  2. 关联行复活：仅复活"删除时活跃"的行——`is_deleted=1 AND
   ///     updated_at == 物品 deleted_at`（[deleteItem] 软删时写入的同一
   ///     时间戳），挪位软删历史行保持留底。
-  /// 幂等：物品不存在或未删除时无操作（返回）。
+  /// 幂等：物品不存在或未删除时无操作（返回未合并的结果）。
   @override
-  Future<void> restoreItem(int id) async {
+  Future<RestoreOutcome> restoreItem(int id) async {
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
-    await db.transaction<void>((txn) async {
+    return db.transaction<RestoreOutcome>((txn) async {
       final rows = await txn.query(
         tableItems,
-        columns: <String>[columnName, columnDeletedAt],
+        columns: <String>[columnName, columnDeletedAt, columnQuantity],
         where: '$columnId = ? AND $columnIsDeleted = 1',
         whereArgs: <Object?>[id],
         limit: 1,
       );
-      if (rows.isEmpty) return; // 不存在或未删除，幂等返回。
+      if (rows.isEmpty) {
+        // 不存在或未删除，幂等返回（不算合并）。
+        return const RestoreOutcome(itemName: '', merged: false);
+      }
+      final itemName = rows.first[columnName] as String;
       final deletedAt = (rows.first[columnDeletedAt] as num?)?.toInt();
+      final deletedQty = (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
 
       final conflicts = await txn.query(
         tableItems,
-        columns: <String>[columnId],
+        columns: <String>[columnId, columnQuantity],
         where: '$columnName = ? AND $columnIsDeleted = 0 AND $columnId != ?',
-        whereArgs: <Object?>[rows.first[columnName] as String, id],
+        whereArgs: <Object?>[itemName, id],
         limit: 1,
       );
+
+      // V3.9（PM 拍板）：明细里已有同名物品 → 合并数量，不报错拒绝。
+      // items 表有部分唯一索引（WHERE is_deleted=0），同名只可能有一行存活，
+      // 因此合并 = 数量累加到存活行 + 位置关联并过去 + 物理删除已删行
+      // （它已并入同名物品，不再作为独立物品存在）。
       if (conflicts.isNotEmpty) {
-        throw ArgumentError.value(id, 'id', '已存在同名物品，恢复失败');
+        final conflictId = (conflicts.first[columnId] as num).toInt();
+        final conflictQty =
+            (conflicts.first[columnQuantity] as num?)?.toInt() ?? 1;
+        final total = conflictQty + deletedQty;
+
+        await txn.update(
+          tableItems,
+          <String, Object?>{columnQuantity: total, columnUpdatedAt: now},
+          where: '$columnId = ?',
+          whereArgs: <Object?>[conflictId],
+        );
+        await _mergeItemAssociations(
+          txn,
+          fromItemId: id,
+          toItemId: conflictId,
+          deletedAt: deletedAt,
+          now: now,
+        );
+        await txn.delete(
+          tableItems,
+          where: '$columnId = ? AND $columnIsDeleted = 1',
+          whereArgs: <Object?>[id],
+        );
+        return RestoreOutcome(
+          itemName: itemName,
+          merged: true,
+          totalQuantity: total,
+        );
       }
 
       await txn.update(
@@ -632,7 +672,63 @@ class InventoryDatabase implements InventoryRepository {
           whereArgs: <Object?>[id, deletedAt],
         );
       }
+      return RestoreOutcome(itemName: itemName, merged: false);
     });
+  }
+
+  /// V3.9：把某物品的全部位置关联行并到另一件物品上（合并数量时用）。
+  ///
+  /// 规则：
+  ///  * 目标物品已有**同位置活跃**关联行 → 该位置信息重复，直接丢弃
+  ///    待迁移行（不产生两条同位置记录）；
+  ///  * [deletedAt] 为 null（v3.2 时代软删数据）→ 全量复活；
+  ///  * 否则只复活"删除时活跃"的行，软删的历史行迁移过去继续留底。
+  Future<void> _mergeItemAssociations(
+    DatabaseExecutor txn, {
+    required int fromItemId,
+    required int toItemId,
+    required int? deletedAt,
+    required int now,
+  }) async {
+    final assoc = await txn.query(
+      tableItemLocations,
+      where: '$columnItemId = ?',
+      whereArgs: <Object?>[fromItemId],
+    );
+    for (final row in assoc) {
+      final assocId = (row[columnId] as num).toInt();
+      final locationId = (row[columnLocationId] as num).toInt();
+      final wasActive = (row[columnIsDeleted] as num?)?.toInt() == 0;
+
+      final dup = await txn.query(
+        tableItemLocations,
+        columns: <String>[columnId],
+        where: '$columnItemId = ? AND $columnLocationId = ? '
+            'AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[toItemId, locationId],
+        limit: 1,
+      );
+      if (dup.isNotEmpty) {
+        await txn.delete(
+          tableItemLocations,
+          where: '$columnId = ?',
+          whereArgs: <Object?>[assocId],
+        );
+        continue;
+      }
+
+      final revive = deletedAt == null ? true : wasActive;
+      await txn.update(
+        tableItemLocations,
+        <String, Object?>{
+          columnItemId: toItemId,
+          if (revive) columnIsDeleted: 0,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[assocId],
+      );
+    }
   }
 
   /// V3.6：彻底删除回收站物品（物理 DELETE，不可恢复）。

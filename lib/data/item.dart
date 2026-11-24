@@ -352,3 +352,26 @@ class ItemWithLocations {
   /// 该物品全部关联行的标签（tags 非空去重）。
   final List<String> tags;
 }
+
+/// 恢复回收站物品的结果（V3.9）。
+///
+/// PM 拍板口径：明细里已有同名物品时，恢复采取**合并数量**——
+/// 把回收站里这件的数量累加到明细里已有的同名物品上，并把它的位置
+/// 关联一并并过去，而不是报错拒绝（V3.6 旧口径是撞名即失败）。
+class RestoreOutcome {
+  const RestoreOutcome({
+    required this.itemName,
+    required this.merged,
+    this.totalQuantity,
+  });
+
+  /// 被恢复的物品名。
+  final String itemName;
+
+  /// 是否并入了明细里已有的同名物品（true=合并，false=原样恢复）。
+  final bool merged;
+
+  /// 合并后的总数量；仅 [merged] 为 true 时有意义。
+  final int? totalQuantity;
+}
+

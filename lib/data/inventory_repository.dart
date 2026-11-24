@@ -22,9 +22,15 @@ abstract class InventoryRepository {
   /// 每件物品附全部关联行对应的有效位置（含挪位历史，去重）。
   Future<List<ItemWithLocations>> getDeletedItems();
 
-  /// V3.6：恢复回收站物品（撞名即抛 ArgumentError，不自动改名；
-  /// "删除时活跃"的关联行复活，位置关系还原）。
-  Future<void> restoreItem(int id);
+  /// V3.6/V3.9：恢复回收站物品。
+  ///
+  /// V3.6 旧口径是"撞名即抛 ArgumentError"；V3.9 按 PM 拍板改为
+  /// **合并数量**：明细里已有同名物品时，把回收站这件的数量累加到
+  /// 同名物品上、位置关联一并并过去，返回 [RestoreOutcome] 说明
+  /// 是否发生了合并与合并后总数（供 UI 如实回显）。
+  ///
+  /// "删除时活跃"的关联行复活，位置关系还原。
+  Future<RestoreOutcome> restoreItem(int id);
 
   /// V3.6：彻底删除回收站物品（物理 DELETE 物品行+全部关联行，不可恢复）。
   Future<void> purgeItem(int id);

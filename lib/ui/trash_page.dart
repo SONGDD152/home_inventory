@@ -102,10 +102,38 @@ class _TrashPageState extends State<TrashPage> {
   }
 
   Future<void> _restore(ItemWithLocations row) async {
-    await _guard(() => widget.repository.restoreItem(row.item.id!));
+    // V3.9：恢复同名物品改为合并数量（PM 拍板），回显要说明"并进去了"。
+    // 错误兜底与 _guard 同口径（ArgumentError 是 Error 不是 Exception，
+    // 必须单独 catch），成功后重载列表。
+    setState(() => _busy = true);
+    late final RestoreOutcome outcome;
+    try {
+      outcome = await widget.repository.restoreItem(row.item.id!);
+      await _reload();
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('操作失败：${e.message ?? e}')),
+      );
+      setState(() => _busy = false);
+      return;
+    } on Exception catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('操作失败：$e')),
+      );
+      setState(() => _busy = false);
+      return;
+    }
     if (!mounted) return;
+    setState(() => _busy = false);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('已恢复「${row.item.name}」到物品明细。')),
+      SnackBar(
+        content: Text(outcome.merged
+            ? '已恢复「${outcome.itemName}」，并入明细里已有的同名物品'
+                '（现有 ${outcome.totalQuantity} 个）。'
+            : '已恢复「${outcome.itemName}」到物品明细。'),
+      ),
     );
   }
 

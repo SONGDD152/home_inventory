@@ -107,17 +107,50 @@ class FakeListRepository with FakeLoanMixin implements InventoryRepository {
       );
 
   @override
-  Future<void> restoreItem(int id) async {
+  Future<RestoreOutcome> restoreItem(int id) async {
     final error = errorOnRestore;
     if (error != null) throw ArgumentError(error);
     final idx = rows.indexWhere((r) => r.item.id == id);
-    if (idx < 0) return;
+    if (idx < 0) {
+      return const RestoreOutcome(itemName: '', merged: false);
+    }
     final old = rows[idx];
     final now = DateTime.now().millisecondsSinceEpoch;
+    // V3.9（PM 拍板）：明细里已有同名物品 → 合并数量，不报错拒绝。
+    final conflictIdx = rows.indexWhere((r) =>
+        r.item.id != id && r.item.name == old.item.name && !r.item.isDeleted);
+    if (conflictIdx >= 0) {
+      final live = rows[conflictIdx];
+      final total = live.item.quantity + old.item.quantity;
+      final mergedLocs = <Location>[...live.locations];
+      for (final loc in old.locations) {
+        if (!mergedLocs.any((l) => l.id == loc.id)) mergedLocs.add(loc);
+      }
+      rows[conflictIdx] = ItemWithLocations(
+        item: Item(
+          id: live.item.id,
+          name: live.item.name,
+          quantity: total,
+          isDeleted: false,
+          createdAt: live.item.createdAt,
+          updatedAt: now,
+        ),
+        locations: mergedLocs,
+        rawTexts: <String>{...live.rawTexts, ...old.rawTexts}.toList(),
+        tags: <String>{...live.tags, ...old.tags}.toList(),
+      );
+      rows.removeAt(idx);
+      return RestoreOutcome(
+        itemName: old.item.name,
+        merged: true,
+        totalQuantity: total,
+      );
+    }
     rows[idx] = ItemWithLocations(
       item: Item(
         id: old.item.id,
         name: old.item.name,
+        quantity: old.item.quantity,
         isDeleted: false,
         createdAt: old.item.createdAt,
         updatedAt: now,
@@ -126,6 +159,7 @@ class FakeListRepository with FakeLoanMixin implements InventoryRepository {
       rawTexts: old.rawTexts,
       tags: old.tags,
     );
+    return RestoreOutcome(itemName: old.item.name, merged: false);
   }
 
   @override
@@ -726,7 +760,7 @@ void main() {
     expect(find.text('共 2 件物品 · 2 条存放记录'), findsOneWidget);
   });
 
-  testWidgets('回收站：恢复撞名失败提示（决策点④A）', (tester) async {
+  testWidgets('回收站：恢复出错时提示原因且物品仍在回收站', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台'], id: 1),
     ]);
@@ -742,6 +776,39 @@ void main() {
     expect(find.textContaining('已存在同名物品，恢复失败'), findsOneWidget);
     // 恢复失败 → 物品仍在回收站。
     expect(find.byKey(const Key('trash_item_梯子')), findsOneWidget);
+  });
+
+  // V3.9（PM 拍板）：恢复同名物品不再报错，改为合并数量。
+  testWidgets('回收站：恢复同名物品合并数量而非报错（V3.9）', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await repo.deleteItem(1);
+    // 明细里再建一个同名「梯子」。
+    repo.rows.add(ItemWithLocations(
+      item: Item(
+        id: 2,
+        name: '梯子',
+        quantity: 3,
+        createdAt: 1,
+        updatedAt: 1,
+      ),
+      locations: <Location>[],
+    ));
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('trash_restore_梯子')));
+    await tester.pumpAndSettle();
+
+    // 不再报错。
+    expect(find.textContaining('已存在同名物品'), findsNothing);
+    // 合并后回收站里不再有这一条（已并入同名物品）。
+    expect(find.byKey(const Key('trash_item_梯子')), findsNothing);
+    final live = repo.rows.where((r) => !r.item.isDeleted).toList();
+    expect(live, hasLength(1));
+    expect(live.single.item.quantity, 4, reason: '3 + 1 合并');
   });
 
   testWidgets('回收站：彻底删除二次确认后物理清除', (tester) async {

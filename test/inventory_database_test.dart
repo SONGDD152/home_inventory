@@ -946,7 +946,7 @@ void main() {
     expect(found.rawTexts, isEmpty);
   });
 
-  test('V3.6 恢复撞名：提示失败不自动改名（决策点④A）', () async {
+  test('V3.9 恢复撞名：合并数量到同名物品（PM 拍板，不再报错）', () async {
     final balconyId = await db.addLocation('阳台');
     final up = await db.upsertItemLocation('梯子', balconyId);
     await db.deleteItem(up.itemId);
@@ -954,15 +954,20 @@ void main() {
     final reborn = await db.upsertItemLocation('梯子', balconyId);
     expect(reborn.itemId, isNot(up.itemId));
 
-    await expectLater(
-      db.restoreItem(up.itemId),
-      throwsA(isA<ArgumentError>().having(
-        (e) => e.message, 'message', contains('已存在同名物品'),
-      )),
-    );
-    // 恢复失败 → 旧物品仍在回收站、新物品不受影响。
-    expect((await db.getDeletedItems()).single.item.id, up.itemId);
-    expect((await db.getAllItemsWithLocations()).single.item.id, reborn.itemId);
+    final outcome = await db.restoreItem(up.itemId);
+    expect(outcome.merged, isTrue, reason: '同名 → 合并而非报错');
+    expect(outcome.itemName, '梯子');
+    // 存活 1 + 回收站 1 = 2（是累加，不是"忽略被恢复件的数量"）。
+    expect(outcome.totalQuantity, 2);
+
+    // 回收站里这一条已并入同名物品，不再独立存在。
+    expect(await db.getDeletedItems(), isEmpty);
+    final live = await db.getAllItemsWithLocations();
+    expect(live, hasLength(1));
+    expect(live.single.item.id, reborn.itemId);
+    expect(live.single.item.quantity, 2);
+    // 位置关联并过去了（不丢位置信息）。
+    expect(live.single.locations.map((l) => l.name), contains('阳台'));
   });
 
   test('V3.6 purgeItem：物品行+全部关联行物理清除、回收站消失', () async {

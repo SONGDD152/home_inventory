@@ -1151,24 +1151,106 @@ void main() {
     expect((await repo.getAllLoans()), isEmpty);
   });
 
-  testWidgets('修复：同物品借给多人，说「还了1个梯子」按 FIFO 扣最早借出的张三、李四未动',
+  testWidgets('修复：同物品借给多人，说「还了1个梯子」弹候选问是谁还的（不再静默 FIFO）',
       (tester) async {
     await pumpApp(tester);
-    await submit(tester, '借给张三1个梯子'); // 先借出（FIFO 队首）
+    await submit(tester, '借给张三1个梯子'); // 先借出
     await settle(tester);
     await submit(tester, '借给李四1个梯子'); // 后借出
     await settle(tester);
     await submit(tester, '还了1个梯子');
     await settle(tester);
 
+    // V3.8（PM 真机反馈：没说谁还的会记错账）：多人未还且句中没指名 →
+    // 弹候选框让用户点是谁还的，没点之前不写任何归还。
+    expect(find.byKey(const Key('return_picker_dialog')), findsOneWidget);
+    final before = await repo.getAllLoans();
+    expect(before.every((l) => l.returnedQty == 0), isTrue,
+        reason: '没选之前零写入');
+
+    // 点「张三」→ 扣张三那笔。
+    await tester.tap(find.byKey(const Key('return_pick_张三_1')));
+    await settle(tester);
+
     final loans = await repo.getAllLoans();
-    expect(loans, hasLength(2));
     final zhang = loans.firstWhere((l) => l.borrowerName == '张三');
     final li = loans.firstWhere((l) => l.borrowerName == '李四');
-    expect(zhang.returnedQty, 1, reason: 'FIFO 命中最早借出的张三那笔');
+    expect(zhang.returnedQty, 1, reason: '用户选了张三那笔');
     expect(li.returnedQty, 0, reason: '李四那笔完全未动');
-    // 反馈必须点名借阅人，不能静默替用户选人。
     expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
-    expect(find.textContaining('李四'), findsNothing);
+  });
+
+  testWidgets('V3.8：说「张三还了1个梯子」指名到人，直接扣张三那笔、不弹候选',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三1个梯子');
+    await settle(tester);
+    await submit(tester, '借给李四1个梯子');
+    await settle(tester);
+    await submit(tester, '张三还了1个梯子');
+    await settle(tester);
+
+    expect(find.byKey(const Key('return_picker_dialog')), findsNothing,
+        reason: '句中已指名，不需要问');
+    final loans = await repo.getAllLoans();
+    final zhang = loans.firstWhere((l) => l.borrowerName == '张三');
+    final li = loans.firstWhere((l) => l.borrowerName == '李四');
+    expect(zhang.returnedQty, 1);
+    expect(li.returnedQty, 0, reason: '没点名的李四那笔不动');
+    expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
+  });
+
+  testWidgets('V3.8：说「还了1个梯子给张三」指名到人，直接扣张三那笔',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三1个梯子');
+    await settle(tester);
+    await submit(tester, '借给李四1个梯子');
+    await settle(tester);
+    await submit(tester, '还了1个梯子给张三');
+    await settle(tester);
+
+    expect(find.byKey(const Key('return_picker_dialog')), findsNothing);
+    final loans = await repo.getAllLoans();
+    expect(loans.firstWhere((l) => l.borrowerName == '张三').returnedQty, 1);
+    expect(loans.firstWhere((l) => l.borrowerName == '李四').returnedQty, 0);
+  });
+
+  testWidgets('V3.8：指名的人没借这笔 → 提示真实候选，不静默记到别人头上',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三1个梯子');
+    await settle(tester);
+    await submit(tester, '王五还了1个梯子');
+    await settle(tester);
+
+    final loans = await repo.getAllLoans();
+    expect(loans.first.returnedQty, 0, reason: '没指名成功就不写');
+    expect(find.textContaining('没有借给「王五」的梯子未还记录'), findsOneWidget);
+  });
+
+  testWidgets('V3.8：句式格式标准常驻输入框下方', (tester) async {
+    await pumpApp(tester);
+    expect(find.byKey(const Key('phrase_syntax_guide')), findsOneWidget);
+    // 借出/归还句式都要写明（含指名说法）。
+    expect(find.textContaining('借给张三2个梯子'), findsOneWidget);
+    expect(find.textContaining('张三还了1个梯子'), findsOneWidget);
+    expect(find.textContaining('还了1个梯子给张三'), findsOneWidget);
+  });
+
+  testWidgets('V3.8：借出/归还反馈带位置标签', (tester) async {
+    await pumpApp(tester);
+    // 先记位置：梯子放阳台
+    await submit(tester, '梯子放阳台');
+    await settle(tester);
+    await submit(tester, '借给张三1个梯子');
+    await settle(tester);
+    expect(find.textContaining('已借出：梯子 → 张三'), findsOneWidget);
+    expect(find.textContaining('在阳台'), findsOneWidget);
+
+    await submit(tester, '张三还了1个梯子');
+    await settle(tester);
+    expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
+    expect(find.textContaining('在阳台'), findsOneWidget);
   });
 }

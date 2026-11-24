@@ -20,31 +20,34 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 7,
+    this.version = 8,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
         _migrationV5FailureHook = null,
         _migrationV6FailureHook = null,
-        _migrationV7FailureHook = null;
+        _migrationV7FailureHook = null,
+        _migrationV8FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
-  /// 三个钩子分别覆盖 v4 名称清洗、v5 加列与 v6 加列阶段的失败回滚。
+  /// 四个钩子分别覆盖 v4 名称清洗、v5 加列与 v6 加列阶段的失败回滚。
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 7,
+    this.version = 8,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
     void Function()? migrationV6FailureHook,
     void Function()? migrationV7FailureHook,
+    void Function()? migrationV8FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = migrationFailureHook,
         _migrationV5FailureHook = migrationV5FailureHook,
         _migrationV6FailureHook = migrationV6FailureHook,
-        _migrationV7FailureHook = migrationV7FailureHook;
+        _migrationV7FailureHook = migrationV7FailureHook,
+        _migrationV8FailureHook = migrationV8FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -104,6 +107,10 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.7：v7 迁移失败注入点（建新表前调用），验证整体回滚、版本退回 6。
   /// 私有字段，仅 forTesting 可注入。
   final void Function()? _migrationV7FailureHook;
+
+  /// V3.8：v8 迁移失败注入点（loans 加软删两列前调用），验证整体回滚、版本退回 7。
+  /// 私有字段，仅 forTesting 可注入。
+  final void Function()? _migrationV8FailureHook;
 
   Database? _db;
 
@@ -178,6 +185,7 @@ class InventoryDatabase implements InventoryRepository {
 
   /// V3.7：借阅人表 + 借出记录表。
   /// loans 冗余 item_name / borrower_name 快照：改名或软删借阅人后历史仍可读。
+  /// V3.8：loans 增软删两列（is_deleted / deleted_at）——借出记录可进回收站。
   Future<void> _createBorrowTables(DatabaseExecutor db) async {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS $tableBorrowers (
@@ -201,7 +209,9 @@ class InventoryDatabase implements InventoryRepository {
         $columnDueAt INTEGER NOT NULL,
         $columnReturnedAt INTEGER,
         $columnIsPartial INTEGER NOT NULL DEFAULT 0,
-        $columnUpdatedAt INTEGER NOT NULL
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
+        $columnDeletedAt INTEGER
       )
     ''');
   }
@@ -322,6 +332,21 @@ class InventoryDatabase implements InventoryRepository {
       await db.execute(
         'CREATE INDEX IF NOT EXISTS idx_loans_item ON $tableLoans($columnItemId)',
       );
+    }
+
+    // v7 → v8：V3.8 借出记录可删除——loans 增软删两列
+    // （is_deleted / deleted_at）。老库默认 is_deleted=0，历史记录全部视为
+    // 未删，不会因为升级而从列表里消失。
+    // 注意：is_deleted 与 items 表同名不同表，_addColumnIfMissing 先探测
+    // 列是否存在，重复升级幂等（v6→v7 路径已建带列新表时直接跳过）。
+    if (oldVersion < 8 && newVersion >= 8) {
+      // 失败注入点：加列前抛错，验证整体回滚、版本退回 7。
+      final v8Hook = _migrationV8FailureHook;
+      if (v8Hook != null) v8Hook();
+      await _addColumnIfMissing(db, tableLoans, columnIsDeleted,
+          type: 'INTEGER NOT NULL DEFAULT 0');
+      await _addColumnIfMissing(db, tableLoans, columnDeletedAt,
+          type: 'INTEGER');
     }
   }
 
@@ -643,6 +668,9 @@ class InventoryDatabase implements InventoryRepository {
         '(SELECT $columnId FROM $tableItems WHERE $columnIsDeleted = 1)',
       );
       await txn.delete(tableItems,
+          where: '$columnIsDeleted = 1');
+      // V3.8：连带清空已软删的借出记录（回收站一并清空）。
+      await txn.delete(tableLoans,
           where: '$columnIsDeleted = 1');
     });
   }
@@ -1260,12 +1288,105 @@ class InventoryDatabase implements InventoryRepository {
     );
   }
 
-  /// 全部借出记录（含已还，按借出时间倒序；逾期由 UI 按 due_at 与 now 计算）。
+  /// 全部借出记录（未软删，含已还，按借出时间倒序；逾期由 UI 按 due_at 与 now 计算）。
+  /// V3.8：已软删（进回收站）的记录不在此返回。
   @override
   Future<List<Loan>> getAllLoans() async {
     final db = await open();
-    final rows = await db.query(tableLoans, orderBy: '$columnBorrowedAt DESC');
+    final rows = await db.query(
+      tableLoans,
+      where: '$columnIsDeleted = 0',
+      orderBy: '$columnBorrowedAt DESC',
+    );
     return rows.map(Loan.fromMap).toList(growable: false);
+  }
+
+  /// V3.8：回收站——已软删的借出记录（is_deleted=1，按删除时间倒序）。
+  @override
+  Future<List<Loan>> getDeletedLoans() async {
+    final db = await open();
+    final rows = await db.query(
+      tableLoans,
+      where: '$columnIsDeleted = 1',
+      orderBy: '$columnDeletedAt DESC, $columnBorrowedAt DESC',
+    );
+    return rows.map(Loan.fromMap).toList(growable: false);
+  }
+
+  /// V3.8：软删借出记录（进回收站，可恢复）。
+  /// 记录不存在或已软删时抛 ArgumentError。
+  @override
+  Future<void> deleteLoan(int id) async {
+    final db = await open();
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final rows = await db.query(
+      tableLoans,
+      columns: <String>[columnId],
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(id, 'id', '借出记录不存在');
+    }
+    await db.update(
+      tableLoans,
+      <String, Object?>{
+        columnIsDeleted: 1,
+        columnDeletedAt: now,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  /// V3.8：恢复已软删的借出记录（回借出管理列表）。
+  @override
+  Future<void> restoreLoan(int id) async {
+    final db = await open();
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final rows = await db.query(
+      tableLoans,
+      columns: <String>[columnId],
+      where: '$columnId = ? AND $columnIsDeleted = 1',
+      whereArgs: <Object?>[id],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(id, 'id', '没有已删除的借出记录');
+    }
+    await db.update(
+      tableLoans,
+      <String, Object?>{
+        columnIsDeleted: 0,
+        columnDeletedAt: null,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  /// V3.8：彻底删除借出记录（物理 DELETE，不可恢复）。
+  @override
+  Future<void> purgeLoan(int id) async {
+    final db = await open();
+    final rows = await db.query(
+      tableLoans,
+      columns: <String>[columnId],
+      where: '$columnId = ? AND $columnIsDeleted = 1',
+      whereArgs: <Object?>[id],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(id, 'id', '没有已删除的借出记录');
+    }
+    await db.delete(
+      tableLoans,
+      where: '$columnId = ?',
+      whereArgs: <Object?>[id],
+    );
   }
 
   /// 活跃借阅人（未软删，按名字排序）——借出时下拉去重来源。

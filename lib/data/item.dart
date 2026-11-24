@@ -142,6 +142,9 @@ class Borrower {
 /// 「借出数量/已还数量」的 quantity/returnedQty 两列，不额外拆行。
 /// [dueAt] 用 UTC 毫秒存、本地显示（与现有时间戳口径一致）。
 /// 状态由 returnedQty 与 quantity 推导：已归还=全部归还；逾期=未还清且 dueAt < now。
+///
+/// V3.8：新增 [isDeleted] / [deletedAt]（借出记录软删，进回收站，可恢复）。
+/// 旧备份/旧库无这两列时 [fromMap] 按未删读取，V3.7 及以前导出的备份可正常恢复。
 class Loan {
   const Loan({
     this.id,
@@ -155,6 +158,8 @@ class Loan {
     required this.dueAt,
     this.returnedAt,
     this.isPartial = false,
+    this.isDeleted = false,
+    this.deletedAt,
   });
 
   final int? id;
@@ -187,6 +192,12 @@ class Loan {
   /// 是否发生过部分归还（只要归还过一部分且未一次还清即 true）。
   final bool isPartial;
 
+  /// V3.8：是否已软删（进回收站）。正常借出记录为 false。
+  final bool isDeleted;
+
+  /// V3.8：软删时间戳（UTC 毫秒）；未删记录为 null。
+  final int? deletedAt;
+
   /// 是否全部归还。
   bool get isReturned => returnedQty >= quantity;
 
@@ -205,6 +216,9 @@ class Loan {
         if (returnedAt != null) 'returned_at': returnedAt,
         'is_partial': isPartial ? 1 : 0,
         if (updatedAt != null) 'updated_at': updatedAt,
+        // V3.8：软删两列。旧备份恢复时 [fromMap] 按未删读入，这里写回 0/NULL。
+        'is_deleted': isDeleted ? 1 : 0,
+        if (deletedAt != null) 'deleted_at': deletedAt,
       };
 
   factory Loan.fromMap(Map<String, Object?> map) => Loan(
@@ -219,6 +233,9 @@ class Loan {
         returnedAt: (map['returned_at'] as num?)?.toInt(),
         isPartial: (map['is_partial'] as int?) == 1,
         updatedAt: (map['updated_at'] as num?)?.toInt(),
+        // 旧备份无这两列 → 按未删读入（元宝迁移兼容硬约束）。
+        isDeleted: (map['is_deleted'] as int?) == 1,
+        deletedAt: (map['deleted_at'] as num?)?.toInt(),
       );
 }
 

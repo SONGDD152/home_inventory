@@ -405,5 +405,91 @@ void main() {
       expect(parsePhrase('记:梯子放阳台'), isA<ParseUpsert>());
       expect(parsePhrase('查:梯子'), isA<ParseQuery>());
     });
+
+    // ===== V3.8 真机验收打回修复回归 =====
+    // 根因：形态2 只剥「借」一个字，「了」留在数量前 → 数量静默丢成 1、
+    // 物品名被污染成「了3个钉子」；形态1 固定剥 2 字符 → 借阅人成「了张三」。
+    test('V3.8：「借了3个钉子给张三」→ 物品=钉子 数量=3 借阅人=张三', () {
+      final r = parsePhrase('借了3个钉子给张三') as ParseLend;
+      expect(r.item, '钉子');
+      expect(r.quantity, 3);
+      expect(r.borrower, '张三');
+    });
+
+    test('V3.8：「借给了张三3个钉子」→ 借阅人不带「了」、数量=3', () {
+      final r = parsePhrase('借给了张三3个钉子') as ParseLend;
+      expect(r.borrower, '张三');
+      expect(r.item, '钉子');
+      expect(r.quantity, 3);
+    });
+
+    test('V3.8：「张三借走了3个钉子」→ 数量=3 不被「了」吞掉', () {
+      final r = parsePhrase('张三借走了3个钉子') as ParseLend;
+      expect(r.borrower, '张三');
+      expect(r.item, '钉子');
+      expect(r.quantity, 3);
+    });
+
+    // 被字句：中文被动语序，此前无形态能匹配（被形态3 切成一团）。
+    test('V3.8：「梯子被张三借走了1天」→ 物品=梯子 人=张三 天数=1', () {
+      final r = parsePhrase('梯子被张三借走了1天') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.days, 1);
+    });
+
+    test('V3.8：「梯子被张三借走了」→ 剥「了」后为空也算合法借出句', () {
+      final r = parsePhrase('梯子被张三借走了') as ParseLend;
+      expect(r.item, '梯子');
+      expect(r.borrower, '张三');
+      expect(r.quantity, 1);
+    });
+
+    test('V3.8：「3个钉子被张三借走了」→ 前置数量=3', () {
+      final r = parsePhrase('3个钉子被张三借走了') as ParseLend;
+      expect(r.item, '钉子');
+      expect(r.quantity, 3);
+      expect(r.borrower, '张三');
+    });
+
+    // ===== V3.8 归还指名到人（PM：没说谁还的会记错账）=====
+    test('V3.8：「还了1个梯子」→ 无借阅人（交给 UI 按候选收敛）', () {
+      final r = parsePhrase('还了1个梯子') as ParseReturn;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+      expect(r.borrower, isNull);
+    });
+
+    test('V3.8：「张三还了1个梯子」→ 借阅人=张三', () {
+      final r = parsePhrase('张三还了1个梯子') as ParseReturn;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+      expect(r.borrower, '张三');
+    });
+
+    test('V3.8：「还了1个梯子给张三」→ 尾部「给某人」不再被丢弃', () {
+      final r = parsePhrase('还了1个梯子给张三') as ParseReturn;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+      expect(r.borrower, '张三');
+    });
+
+    test('V3.8：「张三归还了梯子」→ 借阅人=张三、数量 null=全部', () {
+      final r = parsePhrase('张三归还了梯子') as ParseReturn;
+      expect(r.borrower, '张三');
+      expect(r.item, '梯子');
+      expect(r.quantity, isNull);
+    });
+
+    test('V3.8：放置短语不吃归还：「东西还放在阳台」仍走录入', () {
+      final r = parsePhrase('东西还放在阳台');
+      expect(r, isA<ParseUpsert>());
+      expect((r as ParseUpsert).location, '阳台');
+    });
+
+    test('V3.8：物品名带「收」不被误伤：「还了收纳盒」→ 物品=收纳盒', () {
+      final r = parsePhrase('还了收纳盒') as ParseReturn;
+      expect(r.item, '收纳盒');
+    });
   });
 }

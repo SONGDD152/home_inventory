@@ -45,13 +45,24 @@ class ParseLend extends ParseResult {
 }
 
 /// 归还意图（V3.7）：物品 + 数量（未提=全部）。
+///
+/// V3.8 新增 [borrower]：句中明确指名的借阅人。
+/// PM 真机反馈——「还了1个梯子」没说是谁还的，同一件东西两人各借一份时
+/// 记到谁头上全靠猜。句式补两种指名说法：
+///  * 「张三还了1个梯子」（人 + 归还动词）
+///  * 「还了1个梯子给张三」（归还动词 + 物品 + 给某人）
+/// 句中未指名时 borrower 为 null，由 UI 按未还清候选收敛——
+/// 只有一笔时直接还，多笔时弹候选让用户点，绝不静默记账。
 class ParseReturn extends ParseResult {
-  const ParseReturn({required this.item, this.quantity});
+  const ParseReturn({required this.item, this.quantity, this.borrower});
 
   final String item;
 
   /// 归还数量；null 表示全部归还。
   final int? quantity;
+
+  /// 句中指名的借阅人；null 表示句子没说是谁还的。
+  final String? borrower;
 }
 
 /// 未识别：不符合允许的句式模板。
@@ -207,6 +218,38 @@ const List<String> _lendMarkers = <String>['借给', '借出', '借走', '借了
 /// 归还触发词。
 const List<String> _returnMarkers = <String>['归还', '还了', '还回', '还'];
 
+/// 剥掉句首的借出动词与其后的「了」，返回干净的剩余片段。
+///
+/// V3.7.2 修复：口语里动词与动态助词「了」常连用（「借了3个钉子」「借走了梯子」
+/// 「借给了张三」）。此前只剥「借」一个字，「了」留在数量前面导致
+/// [_extractLeadingQuantity] 匹配失败——数量静默丢成 1，物品名也被污染成
+/// 「了3个钉子」。这里按 [_lendMarkers]（长词优先）整体剥动词，再剥一层「了」。
+///
+/// 不是借出动词开头时原样返回（调用方据此判定句式不匹配）。
+String _stripLendVerbPrefix(String text) {
+  var rest = text.trim();
+  for (final marker in _lendMarkers) {
+    if (!rest.startsWith(marker)) continue;
+    rest = rest.substring(marker.length).trim();
+    // 动词后可能跟「了」（借了/借走了/借给了）。
+    if (rest.startsWith('了')) rest = rest.substring(1).trim();
+    return rest;
+  }
+  return rest;
+}
+
+/// 剥掉句首的语气词「了/呢/吧」（只剥一层）。
+///
+/// 用于「借走了3个钉子」这类动词后紧跟助词、数量再跟其后的口语。
+String _stripLeadingParticle(String text) {
+  var rest = text.trim();
+  if (rest.isEmpty) return rest;
+  if (_trailingParticles.contains(rest.substring(0, 1))) {
+    rest = rest.substring(1).trim();
+  }
+  return rest;
+}
+
 /// 中文数字 → 整数。仅覆盖 1-20（家庭场景够用）。
 const Map<String, int> _cnNumbers = <String, int>{
   '一': 1, '两': 2, '二': 2, '三': 3, '四': 4, '五': 5,
@@ -243,17 +286,31 @@ const Map<String, int> _cnNumbers = <String, int>{
 
 /// 解析借出句式。返回 null 表示不匹配。
 ///
-/// 支持三种自然口语（数量/天数均可省略）：
-///  * 借给张三2个梯子 / 借给张三梯子（「给」字句，人到「给」后、物到「给」前）
+/// 支持四种自然口语（数量/天数均可省略）：
+///  * 借给张三2个梯子 / 借给了张三2个梯子（「给」字句，人到「给」后、物到「给」前）
 ///  * 张三借了2个梯子 / 张三借梯子（人+借动词）
-///  * 借2个梯子给张三（物在「借」后、「给」前，人在「给」后）
+///  * 借2个梯子给张三 / 借了2个梯子给张三（物在「借」后、「给」前，人在「给」后）
+///  * 梯子被张三借走了2天（被字句，物品在前、人在「被」后）
+///
+/// V3.7.2 修复三处切词缺陷（真机验收打回）：
+///  ① 「借了3个钉子给张三」此前只剥「借」一个字，「了」留在数量前 →
+///     数量匹配失败静默丢成 1，物品名被污染成「了3个钉子」。
+///  ② 「借给了张三3个钉子」→ 借阅人被切成「了张三」。
+///  ③ 「梯子被张三借走了1天」此前完全不支持被字句 → 物品切成「走」、
+///     借阅人切成「梯子被张三」。
 ParseLend? _parseLend(String text) {
   if (!text.contains('借')) return null;
 
-  // 形态1「借给」：句式 = 借给 + <人> + <数量物品> + [天数]
+  // 形态0（被字句）：<物品>被<人>借走/借出/借了。
+  // 中文被动语序，物品在最前、人在「被」后，与前三种形态的切分方向相反。
+  final passive = _parseLendPassive(text);
+  if (passive != null) return passive;
+
+  // 形态1「借给」：句式 = 借给[了] + <人> + <数量物品> + [天数]
   // 人/物无显式分隔，靠数量切分："借给张三2个梯子" → 人=张三、物=梯子、数量=2。
   if (text.startsWith('借给')) {
-    var tail = text.substring(2).trim(); // "张三2个梯子" / "张三5天梯子"
+    // V3.7.2 修复②：整体剥「借给」及紧随其后的「了」，避免人名被切成「了张三」。
+    var tail = _stripLendVerbPrefix(text);
     if (tail.isEmpty) return null;
 
     // 先剥尾部天数（"张三2个梯子5天"）。
@@ -281,7 +338,7 @@ ParseLend? _parseLend(String text) {
 
   final giveIdx = text.indexOf('给');
   if (giveIdx > 0) {
-    // 形态2：借<数量><物品>给<人>(借2个梯子给张三)
+    // 形态2：借[了/走/出]<数量><物品>给<人>(借2个梯子给张三)
     final head = text.substring(0, giveIdx).trim(); // "借2个梯子"
     var tail = text.substring(giveIdx + 1).trim(); // "张三"
     if (tail.isEmpty) return null;
@@ -293,14 +350,18 @@ ParseLend? _parseLend(String text) {
     }
     final borrower = normalizeName(tail);
     if (borrower.isEmpty) return null;
-    var itemPart = head.startsWith('借') ? head.substring(1).trim() : head;
+    // V3.7.2 修复①：整体剥借出动词（含「借了/借走/借出」）与其后的「了」。
+    // 此前只剥「借」一个字，"借了3个钉子" 剩 "了3个钉子" → 数量匹配失败
+    // 静默丢成 1、物品名被污染成「了3个钉子」。
+    final itemPart = _stripLendVerbPrefix(head);
     var quantity = 1;
-    final q = _extractLeadingQuantity(itemPart);
+    var rest2 = itemPart;
+    final q = _extractLeadingQuantity(rest2);
     if (q != null && q.rest.isNotEmpty) {
       quantity = q.value;
-      itemPart = q.rest;
+      rest2 = q.rest;
     }
-    final item = normalizeName(_stripTrailingParticle(itemPart));
+    final item = normalizeName(_stripTrailingParticle(rest2));
     if (item.isEmpty) return null;
     return ParseLend(item: item, borrower: borrower, quantity: quantity, days: days);
   }
@@ -313,6 +374,10 @@ ParseLend? _parseLend(String text) {
     var rest = text.substring(idx + marker.length).trim();
     if (borrower.isEmpty || rest.isEmpty) continue;
     if (_placeVerbs.any((v) => rest.contains(v))) continue;
+    // V3.7.2 修复：marker 可能只吃到「借」，剩下的「了3个钉子」需再剥一层「了」，
+    // 否则数量匹配失败静默丢成 1、物品名残留「了」。
+    rest = _stripLeadingParticle(rest);
+    if (rest.isEmpty) continue;
     var quantity = 1;
     final q = _extractLeadingQuantity(rest);
     if (q != null && q.rest.isNotEmpty) {
@@ -332,26 +397,173 @@ ParseLend? _parseLend(String text) {
   return null;
 }
 
-/// 解析归还句式。支持：还了2个梯子 / 还梯子 / 归还梯子给张三。
-ParseReturn? _parseReturn(String text) {
-  for (final marker in _returnMarkers) {
-    if (!text.startsWith(marker)) continue;
-    var rest = text.substring(marker.length).trim();
-    if (rest.isEmpty) continue;
-    int? quantity;
-    final q = _extractLeadingQuantity(rest);
-    if (q != null && q.rest.isNotEmpty) {
-      quantity = q.value;
-      rest = q.rest;
+/// 解析被字句借出：<物品>被<人>借走/借出/借了。
+///
+/// V3.7.2 新增。中文被动语序，物品在最前、人在「被」后，与「借给X…」「X借…」
+/// 「借…给X」三种主动语序的切分方向完全相反，此前无任何形态能匹配，
+/// 会被形态3 切成一团（物品="走"、借阅人="梯子被张三"）。
+///
+/// 例：「梯子被张三借走了1天」→ 物品=梯子、人=张三、天数=1。
+/// 「3个钉子被张三借走了」→ 物品=钉子、数量=3、人=张三。
+ParseLend? _parseLendPassive(String text) {
+  final beiIdx = text.indexOf('被');
+  if (beiIdx <= 0) return null;
+
+  // 「被」之前是物品部分（可能带前置数量："3个钉子被张三借走了"）。
+  var headPart = text.substring(0, beiIdx).trim();
+  if (headPart.isEmpty) return null;
+  var quantity = 1;
+  final headQty = _extractLeadingQuantity(headPart);
+  if (headQty != null && headQty.rest.isNotEmpty) {
+    quantity = headQty.value;
+    headPart = headQty.rest;
+  }
+  final item = normalizeName(_stripTrailingParticle(headPart));
+  if (item.isEmpty) return null;
+
+  // 「被」之后是「<人>借走/借出/借了」。
+  var tail = text.substring(beiIdx + 1).trim();
+  if (tail.isEmpty) return null;
+  String? verb;
+  int? verbIdx;
+  for (final marker in _lendMarkers) {
+    final i = tail.indexOf(marker);
+    if (i <= 0) continue;
+    // 取最靠前的动词；同位置取更长的（借走/借出 优先于 借）。
+    if (verbIdx == null || i < verbIdx) {
+      verbIdx = i;
+      verb = marker;
     }
-    // 去掉尾部 "给某人"（归还对象借出时已记在 loan 上，这里只取物品）。
-    final giveIdx = rest.indexOf('给');
-    if (giveIdx > 0) rest = rest.substring(0, giveIdx).trim();
-    final item = normalizeName(_stripTrailingParticle(rest));
-    if (item.isEmpty) continue;
-    return ParseReturn(item: item, quantity: quantity);
+  }
+  if (verbIdx == null || verb == null) return null;
+  final borrower = normalizeName(tail.substring(0, verbIdx));
+  if (borrower.isEmpty) return null;
+
+  var rest = tail.substring(verbIdx + verb.length).trim();
+  // 动词后可能跟「了」（借走了）。剥掉后为空是合法的——「梯子被张三借走了」
+  // 就是完整的借出句，只是没有额外数量/天数。V3.7.2 修复：此前这里直接
+  // return null，导致该句回落到形态3 被切成一团。
+  rest = _stripLeadingParticle(rest);
+  // 尾部天数："借走了1天" → days=1。
+  int? days;
+  if (rest.isNotEmpty) {
+    final dayMatch = RegExp(r'(\d+)\s*天\s*$').firstMatch(rest);
+    if (dayMatch != null) {
+      days = int.tryParse(dayMatch.group(1)!);
+      rest = rest.substring(0, dayMatch.start).trim();
+    }
+  }
+  // 尾部数量（"借走了2个"）：只在前面没给数量时采用。
+  if (rest.isNotEmpty) {
+    final q = _extractLeadingQuantity(rest);
+    if (q != null && q.rest.isEmpty) {
+      quantity = q.value;
+      rest = '';
+    }
+  }
+  if (rest.isNotEmpty) return null;
+  return ParseLend(item: item, borrower: borrower, quantity: quantity, days: days);
+}
+
+/// 归还句式解析。
+///
+/// 支持三类（V3.8 重构，补「是谁还的」）：
+///  * A 归还动词开头：还了1个梯子 / 还梯子 / 归还梯子
+///  * B 人 + 归还动词：张三还了1个梯子 / 张三归还了梯子
+///  * C 归还动词 + 物品 + 给某人：还了1个梯子给张三
+///
+/// V3.8 修复（PM 真机反馈）：此前只支持 A，且 A 遇到尾部「给某人」会直接
+/// 丢弃（「还了1个梯子给张三」拿不到张三），导致多人借同一物品时无法判定
+/// 归属、只能按最早一笔静默记账。现在句式本身能指名，指不出时由 UI
+/// 弹候选让用户选。
+ParseReturn? _parseReturn(String text) {
+  // 含「放在/收进/存到…」等放置短语的是录入句（「东西还放在阳台」），
+  // 不能当归还句解析。
+  if (_hasPlacementPhrase(text)) return null;
+  for (final marker in _returnMarkers) {
+    final idx = text.indexOf(marker);
+    if (idx < 0) continue;
+
+    // 形态B：动词前是人名 → 借阅人。
+    if (idx > 0) {
+      final head = text.substring(0, idx).trim();
+      if (_looksLikeBorrowerName(head)) {
+        final rest = _stripLeadingParticle(
+            text.substring(idx + marker.length).trim());
+        final body = _parseReturnBody(rest);
+        if (body != null) {
+          return ParseReturn(
+            item: body.item,
+            quantity: body.quantity,
+            borrower: normalizeName(head),
+          );
+        }
+      }
+      continue;
+    }
+
+    // 形态A / C：动词在句首。
+    final rest = text.substring(marker.length).trim();
+    if (rest.isEmpty) continue;
+    final body = _parseReturnBody(rest);
+    if (body == null) continue;
+    // 形态C：尾部「给某人」即借阅人（此前被直接丢弃）。
+    String? borrower;
+    final giveIdx = body.tail.indexOf('给');
+    if (giveIdx > 0) {
+      final who = body.tail.substring(giveIdx + 1).trim();
+      if (who.isNotEmpty) borrower = normalizeName(who);
+    }
+    return ParseReturn(item: body.item, quantity: body.quantity, borrower: borrower);
   }
   return null;
+}
+
+/// 归还句式的切分结果：物品 + 数量 + 未剥离的尾部（可能仍含「给某人」）。
+({String item, int? quantity, String tail})? _parseReturnBody(String rest) {
+  if (rest.isEmpty) return null;
+  var body = rest;
+  int? quantity;
+  final q = _extractLeadingQuantity(body);
+  if (q != null) {
+    // 只有数量没有物品名（「还了1个」）→ 不是有效归还句。
+    if (q.rest.isEmpty) return null;
+    quantity = q.value;
+    body = q.rest;
+  }
+  // 物品段在「给」之前，尾部「给某人」留给调用方取借阅人。
+  final giveIdx = body.indexOf('给');
+  final itemPart = giveIdx > 0 ? body.substring(0, giveIdx).trim() : body;
+  final item = normalizeName(_stripTrailingParticle(itemPart));
+  if (item.isEmpty) return null;
+  return (item: item, quantity: quantity, tail: body);
+}
+
+/// 判断句中是否含「放置动词 + 介词」构成的放置短语（放阳台 / 收进抽屉 / 存到柜子）。
+///
+/// 借还解析都要排除放置句，否则「东西还放在阳台」会被当成归还。
+/// 只认「动词紧跟介词」的组合——这样「还了收据」「借了收纳盒」这类
+/// 物品名里带 收/存 的正常句子不会被误伤。
+bool _hasPlacementPhrase(String text) {
+  for (final verb in _placeVerbs) {
+    for (final prep in _prepositions) {
+      if (text.contains('$verb$prep')) return true;
+    }
+  }
+  return false;
+}
+
+/// 判断「归还动词前的那一段」是否像借阅人姓名。
+///
+/// 解析器是纯函数、拿不到仓储，无法核实是否真是借阅人——所以只做粗筛：
+/// 不含数字、不含量词、不含放置动词、长度 1..8 字。真正的核对交给 UI
+/// （与借出记录对不上会提示候选，不会静默记错账）。
+bool _looksLikeBorrowerName(String head) {
+  if (head.isEmpty || head.length > 8) return false;
+  if (RegExp(r'\d').hasMatch(head)) return false;
+  if (_placeVerbs.any((v) => head.contains(v))) return false;
+  if ('个本把件只张'.contains(head.substring(head.length - 1))) return false;
+  return true;
 }
 
 /// 把一句中文口语解析成结构化意图。

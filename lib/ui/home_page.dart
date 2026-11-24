@@ -206,27 +206,70 @@ class _HomePageState extends State<HomePage> {
     );
     if (!mounted) return;
     final days = parsed.days ?? InventoryDatabase.defaultLoanDays;
+    final where = await _itemLocationSuffix(loan.itemName);
+    if (!mounted) return;
     setState(() {
       _busy = false;
       _notice = '已借出：${loan.itemName} → ${loan.borrowerName}'
-          '（${loan.quantity} 个 · $days 天）';
+          '（${loan.quantity} 个 · $days 天）$where';
       _result = null;
     });
   }
 
+  /// 物品当前位置标签（V3.8）。
+  ///
+  /// PM 真机反馈：借出/归还只显示物品名和借阅人，看不出东西放在哪儿。
+  /// 取物品明细页同一份数据（当前未删位置），位置多时用「、」并列。
+  /// 返回可直接拼在提示末尾的后缀，如「 · 在阳台」。
+  Future<String> _itemLocationSuffix(String itemName) async {
+    final all = await widget.repository.getAllItemsWithLocations();
+    if (!mounted) return '';
+    final key = normalizeName(itemName);
+    final hit = all.where((i) => i.item.name == key).firstOrNull;
+    if (hit == null) return ' · 位置未记录';
+    final names = hit.locations.map((l) => l.name).toSet().toList()..sort();
+    if (names.isEmpty) return ' · 位置未记录';
+    return ' · 在${names.join('、')}';
+  }
+
   /// V3.7 缺陷修复：语音归还落库。
-  /// 「还了1个梯子」→ 按物品名找最早一笔未还清的借出记录归还。
-  /// 同一物品借给多人时无法从句子判定借阅人，取未还清中最早借出的一笔（FIFO）。
+  ///
+  /// V3.8 重构（PM 真机反馈）：「还了1个梯子」没说是谁还的——
+  /// 同一件东西两人各借一份时，按最早一笔静默记账会记到错的人头上。
+  /// 现在分三种情形：
+  ///  ① 句中指名（「张三还了1个梯子」「还了1个梯子给张三」）→ 精确命中那人的
+  ///     未还清记录；同一人多笔时取最早一笔（元宝批复 FIFO 口径不变）。
+  ///  ② 句中没指名且该物品只有一笔未还清 → 无歧义，直接还。
+  ///  ③ 句中没指名且有多笔未还清 → 弹候选框让用户点是谁还的，
+  ///     绝不静默记账；同时提示可说「还了1个梯子给张三」。
   Future<void> _handleReturn(ParseReturn parsed) async {
     final loans = await widget.repository.getAllLoans();
     if (!mounted) return;
     final key = normalizeName(parsed.item);
-    // getAllLoans 按借出时间倒序，lastWhere 即最早借出的一笔。
-    Loan? target;
-    for (final loan in loans) {
-      if (loan.itemName == key && !loan.isReturned) target = loan;
+    final outstanding = loans
+        .where((l) => l.itemName == key && !l.isReturned)
+        .toList(growable: false);
+    // getAllLoans 按借出时间倒序 → 逆序即最早借出在前（FIFO 展示顺序）。
+    final fifo = outstanding.reversed.toList(growable: false);
+
+    final named = parsed.borrower;
+    if (named != null && named.isNotEmpty) {
+      final mine =
+          fifo.where((l) => l.borrowerName == named).toList(growable: false);
+      if (mine.isEmpty) {
+        // 指名的人没借这笔——不猜，把候选亮出来让用户改口或取消。
+        setState(() {
+          _busy = false;
+          _notice = _noSuchBorrowerNotice(parsed.item, named, fifo);
+          _result = null;
+        });
+        return;
+      }
+      await _doReturn(mine.first, parsed.quantity);
+      return;
     }
-    if (target == null) {
+
+    if (fifo.isEmpty) {
       setState(() {
         _busy = false;
         _notice = '没有借出的${parsed.item}可还。';
@@ -234,23 +277,107 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    // 取非空局部变量：target 在闭包中无法做空安全提升。
-    final Loan hit = target;
-    await widget.repository.returnLoan(hit.id!, quantity: parsed.quantity);
+    if (fifo.length == 1) {
+      await _doReturn(fifo.first, parsed.quantity);
+      return;
+    }
+
+    // 多笔未还清且句子没指名 → 弹候选让用户点。
+    final picked = await _pickReturnBorrower(parsed.item, fifo);
+    if (!mounted) return;
+    if (picked == null) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消归还。';
+        _result = null;
+      });
+      return;
+    }
+    await _doReturn(picked, parsed.quantity);
+  }
+
+  /// 执行归还并回显（沿用元宝批复①③口径：反馈带借阅人 + 数量 + 剩余）。
+  Future<void> _doReturn(Loan hit, int? requestedQty) async {
+    await widget.repository.returnLoan(hit.id!, quantity: requestedQty);
     if (!mounted) return;
     // 本次归还量：给定值=部分归还；未给=把该笔剩余一次还清。
-    final qty = parsed.quantity ?? hit.quantity - hit.returnedQty;
+    final qty = requestedQty ?? hit.quantity - hit.returnedQty;
     // 该笔借出归还后的剩余（基于归还前快照计算，含 0=已还清）。
     final remaining = hit.quantity - hit.returnedQty - qty;
     final left = remaining < 0 ? 0 : remaining;
+    // V3.8：反馈带位置标签——PM 真机反馈「归还的物品没有位置标签」。
+    final where = await _itemLocationSuffix(hit.itemName);
+    if (!mounted) return;
     setState(() {
       _busy = false;
       // 元宝批复补充①③：反馈必须带借阅人（FIFO 命中谁一目了然，
       // 避免用户以为还的是李四、实际扣了张三账），且与借出文案对称。
       _notice = '已归还：${hit.itemName} → ${hit.borrowerName}'
-          '（$qty 个 · 还剩 $left 个）';
+          '（$qty 个 · 还剩 $left 个）$where';
       _result = null;
     });
+  }
+
+  /// 归还归属候选框：同一物品有多笔未还清时，让用户点是谁还的。
+  /// 候选用 ListTile（大触控区、文字标签），无图标——避开 M3 吞色。
+  Future<Loan?> _pickReturnBorrower(String item, List<Loan> candidates) async {
+    return showDialog<Loan>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('return_picker_dialog'),
+        title: Text('「$item」是谁还的？'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const Text('这件东西有多笔没还，请点一下是谁还的。',
+                  style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+              const SizedBox(height: 4),
+              Text('也可以直接说：还了1个$item给张三',
+                  style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+              const SizedBox(height: 8),
+              for (final loan in candidates)
+                ListTile(
+                  key: Key('return_pick_${loan.borrowerName}_${loan.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(loan.borrowerName,
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    '借出 ${_loanDate(loan.borrowedAt)} · 已还 ${loan.returnedQty}/${loan.quantity}',
+                    style: const TextStyle(fontSize: 12.5, color: Color(0xff607d8b)),
+                  ),
+                  onTap: () => Navigator.of(context).pop(loan),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('return_picker_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 指名的借阅人没有这笔未还清记录时的提示（列出真实候选，避免死路）。
+  String _noSuchBorrowerNotice(String item, String named, List<Loan> candidates) {
+    if (candidates.isEmpty) {
+      return '没有借出的$item可还。';
+    }
+    final who = candidates.map((l) => l.borrowerName).toSet().join('、');
+    return '没有借给「$named」的$item未还记录。\n'
+        '「$item」现在借给：$who。可以改口说：还了1个$item给谁。';
+  }
+
+  /// 借出日期（本地显示，月/日）。
+  String _loanDate(int ms) {
+    final t = DateTime.fromMillisecondsSinceEpoch(ms);
+    return '${t.month}/${t.day}';
   }
 
   // V3.4：首页手动添加位置入口（_addLocation）撤下——手动添加能力
@@ -344,6 +471,76 @@ class _HomePageState extends State<HomePage> {
           ),
         );
       },
+    );
+  }
+
+  /// V3.8：句式格式标准卡片（输入框正下方）。
+  ///
+  /// PM 真机反馈：「如果借出语句有格式要求的话，把格式标准输入框下面」——
+  /// 用户不知道借出/归还该怎么说，试着说失败还以为是 App 坏了。
+  /// 这里把四类句式一次性列清（含数量与「是谁还的」的指名说法），
+  /// 纯文字展示、无图标，规避 M3 主题吞色。
+  Widget _buildSyntaxGuide() {
+    return Container(
+      key: const Key('phrase_syntax_guide'),
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xfff1f8f2),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xffc8e6c9)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text(
+            '怎么说（句式标准）',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Color(0xff1b5e20),
+            ),
+          ),
+          const SizedBox(height: 6),
+          _syntaxRow('放东西', '梯子放阳台'),
+          _syntaxRow('查东西', '梯子在哪'),
+          _syntaxRow('借出', '借给张三2个梯子｜张三借走了2个梯子｜梯子被张三借走了'),
+          _syntaxRow('归还', '张三还了1个梯子｜还了1个梯子给张三'),
+          const SizedBox(height: 2),
+          const Text(
+            '借出/归还都建议带上人名；不说人名时，若同一件东西有多笔没还，'
+            '会问你是谁还的。',
+            style: TextStyle(fontSize: 12, color: Color(0xff607d8b)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 句式标准的一行（类别 + 示例）。用两个独立 Text（而非 RichText），
+  /// 保证文本可被无障碍/自动化按字面检索。
+  Widget _syntaxRow(String label, String samples) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '$label：',
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: Color(0xff1b5e20),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              samples,
+              style: const TextStyle(fontSize: 12.5, color: Color(0xff37474f)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -505,6 +702,11 @@ class _HomePageState extends State<HomePage> {
               onChanged: (_) => setState(() {}), // 刷新「确定」禁用态
               onSubmitted: (_) => _busy ? null : _submitPhrase(),
             ),
+            const SizedBox(height: 8),
+            // V3.8：句式格式标准常驻输入框正下方（PM 真机反馈：
+            // 「如果借出语句有格式要求的话，把格式标准输入框下面」）。
+            // 静态展示四类句式，纯文字无图标，避开 M3 吞色。
+            _buildSyntaxGuide(),
             const SizedBox(height: 4),
             // 技术审核条件①/文档第七章：隐私与准确率由输入法决定，弱提示常驻。
             // V3.3：文案去技术味（口径不变：12px 灰色、常驻展示）。

@@ -75,8 +75,21 @@ abstract class InventoryRepository {
   /// 单笔改借期（天数从借出时刻起算）。
   Future<void> updateLoanDue(int loanId, int days) async {}
 
-  /// 全部借出记录（含已还，借出时间倒序）。逾期由 UI 按 due_at 计算。
+  /// 全部借出记录（未软删，含已还，借出时间倒序）。逾期由 UI 按 due_at 计算。
+  /// V3.8：已软删（进回收站）的记录不在此返回。
   Future<List<Loan>> getAllLoans() async => const <Loan>[];
+
+  /// V3.8：回收站——已软删的借出记录（删除时间倒序）。
+  Future<List<Loan>> getDeletedLoans() async => const <Loan>[];
+
+  /// V3.8：软删借出记录（进回收站，可恢复）。
+  Future<void> deleteLoan(int id) async {}
+
+  /// V3.8：恢复已软删的借出记录。
+  Future<void> restoreLoan(int id) async {}
+
+  /// V3.8：彻底删除借出记录（物理删除，不可恢复）。
+  Future<void> purgeLoan(int id) async {}
 
   /// 活跃借阅人（未软删，名字排序）——借出时下拉去重来源。
   Future<List<Borrower>> getActiveBorrowers() async => const <Borrower>[];

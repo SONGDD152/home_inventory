@@ -9,9 +9,12 @@ import '../data/normalize.dart';
 /// 借出管理页（V3.7，元宝决策③A：仓储抽屉二级入口，不动五模块底栏）。
 ///
 /// 顶部红色逾期横幅（逾期条数 + 最紧急一条，点击过滤逾期项）；
-/// 下方借出明细列表（含全部/逾期过滤切换）。
+/// 下方借出明细列表（V3.8 默认只看在借——已归还的不再挂着，
+/// PM 真机反馈「已归还的这条信息应该就没有了」；「全部」里仍可查历史）。
 /// 支持：新借出（物品 + 借阅人 + 数量 + 天数）、全部/部分归还、
-/// 单笔改借期、软删借阅人（长按借阅人标签）。
+/// 单笔改借期、删除借出记录（进回收站，可撤销/恢复）、
+/// 软删借阅人（长按借阅人标签）。
+/// 每条记录显示物品当前位置标签（PM 真机反馈：归还的物品没有位置标签）。
 /// 借阅人来源：历史去重下拉 + 手填，不做独立管理页。
 class LoanListPage extends StatefulWidget {
   const LoanListPage({super.key, required this.repository});
@@ -22,12 +25,19 @@ class LoanListPage extends StatefulWidget {
   State<LoanListPage> createState() => _LoanListPageState();
 }
 
+/// 列表筛选档位：只看在借 / 全部（含已归还）/ 只看逾期。
+enum _LoanFilter { active, all, overdue }
+
 class _LoanListPageState extends State<LoanListPage> {
   List<Loan> _loans = <Loan>[];
   List<Borrower> _borrowers = <Borrower>[];
+  /// 物品 id → 位置名列表（当前位置标签来源）。
+  Map<int, List<String>> _locations = <int, List<String>>{};
+  /// 物品名 → 位置名列表（改名/快照对不上时的兜底）。
+  Map<String, List<String>> _locationsByName = <String, List<String>>{};
   bool _loading = true;
   bool _busy = false;
-  bool _overdueOnly = false;
+  _LoanFilter _filter = _LoanFilter.active;
 
   @override
   void initState() {
@@ -38,10 +48,22 @@ class _LoanListPageState extends State<LoanListPage> {
   Future<void> _reload() async {
     final loans = await widget.repository.getAllLoans();
     final borrowers = await widget.repository.getActiveBorrowers();
+    final items = await widget.repository.getAllItemsWithLocations();
     if (!mounted) return;
+    final locations = <int, List<String>>{};
+    final byName = <String, List<String>>{};
+    for (final row in items) {
+      final names = row.locations.map((l) => l.name).toSet().toList()..sort();
+      byName[row.item.name] = names;
+      final id = row.item.id;
+      if (id == null) continue;
+      locations[id] = names;
+    }
     setState(() {
       _loans = loans;
       _borrowers = borrowers;
+      _locations = locations;
+      _locationsByName = byName;
       _loading = false;
     });
   }
@@ -51,8 +73,17 @@ class _LoanListPageState extends State<LoanListPage> {
   List<Loan> get _overdueLoans =>
       _loans.where((l) => l.isOverdue(_nowMs)).toList(growable: false);
 
-  List<Loan> get _visibleLoans =>
-      _overdueOnly ? _overdueLoans : _loans;
+  /// V3.8：默认只看未还清（在借）的记录——已归还的不再挂在列表里。
+  List<Loan> get _visibleLoans {
+    switch (_filter) {
+      case _LoanFilter.active:
+        return _loans.where((l) => !l.isReturned).toList(growable: false);
+      case _LoanFilter.overdue:
+        return _overdueLoans;
+      case _LoanFilter.all:
+        return _loans;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -69,11 +100,21 @@ class _LoanListPageState extends State<LoanListPage> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
+      // V3.8 真机修复：原实现用 FloatingActionButton + 纯 Icon，
+      // 真机上按钮渲染成一块浅绿色方块、加号完全没出来，也没有文字标签
+      // （PM 反馈「有个绿色的按钮，但是没有标签」）。现在改为 extended 形态
+      // 并把前景色/文字色写死在本体上，绕开 M3 样式继承链。
+      floatingActionButton: FloatingActionButton.extended(
         key: const Key('loan_add_fab'),
         onPressed: _busy ? null : _showLendDialog,
         tooltip: '新借出',
-        child: const Icon(Icons.add),
+        backgroundColor: const Color(0xff1b5e20),
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.add, color: Colors.white, size: 22),
+        label: const Text(
+          '新借出',
+          style: TextStyle(color: Colors.white, fontSize: 14),
+        ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -86,7 +127,7 @@ class _LoanListPageState extends State<LoanListPage> {
                       ? Center(
                           key: const Key('loan_empty'),
                           child: Text(
-                            _overdueOnly ? '没有逾期借出' : '暂无借出记录，点右下角 + 新增',
+                            _emptyText,
                             style: const TextStyle(color: Colors.grey),
                           ),
                         )
@@ -101,12 +142,24 @@ class _LoanListPageState extends State<LoanListPage> {
     );
   }
 
+  /// 空态文案（随筛选档位变化）。
+  String get _emptyText {
+    switch (_filter) {
+      case _LoanFilter.active:
+        return '没有在借的东西，点右下角「新借出」记一笔';
+      case _LoanFilter.overdue:
+        return '没有逾期借出';
+      case _LoanFilter.all:
+        return '暂无借出记录，点右下角「新借出」记一笔';
+    }
+  }
+
   /// 逾期横幅：显示条数 + 最紧急一条（到期最早），点击过滤逾期项。
   Widget _buildOverdueBanner(List<Loan> overdue) {
     final mostUrgent = overdue.reduce((a, b) => a.dueAt < b.dueAt ? a : b);
     return InkWell(
       key: const Key('loan_overdue_banner'),
-      onTap: () => setState(() => _overdueOnly = true),
+      onTap: () => setState(() => _filter = _LoanFilter.overdue),
       child: Container(
         width: double.infinity,
         color: const Color(0xffc62828),
@@ -126,17 +179,24 @@ class _LoanListPageState extends State<LoanListPage> {
       child: Row(
         children: <Widget>[
           ChoiceChip(
+            key: const Key('loan_filter_active'),
+            label: const Text('在借'),
+            selected: _filter == _LoanFilter.active,
+            onSelected: (_) => setState(() => _filter = _LoanFilter.active),
+          ),
+          const SizedBox(width: 8),
+          ChoiceChip(
             key: const Key('loan_filter_all'),
             label: const Text('全部'),
-            selected: !_overdueOnly,
-            onSelected: (_) => setState(() => _overdueOnly = false),
+            selected: _filter == _LoanFilter.all,
+            onSelected: (_) => setState(() => _filter = _LoanFilter.all),
           ),
           const SizedBox(width: 8),
           ChoiceChip(
             key: const Key('loan_filter_overdue'),
             label: const Text('逾期'),
-            selected: _overdueOnly,
-            onSelected: (_) => setState(() => _overdueOnly = true),
+            selected: _filter == _LoanFilter.overdue,
+            onSelected: (_) => setState(() => _filter = _LoanFilter.overdue),
           ),
         ],
       ),
@@ -151,6 +211,8 @@ class _LoanListPageState extends State<LoanListPage> {
     final statusColor = loan.isReturned
         ? const Color(0xff1b5e20)
         : (overdue ? const Color(0xffc62828) : const Color(0xff1565c0));
+    final locations =
+        _locations[loan.itemId] ?? _locationsByName[loan.itemName] ?? const <String>[];
     return Card(
       key: Key('loan_item_${loan.id ?? loan.itemName}'),
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -170,9 +232,30 @@ class _LoanListPageState extends State<LoanListPage> {
                 ),
                 Text(status,
                     style: TextStyle(color: statusColor, fontSize: 13)),
+                // V3.8：删除借出记录（进回收站，可撤销）。文字按钮无图标，
+                // 触控区 48dp，危险操作色写死。
+                TextButton(
+                  key: Key('loan_delete_${loan.id ?? loan.itemName}'),
+                  onPressed: _busy ? null : () => _confirmDeleteLoan(loan),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xffc62828),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: const Size(48, 40),
+                  ),
+                  child: const Text(
+                    '删除',
+                    style: TextStyle(color: Color(0xffc62828), fontSize: 13),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 4),
+            // V3.8：位置标签——PM 真机反馈「归还的物品没有位置标签」。
+            Text(
+              locations.isEmpty ? '位置：未记录' : '位置：${locations.join('、')}',
+              style: const TextStyle(fontSize: 12.5, color: Color(0xff37474f)),
+            ),
+            const SizedBox(height: 2),
             GestureDetector(
               onLongPress: loan.borrowerName.isEmpty
                   ? null
@@ -219,6 +302,56 @@ class _LoanListPageState extends State<LoanListPage> {
   }
 
   // ---------- 交互 ----------
+
+  /// V3.8：删除借出记录 → 软删进回收站，Snackbar 提供「撤销」。
+  Future<void> _confirmDeleteLoan(Loan loan) async {
+    final id = loan.id;
+    if (id == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除借出记录？'),
+        content: Text(
+          '「${loan.itemName} → ${loan.borrowerName}」这条借出记录会移进回收站，'
+          '可在回收站恢复。',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('loan_delete_confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    await widget.repository.deleteLoan(id);
+    if (!mounted) return;
+    await _reload();
+    setState(() => _busy = false);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已删除借出记录：${loan.itemName} → ${loan.borrowerName}'),
+        action: SnackBarAction(
+          label: '撤销',
+          onPressed: () => _restoreLoan(id),
+        ),
+      ),
+    );
+  }
+
+  /// 撤销删除（从回收站恢复）。
+  Future<void> _restoreLoan(int id) async {
+    await widget.repository.restoreLoan(id);
+    if (!mounted) return;
+    await _reload();
+  }
 
   Future<void> _showLendDialog() async {
     final itemController = TextEditingController();

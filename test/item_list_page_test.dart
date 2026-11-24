@@ -26,6 +26,22 @@ class FakeListRepository with FakeLoanMixin implements InventoryRepository {
   int updateItemCalls = 0;
   int deleteItemCalls = 0;
 
+  /// V3.8：预置的「已删除借出记录」（回收站借出区块用）。
+  final List<Loan> deletedLoans = <Loan>[];
+
+  /// V3.8：借出记录恢复/彻底删除的调用记录。
+  int restoreLoanCalls = 0;
+  int purgeLoanCalls = 0;
+
+  @override
+  Future<List<Loan>> getDeletedLoans() async => List<Loan>.unmodifiable(deletedLoans);
+
+  @override
+  Future<void> restoreLoan(int id) async => restoreLoanCalls++;
+
+  @override
+  Future<void> purgeLoan(int id) async => purgeLoanCalls++;
+
   /// 非空时 updateItem 抛 ArgumentError（模拟真实库撞名等校验拒绝）。
   String? errorOnUpdate;
 
@@ -549,6 +565,94 @@ void main() {
     expect(find.text('梯子'), findsNothing);
     expect(find.text('充电器'), findsOneWidget);
     expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
+  });
+
+
+  // ---- V3.8 回收站：已删除的借出记录 ----
+
+  testWidgets('V3.8 回收站：已删除的借出记录可恢复、可彻底删除',
+      (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    repo.deletedLoans.add(Loan(
+      id: 7,
+      itemId: 1,
+      itemName: '梯子',
+      borrowerName: '张三',
+      quantity: 2,
+      borrowedAt: 1000,
+      dueAt: 1000 + 3 * 86400000,
+      isDeleted: true,
+      deletedAt: 2000,
+    ));
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+
+    // 有已删借出记录时不再是空态。
+    expect(find.text('回收站为空'), findsNothing);
+    expect(find.byKey(const Key('trash_loan_7')), findsOneWidget);
+    expect(find.textContaining('借给：张三'), findsOneWidget);
+    expect(find.byKey(const Key('trash_loan_restore_7')), findsOneWidget);
+    expect(find.byKey(const Key('trash_loan_purge_7')), findsOneWidget);
+
+    // 恢复。
+    await tester.tap(find.byKey(const Key('trash_loan_restore_7')));
+    await tester.pumpAndSettle();
+    expect(repo.restoreLoanCalls, 1);
+
+    // 彻底删除（二次确认）。
+    await tester.tap(find.byKey(const Key('trash_loan_purge_7')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('彻底删除').last);
+    await tester.pumpAndSettle();
+    expect(repo.purgeLoanCalls, 1);
+  });
+
+
+  // ---- V3.8 回收站：已删除的借出记录 ----
+
+  testWidgets('V3.8 回收站：已删除的借出记录可恢复、可彻底删除',
+      (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    repo.deletedLoans.add(Loan(
+      id: 7,
+      itemId: 1,
+      itemName: '梯子',
+      borrowerName: '张三',
+      quantity: 2,
+      borrowedAt: 1000,
+      dueAt: 1000 + 3 * 86400000,
+      isDeleted: true,
+      deletedAt: 2000,
+    ));
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    await tester.tap(find.byKey(const Key('trash_entry')));
+    await tester.pumpAndSettle();
+
+    // 有已删借出记录时不再是空态。
+    expect(find.text('回收站为空'), findsNothing);
+    expect(find.byKey(const Key('trash_loan_7')), findsOneWidget);
+    expect(find.textContaining('借给：张三'), findsOneWidget);
+    expect(find.byKey(const Key('trash_loan_restore_7')), findsOneWidget);
+    expect(find.byKey(const Key('trash_loan_purge_7')), findsOneWidget);
+
+    // 恢复。
+    await tester.tap(find.byKey(const Key('trash_loan_restore_7')));
+    await tester.pumpAndSettle();
+    expect(repo.restoreLoanCalls, 1);
+
+    // 彻底删除（二次确认）。
+    await tester.tap(find.byKey(const Key('trash_loan_purge_7')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('彻底删除').last);
+    await tester.pumpAndSettle();
+    expect(repo.purgeLoanCalls, 1);
   });
 
   // ---- V3.6 回收站 / 左滑 / Excel ----

@@ -18,6 +18,53 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   int _locationId = 0;
   int _itemId = 0;
 
+  // V3.7 缺陷修复回归：借出/归还内存实现，供首页「说一句」端到端断言。
+  // 类自身方法优先于 FakeLoanMixin，不影响其他测试文件共用的 mixin。
+  final List<Loan> _loans = <Loan>[];
+  int _loanId = 0;
+
+  @override
+  Future<Loan> lendItem(String itemName, String borrowerName,
+      {int quantity = 1, int? days}) async {
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final loan = Loan(
+      id: ++_loanId,
+      itemId: 0,
+      itemName: normalizeName(itemName),
+      borrowerName: normalizeName(borrowerName),
+      quantity: quantity,
+      borrowedAt: now,
+      dueAt: now + (days ?? InventoryDatabase.defaultLoanDays) * 86400000,
+    );
+    _loans.add(loan);
+    return loan;
+  }
+
+  @override
+  Future<List<Loan>> getAllLoans() async =>
+      List<Loan>.unmodifiable(_loans.reversed);
+
+  @override
+  Future<void> returnLoan(int loanId, {int? quantity}) async {
+    final idx = _loans.indexWhere((l) => l.id == loanId);
+    if (idx < 0) return;
+    final old = _loans[idx];
+    final returned = quantity ?? (old.quantity - old.returnedQty);
+    final total = old.returnedQty + returned;
+    _loans[idx] = Loan(
+      id: old.id,
+      itemId: old.itemId,
+      itemName: old.itemName,
+      borrowerName: old.borrowerName,
+      quantity: old.quantity,
+      returnedQty: total,
+      borrowedAt: old.borrowedAt,
+      dueAt: old.dueAt,
+      returnedAt: total >= old.quantity ? 1 : null,
+      isPartial: total > 0 && total < old.quantity,
+    );
+  }
+
   @override
   Future<List<Location>> getAllLocations() async =>
       List<Location>.unmodifiable(_locations);
@@ -1049,5 +1096,79 @@ void main() {
     await settle(tester);
     expect(find.byKey(const Key('intent_confirm_dialog')), findsNothing);
     expect(find.textContaining('没听懂'), findsOneWidget);
+  });
+
+  // =========== 缺陷修复：语音借出/归还端到端落库 ===========
+  testWidgets('修复：说「借给张三1个梯子」直接借出落库（数量1）',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三1个梯子');
+    await settle(tester);
+
+    final loans = await repo.getAllLoans();
+    expect(loans, hasLength(1), reason: '说一句应直接落库，无需进借出页手填');
+    expect(loans.first.itemName, '梯子');
+    expect(loans.first.borrowerName, '张三');
+    expect(loans.first.quantity, 1);
+    expect(find.byKey(const Key('notice')), findsOneWidget);
+    expect(find.textContaining('已借出：梯子 → 张三'), findsOneWidget);
+  });
+
+  testWidgets('修复：说「借给张三2个梯子」数量2落库', (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三2个梯子');
+    await settle(tester);
+
+    final loans = await repo.getAllLoans();
+    expect(loans, hasLength(1));
+    expect(loans.first.quantity, 2);
+  });
+
+  testWidgets('修复：说「还了1个梯子」部分归还落库（剩余数量正确）',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三2个梯子');
+    await settle(tester);
+    await submit(tester, '还了1个梯子');
+    await settle(tester);
+
+    final loans = await repo.getAllLoans();
+    expect(loans, hasLength(1));
+    expect(loans.first.returnedQty, 1, reason: '部分归还累加到原记录');
+    expect(loans.first.quantity - loans.first.returnedQty, 1);
+    // 元宝批复补充①③：反馈带借阅人 + 剩余数量，与借出文案对称。
+    expect(find.textContaining('已归还：梯子 → 张三（1 个 · 还剩 1 个）'),
+        findsOneWidget);
+  });
+
+  testWidgets('修复：没有借出记录时说「还了梯子」给明确提示、不误判没听懂',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '还了梯子');
+    await settle(tester);
+
+    expect(find.textContaining('没有借出的梯子可还'), findsOneWidget);
+    expect((await repo.getAllLoans()), isEmpty);
+  });
+
+  testWidgets('修复：同物品借给多人，说「还了1个梯子」按 FIFO 扣最早借出的张三、李四未动',
+      (tester) async {
+    await pumpApp(tester);
+    await submit(tester, '借给张三1个梯子'); // 先借出（FIFO 队首）
+    await settle(tester);
+    await submit(tester, '借给李四1个梯子'); // 后借出
+    await settle(tester);
+    await submit(tester, '还了1个梯子');
+    await settle(tester);
+
+    final loans = await repo.getAllLoans();
+    expect(loans, hasLength(2));
+    final zhang = loans.firstWhere((l) => l.borrowerName == '张三');
+    final li = loans.firstWhere((l) => l.borrowerName == '李四');
+    expect(zhang.returnedQty, 1, reason: 'FIFO 命中最早借出的张三那笔');
+    expect(li.returnedQty, 0, reason: '李四那笔完全未动');
+    // 反馈必须点名借阅人，不能静默替用户选人。
+    expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
+    expect(find.textContaining('李四'), findsNothing);
   });
 }

@@ -2,8 +2,10 @@
 // Flutter 3.50 将 material.dart 标记为 deprecated，Material 组件本版本仍可用。
 import 'package:flutter/material.dart';
 
+import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
+import '../data/normalize.dart';
 import '../data/phrase_parser.dart';
 import 'backup_page.dart';
 import 'item_list_page.dart';
@@ -101,6 +103,12 @@ class _HomePageState extends State<HomePage> {
         await _handleQuery(parsed.item);
       } else if (parsed is ParseUpsert) {
         await _handleUpsert(parsed.item, parsed.location, rawText);
+      } else if (parsed is ParseLend) {
+        // V3.7 缺陷修复：说一句「借给张三1个梯子」直接落库，
+        // 不必再进借出管理页手填三项（解析器早就能识别，缺的是落库分支）。
+        await _handleLend(parsed);
+      } else if (parsed is ParseReturn) {
+        await _handleReturn(parsed);
       }
       if (!mounted) return;
       _phraseController.clear();
@@ -183,6 +191,64 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _busy = false;
       _notice = notice;
+      _result = null;
+    });
+  }
+
+  /// V3.7 缺陷修复：语音借出落库。
+  /// 「借给张三1个梯子」→ lendItem，默认借期 3 天（解析器未给 days 时用默认）。
+  Future<void> _handleLend(ParseLend parsed) async {
+    final loan = await widget.repository.lendItem(
+      parsed.item,
+      parsed.borrower,
+      quantity: parsed.quantity,
+      days: parsed.days,
+    );
+    if (!mounted) return;
+    final days = parsed.days ?? InventoryDatabase.defaultLoanDays;
+    setState(() {
+      _busy = false;
+      _notice = '已借出：${loan.itemName} → ${loan.borrowerName}'
+          '（${loan.quantity} 个 · $days 天）';
+      _result = null;
+    });
+  }
+
+  /// V3.7 缺陷修复：语音归还落库。
+  /// 「还了1个梯子」→ 按物品名找最早一笔未还清的借出记录归还。
+  /// 同一物品借给多人时无法从句子判定借阅人，取未还清中最早借出的一笔（FIFO）。
+  Future<void> _handleReturn(ParseReturn parsed) async {
+    final loans = await widget.repository.getAllLoans();
+    if (!mounted) return;
+    final key = normalizeName(parsed.item);
+    // getAllLoans 按借出时间倒序，lastWhere 即最早借出的一笔。
+    Loan? target;
+    for (final loan in loans) {
+      if (loan.itemName == key && !loan.isReturned) target = loan;
+    }
+    if (target == null) {
+      setState(() {
+        _busy = false;
+        _notice = '没有借出的${parsed.item}可还。';
+        _result = null;
+      });
+      return;
+    }
+    // 取非空局部变量：target 在闭包中无法做空安全提升。
+    final Loan hit = target;
+    await widget.repository.returnLoan(hit.id!, quantity: parsed.quantity);
+    if (!mounted) return;
+    // 本次归还量：给定值=部分归还；未给=把该笔剩余一次还清。
+    final qty = parsed.quantity ?? hit.quantity - hit.returnedQty;
+    // 该笔借出归还后的剩余（基于归还前快照计算，含 0=已还清）。
+    final remaining = hit.quantity - hit.returnedQty - qty;
+    final left = remaining < 0 ? 0 : remaining;
+    setState(() {
+      _busy = false;
+      // 元宝批复补充①③：反馈必须带借阅人（FIFO 命中谁一目了然，
+      // 避免用户以为还的是李四、实际扣了张三账），且与借出文案对称。
+      _notice = '已归还：${hit.itemName} → ${hit.borrowerName}'
+          '（$qty 个 · 还剩 $left 个）';
       _result = null;
     });
   }

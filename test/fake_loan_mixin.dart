@@ -34,4 +34,24 @@ mixin FakeLoanMixin {
   Future<void> restoreLoan(int id) async {}
 
   Future<void> purgeLoan(int id) async {}
+
+  // ---------- V3.10 数量打通 ----------
+  //
+  // 注意：Dart 的 `implements` **不继承接口的默认实现**，测试假仓储必须
+  // 自己提供这些方法（或经本 mixin 补齐），否则调用会挂住/抛错。
+  Future<QuantityInfo> getQuantityInfo(String itemName) async =>
+      const QuantityInfo(stock: 0, lent: 0, available: 0);
+
+  Future<Map<int, QuantityInfo>> getAllQuantityInfo() async =>
+      const <int, QuantityInfo>{};
+
+  Future<CalibrationReport> calibrateQuantities({
+    Map<int, int> totals = const <int, int>{},
+  }) async =>
+      const CalibrationReport(changedCount: 0);
+
+  /// V3.10：只改数量、不动位置。默认桩实现返回 0（不改任何东西）。
+  Future<int> setItemQuantity(String itemName, int quantity,
+          {bool additive = false}) async =>
+      0;
 }

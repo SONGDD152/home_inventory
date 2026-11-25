@@ -27,10 +27,35 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   Future<Loan> lendItem(String itemName, String borrowerName,
       {int quantity = 1, int? days}) async {
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final key = normalizeName(itemName);
+    // V3.10：与生产一致——物品必须已存在（PM 拍板④），借出扣减在库数。
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      throw ArgumentError.value(
+        itemName,
+        'itemName',
+        '还没记录过「$key」，先说一句「$key放阳台」再借',
+      );
+    }
+    final itemId = hit.id!;
+    final lent = _outstandingLent(itemId);
+    // V3.10：在库数 = items.quantity（借出即扣、归还即加），可借数 = 在库数。
+    final stock = hit.quantity;
+    final available = stock;
+    if (quantity > available) {
+      throw ArgumentError.value(
+        quantity,
+        'quantity',
+        stock <= 0
+            ? '「$key」家里已经没有可借的了（$lent 个都借出去了），先记着家里还有几个再借'
+            : '家里只有$stock个「$key」，可借$available个',
+      );
+    }
+    _setQuantity(itemId, stock - quantity);
     final loan = Loan(
       id: ++_loanId,
-      itemId: 0,
-      itemName: normalizeName(itemName),
+      itemId: itemId,
+      itemName: key,
       borrowerName: normalizeName(borrowerName),
       quantity: quantity,
       borrowedAt: now,
@@ -38,6 +63,19 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     );
     _loans.add(loan);
     return loan;
+  }
+
+  /// V3.10：设置物品在库数。
+  void _setQuantity(int itemId, int qty) {
+    final idx = _items.indexWhere((i) => i.id == itemId);
+    if (idx < 0) return;
+    _items[idx] = Item(
+      id: _items[idx].id,
+      name: _items[idx].name,
+      createdAt: _items[idx].createdAt,
+      updatedAt: _items[idx].updatedAt,
+      quantity: qty,
+    );
   }
 
   @override
@@ -63,6 +101,13 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       returnedAt: total >= old.quantity ? 1 : null,
       isPartial: total > 0 && total < old.quantity,
     );
+    // V3.10：归还加回在库数（与借出严格对称）。
+    if (old.itemId != 0) {
+      final cur = _items.where((i) => i.id == old.itemId).firstOrNull;
+      if (cur != null) {
+        _setQuantity(old.itemId, cur.quantity + returned);
+      }
+    }
   }
 
   @override
@@ -287,7 +332,7 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
 
   @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
-      {String? rawText}) async {
+      {String? rawText, int? quantity, bool additive = false}) async {
     final key = normalizeName(itemName);
     // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
     // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
@@ -298,6 +343,9 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       _items.add(Item(id: itemId, name: key, createdAt: 1, updatedAt: 1));
     } else {
       itemId = item.first.id!;
+    }
+    if (quantity != null) {
+      _applyQuantity(itemId, quantity, additive);
     }
     final exists = _links.any(
       (l) => l.itemId == itemId && l.locationId == locationId,
@@ -317,9 +365,117 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     return UpsertResult(itemId: itemId, locationId: locationId, created: true);
   }
 
+  /// V3.10：数量写入（覆盖 / 累加），语义与生产一致。
+  void _applyQuantity(int itemId, int quantity, bool additive) {
+    final idx = _items.indexWhere((i) => i.id == itemId);
+    if (idx < 0) return;
+    final cur = _items[idx].quantity;
+    // V3.10：累加以当前在库数为基准，不再拿在借数兜底。
+    final newQty = additive ? cur + quantity : quantity;
+    _items[idx] = Item(
+      id: _items[idx].id,
+      name: _items[idx].name,
+      createdAt: _items[idx].createdAt,
+      updatedAt: _items[idx].updatedAt,
+      quantity: newQty,
+    );
+  }
+
+  /// V3.10：只改数量、不动位置（与生产一致）。
+  @override
+  Future<int> setItemQuantity(String itemName, int quantity,
+      {bool additive = false}) async {
+    final key = normalizeName(itemName);
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      throw ArgumentError.value(
+        key,
+        'itemName',
+        '还没记录过「$key」，先说一句「$key放阳台」再记数量',
+      );
+    }
+    _applyQuantity(hit.id!, quantity, additive);
+    return _items
+        .firstWhere((i) => i.id == hit.id)
+        .quantity;
+  }
+
+  /// V3.10：该物品未归还的借出总数。
+  int _outstandingLent(int itemId) {
+    var total = 0;
+    for (final loan in _loans) {
+      if (loan.itemId != itemId) continue;
+      if (loan.isDeleted) continue;
+      if (loan.returnedQty >= loan.quantity) continue;
+      total += loan.quantity - loan.returnedQty;
+    }
+    return total;
+  }
+
+  @override
+  Future<QuantityInfo> getQuantityInfo(String itemName) async {
+    final key = normalizeName(itemName);
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      return const QuantityInfo(stock: 0, lent: 0, available: 0);
+    }
+    final lent = _outstandingLent(hit.id!);
+    final stock = hit.quantity;
+    return QuantityInfo(stock: stock, lent: lent, available: stock);
+  }
+
+  @override
+  Future<Map<int, QuantityInfo>> getAllQuantityInfo() async {
+    final result = <int, QuantityInfo>{};
+    for (final item in _items.where((i) => !i.isDeleted)) {
+      final lent = _outstandingLent(item.id!);
+      final stock = item.quantity;
+      result[item.id!] = QuantityInfo(
+        stock: stock,
+        lent: lent,
+        available: stock,
+      );
+    }
+    return result;
+  }
+
+  @override
+  Future<CalibrationReport> calibrateQuantities({
+    Map<int, int> totals = const <int, int>{},
+  }) async {
+    // 与生产一致：输入「家里一共几个」，写入在库数 = 总数 − 在借数。
+    var changed = 0;
+    final details = <String>[];
+    for (var idx = 0; idx < _items.length; idx++) {
+      final item = _items[idx];
+      if (item.isDeleted) continue;
+      final counted = totals[item.id!];
+      if (counted == null) continue;
+      final lent = _outstandingLent(item.id!);
+      if (counted < lent) {
+        details.add('${item.name}：清点 $counted 个，比在借的 $lent 个还少，已跳过');
+        continue;
+      }
+      final newStock = counted - lent;
+      if (newStock != item.quantity) {
+        _items[idx] = Item(
+          id: item.id,
+          name: item.name,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+          quantity: newStock,
+        );
+        changed++;
+        details.add('${item.name}：共 $counted 个 − 在借 $lent 个 → 在库 $newStock 个'
+            '（原记录 ${item.quantity} 个）');
+      }
+    }
+    return CalibrationReport(changedCount: changed, details: details);
+  }
+
   @override
   Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText}) async {
+      {String? rawText, int? quantity, bool additive = false}) async {
     final key = normalizeName(itemName);
     // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
     // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
@@ -330,6 +486,18 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       _items.add(Item(id: itemId, name: key, createdAt: 1, updatedAt: 1));
     } else {
       itemId = item.first.id!;
+    }
+    // V3.10：数量写入（覆盖 / 累加），语义与生产一致。
+    var quantityChanged = false;
+    var finalQuantity = 1;
+    if (quantity != null) {
+      final before = _readStock(itemId);
+      _applyQuantity(itemId, quantity, additive);
+      final after = _readStock(itemId);
+      finalQuantity = after;
+      quantityChanged = after != before;
+    } else {
+      finalQuantity = _readStock(itemId);
     }
     // 挪位前其他位置名（软删语义在真实库覆盖；内存仓储同步移除）。
     final previous = _links
@@ -360,7 +528,17 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       locationId: locationId,
       created: !targetExists,
       previousLocations: previous,
+      quantity: finalQuantity,
+      quantityChanged: quantityChanged,
     );
+  }
+
+  /// V3.10：读某件物品的当前在库数（存量兜底口径）。
+  int _readStock(int itemId) {
+    final hit = _items.where((i) => i.id == itemId).firstOrNull;
+    if (hit == null) return 0;
+    final lent = _outstandingLent(itemId);
+    return hit.quantity > lent ? hit.quantity : lent;
   }
 
   @override
@@ -1175,6 +1353,9 @@ void main() {
   testWidgets('修复：说「借给张三1个梯子」直接借出落库（数量1）',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三1个梯子');
     await settle(tester);
 
@@ -1189,6 +1370,9 @@ void main() {
 
   testWidgets('修复：说「借给张三2个梯子」数量2落库', (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '3个梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三2个梯子');
     await settle(tester);
 
@@ -1200,6 +1384,9 @@ void main() {
   testWidgets('修复：说「还了1个梯子」部分归还落库（剩余数量正确）',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '3个梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三2个梯子');
     await settle(tester);
     await submit(tester, '还了1个梯子');
@@ -1217,6 +1404,9 @@ void main() {
   testWidgets('修复：没有借出记录时说「还了梯子」给明确提示、不误判没听懂',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '梯子放阳台');
+    await settle(tester);
     await submit(tester, '还了梯子');
     await settle(tester);
 
@@ -1227,6 +1417,9 @@ void main() {
   testWidgets('修复：同物品借给多人，说「还了1个梯子」弹候选问是谁还的（不再静默 FIFO）',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '2个梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三1个梯子'); // 先借出
     await settle(tester);
     await submit(tester, '借给李四1个梯子'); // 后借出
@@ -1256,6 +1449,9 @@ void main() {
   testWidgets('V3.8：说「张三还了1个梯子」指名到人，直接扣张三那笔、不弹候选',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '2个梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三1个梯子');
     await settle(tester);
     await submit(tester, '借给李四1个梯子');
@@ -1276,6 +1472,9 @@ void main() {
   testWidgets('V3.8：说「还了1个梯子给张三」指名到人，直接扣张三那笔',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '2个梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三1个梯子');
     await settle(tester);
     await submit(tester, '借给李四1个梯子');
@@ -1292,6 +1491,9 @@ void main() {
   testWidgets('V3.8：指名的人没借这笔 → 提示真实候选，不静默记到别人头上',
       (tester) async {
     await pumpApp(tester);
+    // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+    await submit(tester, '梯子放阳台');
+    await settle(tester);
     await submit(tester, '借给张三1个梯子');
     await settle(tester);
     await submit(tester, '王五还了1个梯子');
@@ -1339,6 +1541,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子废弃了');
       await tester.pumpAndSettle();
       // 必须先弹确认，不直接落库。
@@ -1361,6 +1566,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子废弃了');
       await tester.pumpAndSettle();
       // 确认框要明说会先自动归还给谁。
@@ -1417,10 +1625,14 @@ void main() {
     });
 
     testWidgets('改借期：二次确认后按新天数改到期日', (tester) async {
-      await repo.lendItem('梯子', '张三');
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
+      await repo.lendItem('梯子', '张三');
+      await settle(tester);
       await submit(tester, '梯子借期改成5天');
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
@@ -1434,8 +1646,13 @@ void main() {
     });
 
     testWidgets('改借期：「再借3天」是在当前借期上追加', (tester) async {
-      await repo.lendItem('梯子', '张三');
       await pumpApp(tester);
+      await settle(tester);
+
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
+      await repo.lendItem('梯子', '张三');
       await settle(tester);
 
       await submit(tester, '梯子再借3天');
@@ -1451,9 +1668,14 @@ void main() {
 
     testWidgets('改借期：已还清的记录改不了，如实提示（元宝补充③）',
         (tester) async {
+      await pumpApp(tester);
+      await settle(tester);
+
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       final loan = await repo.lendItem('梯子', '张三');
       await repo.returnLoan(loan.id!);
-      await pumpApp(tester);
       await settle(tester);
 
       await submit(tester, '梯子借期改成5天');
@@ -1463,9 +1685,14 @@ void main() {
 
     testWidgets('改借期：多笔未还清时弹候选让用户点，不静默 FIFO',
         (tester) async {
+      await pumpApp(tester);
+      await settle(tester);
+
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '2个梯子放阳台');
+      await settle(tester);
       await repo.lendItem('梯子', '张三');
       await repo.lendItem('梯子', '李四');
-      await pumpApp(tester);
       await settle(tester);
 
       await submit(tester, '梯子借期改成5天');
@@ -1490,6 +1717,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子不要了放阳台');
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('ambiguous_dialog')), findsOneWidget);
@@ -1511,6 +1741,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子不要了放阳台');
       await tester.pumpAndSettle();
       await tester.tap(find.text('把「梯子」转入回收站（废弃）'));
@@ -1528,6 +1761,7 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // 注意：本用例刻意**不录入**梯子——选「废弃」时物品查不到，应如实说没有找到。
       await submit(tester, '梯子不要了放阳台');
       await tester.pumpAndSettle();
       await tester.tap(find.text('把「梯子」转入回收站（废弃）'));
@@ -1570,6 +1804,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '借给张三的梯子废弃了');
       await tester.pumpAndSettle();
 
@@ -1589,6 +1826,9 @@ void main() {
     });
 
     testWidgets('改借期：单笔在借时说改借期直接改，不弹候选', (tester) async {
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', loc);
       await repo.lendItem('梯子', '张三');
       await pumpApp(tester);
       await settle(tester);
@@ -1607,6 +1847,9 @@ void main() {
     testWidgets('改借期：历史脏名「梯子借」的记录也能被说「梯子」找到',
         (tester) async {
       // 复刻 PM 真机脏数据：V3.9 之前说「梯子借给张三」会建成「梯子借」。
+      // V3.10（PM 拍板④）：借出前物品必须已录入。
+      final loc = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子借', loc);
       await repo.lendItem('梯子借', '张三');
       await pumpApp(tester);
       await settle(tester);
@@ -1631,6 +1874,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子废弃了');
       await tester.pumpAndSettle();
       expect(find.textContaining('现在借给张三'), findsOneWidget);
@@ -1652,6 +1898,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '梯子废弃了');
       await tester.pumpAndSettle();
       expect(find.textContaining('同一件东西'), findsWidgets);
@@ -1672,7 +1921,8 @@ void main() {
     testWidgets('指名王五废弃：只归还王五那一笔，李四张三保持原样',
         (tester) async {
       final loc = await repo.addLocation('阳台');
-      await repo.upsertItemLocation('梯子', loc);
+      // V3.10：三个人各借 1 个，库存必须够 3 个。
+      await repo.upsertItemLocation('梯子', loc, quantity: 3);
       await repo.lendItem('梯子', '张三');
       await repo.lendItem('梯子', '李四');
       await repo.lendItem('梯子', '王五');
@@ -1701,7 +1951,7 @@ void main() {
 
     testWidgets('指名废弃：确认框写明其余在借记录不动', (tester) async {
       final loc = await repo.addLocation('阳台');
-      await repo.upsertItemLocation('梯子', loc);
+      await repo.upsertItemLocation('梯子', loc, quantity: 2);
       await repo.lendItem('梯子', '张三');
       await repo.lendItem('梯子', '王五');
       await pumpApp(tester);
@@ -1721,6 +1971,9 @@ void main() {
       await pumpApp(tester);
       await settle(tester);
 
+      // V3.10（PM 拍板④）：没记录过的东西不能借出——先录入再借。
+      await submit(tester, '梯子放阳台');
+      await settle(tester);
       await submit(tester, '借给王五的梯子废弃了');
       await settle(tester);
 
@@ -1733,7 +1986,7 @@ void main() {
     testWidgets('没指名时仍是全量归还（PM V3.9 拍板口径不变）',
         (tester) async {
       final loc = await repo.addLocation('阳台');
-      await repo.upsertItemLocation('梯子', loc);
+      await repo.upsertItemLocation('梯子', loc, quantity: 2);
       await repo.lendItem('梯子', '张三');
       await repo.lendItem('梯子', '王五');
       await pumpApp(tester);
@@ -1755,7 +2008,7 @@ void main() {
     testWidgets('指名同一人多笔在借：弹候选问是哪一笔，不替用户猜',
         (tester) async {
       final loc = await repo.addLocation('阳台');
-      await repo.upsertItemLocation('梯子', loc);
+      await repo.upsertItemLocation('梯子', loc, quantity: 2);
       await repo.lendItem('梯子', '王五');
       await repo.lendItem('梯子', '王五');
       await pumpApp(tester);

@@ -8,6 +8,7 @@ import '../data/item.dart';
 import '../data/normalize.dart';
 import '../data/phrase_parser.dart';
 import 'backup_page.dart';
+import 'calibration_page.dart';
 import 'item_list_page.dart';
 import 'location_list_page.dart';
 import 'loan_list_page.dart';
@@ -102,7 +103,7 @@ class _HomePageState extends State<HomePage> {
       if (parsed is ParseQuery) {
         await _handleQuery(parsed.item);
       } else if (parsed is ParseUpsert) {
-        await _handleUpsert(parsed.item, parsed.location, rawText);
+        await _handleUpsert(parsed, rawText);
       } else if (parsed is ParseLend) {
         // V3.7 缺陷修复：说一句「借给张三1个梯子」直接落库，
         // 不必再进借出管理页手填三项（解析器早就能识别，缺的是落库分支）。
@@ -181,13 +182,31 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 挪位语义（V3.2）：同一物品再记新位置 = 移动，旧位置软删。
-  Future<void> _handleUpsert(String item, String location, String rawText) async {
+  ///
+  /// V3.10：贯通数量。
+  ///  * [quantity] = 本次说的数量（覆盖 or 累加，由 [additive] 决定）。
+  ///  * 无位置（累加语义「又多了2个梯子」）：**只改数量、不挪位**，
+  ///    沿用物品原有位置关联。
+  Future<void> _handleUpsert(ParseUpsert parsed, String rawText) async {
+    final item = parsed.item;
+    final location = parsed.location;
+    final quantity = parsed.quantity;
+    final additive = parsed.additive;
+
+    // V3.10：无位置的累加表述——东西已经在某处，只加数量，不挪位。
+    if (!parsed.hasLocation) {
+      await _handleQuantityOnly(item, quantity, additive);
+      return;
+    }
+
     final locationId = await widget.repository.addLocation(location);
     if (!mounted) return;
     final result = await widget.repository.moveItem(
       item,
       locationId,
       rawText: rawText,
+      quantity: quantity,
+      additive: additive,
     );
     if (!mounted) return;
     final nameInDb = await _locationName(locationId);
@@ -200,6 +219,10 @@ class _HomePageState extends State<HomePage> {
     } else {
       notice = _alreadyRecorded(item, nameInDb);
     }
+    // V3.10：数量回显——说清现在家里有几个。
+    if (quantity > 1 || result.quantityChanged) {
+      notice = '$notice（现在 ${result.quantity} 个）';
+    }
     setState(() {
       _busy = false;
       _notice = notice;
@@ -207,25 +230,93 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  /// V3.7 缺陷修复：语音借出落库。
-  /// 「借给张三1个梯子」→ lendItem，默认借期 3 天（解析器未给 days 时用默认）。
-  Future<void> _handleLend(ParseLend parsed) async {
-    final loan = await widget.repository.lendItem(
-      parsed.item,
-      parsed.borrower,
-      quantity: parsed.quantity,
-      days: parsed.days,
-    );
+  /// V3.10：只改数量、不挪位（句子里只有数量，没有位置）。
+  ///
+  /// 物品必须已经存在——没记录过的东西不能凭空出现。
+  Future<void> _handleQuantityOnly(
+      String item, int quantity, bool additive) async {
+    final info = await widget.repository.getQuantityInfo(item);
     if (!mounted) return;
-    final days = parsed.days ?? InventoryDatabase.defaultLoanDays;
-    final where = await _itemLocationSuffix(loan.itemName);
+    final exists = await widget.repository.findByName(item);
+    if (!mounted) return;
+    if (exists == null) {
+      setState(() {
+        _busy = false;
+        _notice = '还没记录过「$item」，先说一句「$item放阳台」再记数量。';
+        _result = null;
+      });
+      return;
+    }
+    // 覆盖语义且不说「再/又」时，这是"纠正数量"。
+    final newStock = additive ? info.stock + quantity : quantity;
+    if (!additive && newStock == info.stock) {
+      setState(() {
+        _busy = false;
+        _notice = '「$item」现在是 ${info.stock} 个，没变化。';
+        _result = null;
+      });
+      return;
+    }
+    // 只改数量、不动位置——不能走 moveItem（那是挪位语义，
+    // 会把物品的其他位置关联一并软删）。
+    try {
+      await widget.repository.setItemQuantity(item, newStock);
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = e.message is String ? e.message : '记数量失败了。';
+        _result = null;
+      });
+      return;
+    }
     if (!mounted) return;
     setState(() {
       _busy = false;
-      _notice = '已借出：${loan.itemName} → ${loan.borrowerName}'
-          '（${loan.quantity} 个 · $days 天）$where';
+      _notice = additive
+          ? '「$item」又添了 $quantity 个，现在是 ${info.stock + quantity} 个。'
+          : '「$item」数量改成 $quantity 个。';
       _result = null;
     });
+  }
+
+  /// V3.7 缺陷修复：语音借出落库。
+  /// 「借给张三1个梯子」→ lendItem，默认借期 3 天（解析器未给 days 时用默认）。
+  ///
+  /// V3.10（PM 拍板②）：借出数量超过实有的**拦截**并给出中文提示
+  /// 「家里只有N个，可借M个」，不允许记负数。
+  /// 拍板④：没记录过的东西不能直接借出，引导先录入。
+  Future<void> _handleLend(ParseLend parsed) async {
+    try {
+      final loan = await widget.repository.lendItem(
+        parsed.item,
+        parsed.borrower,
+        quantity: parsed.quantity,
+        days: parsed.days,
+      );
+      if (!mounted) return;
+      final days = parsed.days ?? InventoryDatabase.defaultLoanDays;
+      final where = await _itemLocationSuffix(loan.itemName);
+      if (!mounted) return;
+      // V3.10：回显剩余可借数，用户能立刻知道账面对不对。
+      final info = await widget.repository.getQuantityInfo(loan.itemName);
+      if (!mounted) return;
+      final rest = info.available > 0 ? '，还剩 ${info.available} 个在家' : '';
+      setState(() {
+        _busy = false;
+        _notice = '已借出：${loan.itemName} → ${loan.borrowerName}'
+            '（${loan.quantity} 个 · $days 天）$where$rest';
+        _result = null;
+      });
+    } on ArgumentError catch (e) {
+      // V3.10：借超 / 没记录过 —— 用友好中文说明，不弹技术错误。
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = e.message is String ? e.message : '借出没成功，什么都没改。';
+        _result = null;
+      });
+    }
   }
 
   /// 物品当前位置标签（V3.8）。
@@ -320,12 +411,16 @@ class _HomePageState extends State<HomePage> {
     // V3.8：反馈带位置标签——PM 真机反馈「归还的物品没有位置标签」。
     final where = await _itemLocationSuffix(hit.itemName);
     if (!mounted) return;
+    // V3.10：归还后家里有几个（账实对齐的直观体现）。
+    final info = await widget.repository.getQuantityInfo(hit.itemName);
+    if (!mounted) return;
+    final stockText = '，家里现在 ${info.stock} 个';
     setState(() {
       _busy = false;
       // 元宝批复补充①③：反馈必须带借阅人（FIFO 命中谁一目了然，
       // 避免用户以为还的是李四、实际扣了张三账），且与借出文案对称。
       _notice = '已归还：${hit.itemName} → ${hit.borrowerName}'
-          '（$qty 个 · 还剩 $left 个）$where';
+          '（$qty 个 · 还剩 $left 个）$where$stockText';
       _result = null;
     });
   }
@@ -860,7 +955,7 @@ class _HomePageState extends State<HomePage> {
     if (picked is ParseDiscard) {
       await _handleDiscard(picked);
     } else if (picked is ParseUpsert) {
-      await _handleUpsert(picked.item, picked.location, '');
+      await _handleUpsert(picked, '');
     } else if (picked is ParseRestore) {
       await _handleRestore(picked);
     } else {
@@ -928,6 +1023,24 @@ class _HomePageState extends State<HomePage> {
     Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => page),
     );
+  }
+
+  /// V3.10（PM 补充要求2）：打开「校准数量」清点页。
+  ///
+  /// 页面让用户照着实物清点「家里一共几个」，减掉借出去的在借数，
+  /// 写回真正的在库数——真实家底只存在于用户脑子里，App 算不出来。
+  /// 页面返回时带回结果文案，如实说明改了几件。
+  Future<void> _openCalibration() async {
+    final message = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => CalibrationPage(repository: widget.repository),
+      ),
+    );
+    if (!mounted || message == null) return;
+    setState(() {
+      _notice = message;
+      _result = null;
+    });
   }
 
   /// V3.5：底栏切换一级模块。抽屉若已打开，仅切换内容不重复弹动画；
@@ -1014,7 +1127,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           const SizedBox(height: 6),
-          _syntaxRow('放东西', '梯子放阳台'),
+          _syntaxRow('放东西', '梯子放阳台｜3个梯子放阳台｜再放2个梯子'),
           _syntaxRow('查东西', '梯子在哪'),
           _syntaxRow('借出', '借给张三2个梯子｜张三借走了2个梯子｜梯子被张三借走了'),
           _syntaxRow('归还', '张三还了1个梯子｜还了1个梯子给张三'),
@@ -1028,7 +1141,8 @@ class _HomePageState extends State<HomePage> {
           const Text(
             '借出/归还都建议带上人名；不说人名时，若同一件东西有多笔没还，'
             '会问你是谁还的。废弃/恢复/改借期会先弹确认框，点头才执行；'
-            '废弃带人名时只处理那一个人的账，别人的借出不动。',
+            '废弃带人名时只处理那一个人的账，别人的借出不动。'
+            '说「N个」是改数量，「再放N个」是再加N个。',
             style: TextStyle(fontSize: 12, color: Color(0xff607d8b)),
           ),
         ],
@@ -1144,6 +1258,20 @@ class _HomePageState extends State<HomePage> {
                 onTap: () {
                   Navigator.of(context).pop();
                   _push(LoanListPage(repository: widget.repository));
+                },
+              ),
+              // V3.10（PM 补充要求2）：「校准数量」工具入口。
+              // 老库的物品数量恒为 1（V3.7 引入后录入数量一直被丢弃），
+              // 与真实家底对不上；真实家底只在用户脑子里，所以让用户
+              // 照着实物清点「家里一共几个」，工具减掉在借数写回在库数。
+              ListTile(
+                key: const Key('drawer_calibrate'),
+                leading: const Icon(Icons.tune),
+                title: const Text('校准数量'),
+                subtitle: const Text('照实物清点，把数量改准'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _openCalibration();
                 },
               ),
             ] else ...<Widget>[

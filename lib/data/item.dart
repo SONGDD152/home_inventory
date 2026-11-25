@@ -23,6 +23,8 @@ class MoveResult {
     required this.locationId,
     required this.created,
     required this.previousLocations,
+    this.quantity = 1,
+    this.quantityChanged = false,
   });
 
   final int itemId;
@@ -35,6 +37,12 @@ class MoveResult {
   /// 挪位前物品所在的其他位置名（不含目标位置本身，已软删）。
   /// 空列表表示物品此前没有其他位置（等价于首次记录）。
   final List<String> previousLocations;
+
+  /// V3.10：本条指令生效后的在库数量（覆盖或累加之后）。
+  final int quantity;
+
+  /// V3.10：本次是否真的改动了数量（false=未带数量或值未变）。
+  final bool quantityChanged;
 }
 
 /// 物品记录（三张表结构）。
@@ -373,5 +381,60 @@ class RestoreOutcome {
 
   /// 合并后的总数量；仅 [merged] 为 true 时有意义。
   final int? totalQuantity;
+}
+
+/// V3.10 数量打通：一件物品的三个数量口径。
+///
+/// PM 2026-11-24 拍板采用**在库口径**（方案 A）：
+///  * [stock] = 家里现在有几个（借出即扣减、归还即加回）——权威值就是
+///    `items.quantity`
+///  * [lent] = 借出去还没还回来的有几个（从借出记录汇总，只作展示）
+///  * [available] = 现在还能借几个 = [stock]
+///
+/// **在借数不再从在库数里减一次**：在库数已经是扣过借出的净值，
+/// 再减一遍等于把同一批东西减两遍（V3.10 修掉的真 bug：
+/// 「录 3 个 → 借出 2 个」会被算成「可借 0 个」，明明还剩 1 个却借不出去）。
+///
+/// 存量兼容（不迁移、不改 schema，PM 拍板）：老库的 `items.quantity` 恒为 1
+/// （V3.7 引入后录入数量一直被丢弃），与真实家底对不上。这是已知取舍，
+/// 由「校准数量」工具按实物清点人工修正。
+class QuantityInfo {
+  const QuantityInfo({
+    required this.stock,
+    required this.lent,
+    required this.available,
+  });
+
+  /// 在库数（家里现在有几个）。
+  final int stock;
+
+  /// 未归还的借出总数。
+  final int lent;
+
+  /// 可借数（在库数），恒 ≥ 0。东西都在家，当然都能借。
+  final int available;
+
+  /// 总拥有数（家里一共几个）= 在库数 + 在借数。
+  /// 「校准数量」工具让用户清点这个数，再减去在借数得到在库数。
+  int get total => stock + lent;
+
+  /// 是否处于「借空」状态（在库数为 0）——明细页默认折叠这类物品。
+  bool get isLentOut => stock <= 0;
+}
+
+/// V3.10「校准数量」工具的执行结果（PM 2026-11-24 补充要求 2）。
+///
+/// 供 UI 如实回显：改了几件、每件从多少改成多少。
+class CalibrationReport {
+  const CalibrationReport({required this.changedCount, this.details = const []});
+
+  /// 被校正的物品件数。
+  final int changedCount;
+
+  /// 每件的校正明细，形如「梯子：1 → 3」。
+  final List<String> details;
+
+  /// 是否没有任何改动（已是账实对齐状态）。
+  bool get isNoop => changedCount == 0;
 }
 

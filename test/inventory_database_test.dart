@@ -49,6 +49,15 @@ void main() {
     return db.upsertItemLocation(item, locationId);
   }
 
+  /// V3.10（PM 拍板④）：**没录入过的物品不能直接借出**。
+  /// 借阅类测试因此要先造一件带数量的在库物品，否则 lendItem 会按新口径拦截。
+  /// 数量给足，避免触发「可借数不足」的拦截。
+  Future<UpsertResult> putStock(String item, int quantity,
+      {String location = '阳台'}) async {
+    final locationId = await db.addLocation(location);
+    return db.upsertItemLocation(item, locationId, quantity: quantity);
+  }
+
   // ---- 基础：空库 / 重开 ----
 
   test('空库查询：无物品、无位置、无关联', () async {
@@ -1398,6 +1407,7 @@ void main() {
     });
 
     test('借出默认 3 天；全部归还后 isReturned=true', () async {
+      await putStock('梯子', 1);
       final loan = await db.lendItem('梯子', '张三');
       expect(loan.quantity, 1);
       expect(loan.returnedQty, 0);
@@ -1412,6 +1422,7 @@ void main() {
     });
 
     test('部分归还：数量累加、isPartial=true、未还清不置 returnedAt', () async {
+      await putStock('梯子', 3);
       final loan = await db.lendItem('梯子', '张三', quantity: 3);
       await db.returnLoan(loan.id!, quantity: 1);
       var current = (await db.getAllLoans()).single;
@@ -1428,6 +1439,7 @@ void main() {
     });
 
     test('归还数量超未还量 → ArgumentError；已还完再还幂等', () async {
+      await putStock('梯子', 2);
       final loan = await db.lendItem('梯子', '张三', quantity: 2);
       await expectLater(db.returnLoan(loan.id!, quantity: 3),
           throwsA(isA<ArgumentError>()));
@@ -1437,6 +1449,7 @@ void main() {
     });
 
     test('改借期从借出时刻起算；逾期判定 isOverdue(now)', () async {
+      await putStock('梯子', 1);
       final loan = await db.lendItem('梯子', '张三', days: 1);
       await db.updateLoanDue(loan.id!, 5);
       final updated = (await db.getAllLoans()).single;
@@ -1446,6 +1459,8 @@ void main() {
     });
 
     test('借阅人去重：同名借出复用一行；软删后历史 loan 名字快照仍在', () async {
+      await putStock('梯子', 1);
+      await putStock('充电器', 1);
       await db.lendItem('梯子', '张三');
       await db.lendItem('充电器', '张三');
       expect(await db.getActiveBorrowers(), hasLength(1));
@@ -1460,7 +1475,7 @@ void main() {
     });
 
     test('借出备份往返：导出含借出两表，恢复后借还状态保真', () async {
-      await put('梯子', '阳台');
+      await putStock('梯子', 2);
       final loan = await db.lendItem('梯子', '张三', quantity: 2, days: 7);
       await db.returnLoan(loan.id!, quantity: 1);
       final backup = await db.exportBackup();
@@ -1586,6 +1601,7 @@ void main() {
     });
 
     test('删除→恢复→彻底删除：借出记录进出回收站，活跃列表不再挂它', () async {
+      await putStock('梯子', 2);
       final loan = await db.lendItem('梯子', '张三', quantity: 2);
       final id = loan.id!;
 
@@ -1643,6 +1659,7 @@ void main() {
     });
 
     test('备份往返：已软删的借出记录导出→恢复后仍在回收站', () async {
+      await putStock('梯子', 1);
       final loan = await db.lendItem('梯子', '张三');
       await db.deleteLoan(loan.id!);
       final backup = await db.exportBackup();

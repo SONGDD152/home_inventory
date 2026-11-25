@@ -45,13 +45,20 @@ abstract class InventoryRepository {
   Future<void> deleteLocation(int id);
 
   /// V3：新增/命中一条物品-位置记录，可选保存原文 rawText。
+  ///
+  /// V3.10：新增 [quantity] 与 [additive]——
+  ///  * [quantity] 为 null = 不带数量，物品数量保持原样；
+  ///  * [additive] false = **覆盖**（PM 拍板③）；true = **累加**（补充要求1）。
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
-      {String? rawText});
+      {String? rawText, int? quantity, bool additive = false});
 
   /// 挪位语义（V3.2，UI 主链路）：把物品记到新位置并软删其他位置关联，
   /// 详见 [InventoryDatabase.moveItem]。
+  ///
+  /// V3.10：新增 [quantity] 与 [additive]（覆盖 / 累加），语义同
+  /// [upsertItemLocation]。
   Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText});
+      {String? rawText, int? quantity, bool additive = false});
 
   Future<ItemWithLocations?> findByName(String name);
 
@@ -102,4 +109,36 @@ abstract class InventoryRepository {
 
   /// 软删借阅人（历史 loan 的 borrower_name 快照不受影响）。
   Future<void> softDeleteBorrower(int id) async {}
+
+  // ---------- V3.10 数量打通 ----------
+
+  /// 单件物品的数量三口径（在库 / 在借 / 可借）。
+  /// 未记录过的物品返回全 0。
+  /// 口径：`items.quantity` = 在库数（借出即扣、归还即加），可借数 = 在库数。
+  Future<QuantityInfo> getQuantityInfo(String itemName) async =>
+      const QuantityInfo(stock: 0, lent: 0, available: 0);
+
+  /// 全部活跃物品的数量三口径（按物品 id 索引，明细页用）。
+  Future<Map<int, QuantityInfo>> getAllQuantityInfo() async =>
+      const <int, QuantityInfo>{};
+
+  /// 「校准数量」工具（PM 2026-11-24 补充要求 2）：按用户实物清点把数量改准。
+  ///
+  /// [totals] = 物品 id → 用户清点的「家里一共几个」（总拥有数）。
+  /// 写入的**在库数 = 总拥有数 − 未归还借出数**（下限 0）。
+  /// 幂等：同样的清点值反复校准，结果不变。
+  /// 传空 [totals] = 只体检、不写库。
+  Future<CalibrationReport> calibrateQuantities({
+    Map<int, int> totals = const <int, int>{},
+  }) async =>
+      const CalibrationReport(changedCount: 0);
+
+  /// V3.10：只改数量，**不动位置**。
+  ///
+  /// 与 [moveItem] 分开：`moveItem` 是挪位语义，会软删物品的其他位置关联。
+  /// [additive] 为 true = 「又添了 N 个」（在库数 += N）；否则 = 纠正数量（直接覆盖）。
+  /// 物品没记录过 → 抛 ArgumentError。返回改完后的在库数。
+  Future<int> setItemQuantity(String itemName, int quantity,
+          {bool additive = false}) async =>
+      0;
 }

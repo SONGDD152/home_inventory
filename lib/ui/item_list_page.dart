@@ -47,6 +47,12 @@ class _ItemListPageState extends State<ItemListPage> {
   String? _error;
   bool _busy = false;
 
+  /// V3.10：数量三口径（按物品 id 索引）。
+  Map<int, QuantityInfo> _quantities = const <int, QuantityInfo>{};
+
+  /// V3.10（PM 拍板①）：借空的物品默认折叠，勾选「含已借出」才显示。
+  bool _showLentOut = false;
+
   @override
   void initState() {
     super.initState();
@@ -62,9 +68,11 @@ class _ItemListPageState extends State<ItemListPage> {
   Future<void> _reload() async {
     try {
       final rows = await widget.repository.getAllItemsWithLocations();
+      final quantities = await widget.repository.getAllQuantityInfo();
       if (!mounted) return;
       setState(() {
         _rows = rows;
+        _quantities = quantities;
         _error = null;
       });
     } on Exception catch (e) {
@@ -76,17 +84,38 @@ class _ItemListPageState extends State<ItemListPage> {
     }
   }
 
+  /// V3.10：某件物品的数量信息（没有则按 1 个处理）。
+  QuantityInfo _quantityOf(ItemWithLocations row) {
+    final id = row.item.id;
+    if (id == null) {
+      return QuantityInfo(stock: row.item.quantity, lent: 0, available: row.item.quantity);
+    }
+    return _quantities[id] ??
+        QuantityInfo(stock: row.item.quantity, lent: 0, available: row.item.quantity);
+  }
+
   /// 过滤：物品名或任一位置名包含关键词（归一化后 contains，与存储同源）。
+  ///
+  /// V3.10（PM 拍板①）：借空的物品（在库数 = 0）默认不显示，
+  /// 勾选「含已借出」才列出——它们并没有丢，只是全借出去了。
   List<ItemWithLocations> _filtered() {
     final rows = _rows ?? const <ItemWithLocations>[];
     final keyword = normalizeName(_searchController.text);
-    if (keyword.isEmpty) return rows;
-    return rows
-        .where((row) =>
-            normalizeName(row.item.name).contains(keyword) ||
-            row.locations
-                .any((loc) => normalizeName(loc.name).contains(keyword)))
-        .toList(growable: false);
+    var result = rows;
+    if (keyword.isNotEmpty) {
+      result = result
+          .where((row) =>
+              normalizeName(row.item.name).contains(keyword) ||
+              row.locations
+                  .any((loc) => normalizeName(loc.name).contains(keyword)))
+          .toList(growable: false);
+    }
+    if (!_showLentOut) {
+      result = result
+          .where((row) => _quantityOf(row).stock > 0)
+          .toList(growable: false);
+    }
+    return result;
   }
 
   @override
@@ -135,16 +164,27 @@ class _ItemListPageState extends State<ItemListPage> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _rows == null
-                    ? '加载中…'
-                    : '共 ${rows.length} 件物品 · ${_filteredRecordCount(rows)} 条存放记录',
-                key: const Key('detail_stats'),
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Row(
+              children: <Widget>[
+                // V3.10（PM 拍板①）：借空的物品默认折叠，勾这个才显示。
+                FilterChip(
+                  key: const Key('detail_show_lent_out'),
+                  label: const Text('含已借出'),
+                  selected: _showLentOut,
+                  onSelected: (v) => setState(() => _showLentOut = v),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _rows == null
+                        ? '加载中…'
+                        : '共 ${rows.length} 件物品 · ${_filteredRecordCount(rows)} 条存放记录',
+                    key: const Key('detail_stats'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
             ),
           ),
           Expanded(child: _buildBody(rows)),
@@ -155,6 +195,22 @@ class _ItemListPageState extends State<ItemListPage> {
 
   int _filteredRecordCount(List<ItemWithLocations> rows) =>
       rows.fold(0, (n, r) => n + r.locations.length);
+
+  /// V3.10：列表项标题——物品名 + 数量 + 借出标注。
+  ///
+  /// 「梯子 ×3」表示家里有 3 个；「梯子 ×2（在借 1）」表示 2 个在家、
+  /// 1 个借出去了。全借空时显示「×0（全借出）」。
+  String _itemTitle(ItemWithLocations row) {
+    final q = _quantityOf(row);
+    final name = row.item.name;
+    if (q.lent > 0) {
+      return '$name ×${q.stock}（在借 ${q.lent}）';
+    }
+    if (q.stock > 1) {
+      return '$name ×${q.stock}';
+    }
+    return name;
+  }
 
   // ---------- V3.6 回收站 / Excel 导出 ----------
 
@@ -404,7 +460,8 @@ class _ItemListPageState extends State<ItemListPage> {
           },
           child: ListTile(
             key: Key('detail_item_${row.item.name}'),
-            title: Text(row.item.name),
+            // V3.10：标题带上数量——「梯子 ×3」，借出的另标注。
+            title: Text(_itemTitle(row)),
             subtitle: row.locations.isEmpty
                 ? const Text('（没有有效位置）')
                 : Text(

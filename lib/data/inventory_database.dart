@@ -869,9 +869,15 @@ class InventoryDatabase implements InventoryRepository {
   ///
   /// 查重与写入在同一事务内，命中已有 (物品,位置) 关联只刷新时间戳、返回原 id。
   /// 界面连点两下不会产生重复关联。名称做 trim 与长度校验。
+  ///
+  /// V3.10：新增 [quantity] 与 [additive]。
+  ///  * [quantity] 为 null = 本次不带数量，物品数量保持原样。
+  ///  * [quantity] 有值 + [additive] false = **覆盖**（PM 拍板③：说「3个梯子」
+  ///    是在纠正数量，覆盖原值）。
+  ///  * [quantity] 有值 + [additive] true = **累加**（补充要求1：「再放N个」）。
   @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
-      {String? rawText}) async {
+      {String? rawText, int? quantity, bool additive = false}) async {
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
 
@@ -889,6 +895,15 @@ class InventoryDatabase implements InventoryRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<UpsertResult>((txn) async {
       final itemId = await _findOrCreateItem(txn, valid, now);
+      if (quantity != null) {
+        await _applyQuantity(
+          txn,
+          itemId: itemId,
+          quantity: quantity,
+          additive: additive,
+          now: now,
+        );
+      }
       final rows = await txn.query(
         tableItemLocations,
         columns: <String>[columnId, columnCreatedAt],
@@ -915,6 +930,59 @@ class InventoryDatabase implements InventoryRepository {
     });
   }
 
+  /// V3.10：读某件物品的当前在库数。
+  ///
+  /// 权威值就是 `items.quantity`（借出即扣、归还即加）——
+  /// **不再套 `max(quantity, 未归还借出数)` 兜底**：那层兜底会把
+  /// 在借数减两遍（「录 3 个借出 2 个」会算出可借 0 个）。
+  Future<int> _readStock(DatabaseExecutor txn, int itemId) async {
+    final rows = await txn.query(
+      tableItems,
+      columns: <String>[columnQuantity],
+      where: '$columnId = ?',
+      whereArgs: <Object?>[itemId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return 0;
+    return (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
+  }
+
+  /// V3.10：写入物品的在库数量。
+  ///
+  /// 覆盖语义（PM 拍板③）：quantity 直接作为新的在库数。
+  /// 累加语义（补充要求1：「再放N个」）：在库数 += quantity。
+  ///
+  /// 累加以**当前在库数**为基准——在库数已经是扣过借出的净值，
+  /// 不再拿在借数去兜底，避免增量被吃掉或重复计。
+  Future<void> _applyQuantity(
+    DatabaseExecutor txn, {
+    required int itemId,
+    required int quantity,
+    required bool additive,
+    required int now,
+  }) async {
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
+    }
+    final rows = await txn.query(
+      tableItems,
+      columns: <String>[columnQuantity],
+      where: '$columnId = ?',
+      whereArgs: <Object?>[itemId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return;
+    final curQty = (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
+    final newQty = additive ? curQty + quantity : quantity;
+    if (newQty == curQty) return;
+    await txn.update(
+      tableItems,
+      <String, Object?>{columnQuantity: newQty, columnUpdatedAt: now},
+      where: '$columnId = ?',
+      whereArgs: <Object?>[itemId],
+    );
+  }
+
   /// 挪位语义（V3.2，UI 主链路）：把物品记到 [locationId]，此前所在的其他
   /// 位置关联**软删**（历史留底可审计），只保留目标位置。
   ///
@@ -922,7 +990,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 物品本身与位置本身只复用既有行，不做删除。
   @override
   Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText}) async {
+      {String? rawText, int? quantity, bool additive = false}) async {
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
 
@@ -940,6 +1008,25 @@ class InventoryDatabase implements InventoryRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<MoveResult>((txn) async {
       final itemId = await _findOrCreateItem(txn, valid, now);
+
+      // V3.10：数量写入（覆盖 / 累加）。
+      var quantityChanged = false;
+      var finalQuantity = 1;
+      if (quantity != null) {
+        final before = await _readStock(txn, itemId);
+        await _applyQuantity(
+          txn,
+          itemId: itemId,
+          quantity: quantity,
+          additive: additive,
+          now: now,
+        );
+        final after = await _readStock(txn, itemId);
+        finalQuantity = after;
+        quantityChanged = after != before;
+      } else {
+        finalQuantity = await _readStock(txn, itemId);
+      }
 
       // 挪位前该物品的全部活动关联（含目标位）。
       final currentLinks = await txn.query(
@@ -1003,6 +1090,8 @@ class InventoryDatabase implements InventoryRepository {
           locationId: locationId,
           created: false,
           previousLocations: previousLocations,
+          quantity: finalQuantity,
+          quantityChanged: quantityChanged,
         );
       }
 
@@ -1012,7 +1101,58 @@ class InventoryDatabase implements InventoryRepository {
         locationId: locationId,
         created: true,
         previousLocations: previousLocations,
+        quantity: finalQuantity,
+        quantityChanged: quantityChanged,
       );
+    });
+  }
+
+  /// V3.10：只改数量，**不动位置**。
+  ///
+  /// 与 [moveItem] 分开的原因：`moveItem` 是「挪位」语义——会把物品的其他
+  /// 位置关联软删掉。「说『3个梯子』纠正数量」只想改数字，不想动位置，
+  /// 走 moveItem 会顺手把「车库」的关联删了（真会被用户遇到的坑）。
+  ///
+  /// [quantity] ≥ 1；[additive] 为 true 时是「又添了 N 个」= 在库数 += N，
+  /// 否则是「纠正数量」= 直接覆盖为 N。
+  /// 物品没记录过 → 抛 ArgumentError（PM 拍板④：不能凭空造账）。
+  /// 返回改完后的在库数。
+  @override
+  Future<int> setItemQuantity(
+    String itemName,
+    int quantity, {
+    bool additive = false,
+  }) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
+    }
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<int>((txn) async {
+      final rows = await txn.query(
+        tableItems,
+        columns: <String>[columnId],
+        where: '$columnName = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[valid],
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        throw ArgumentError.value(
+          valid,
+          'itemName',
+          '还没记录过「$valid」，先说一句「$valid放阳台」再记数量',
+        );
+      }
+      final itemId = rows.first[columnId] as int;
+      await _applyQuantity(
+        txn,
+        itemId: itemId,
+        quantity: quantity,
+        additive: additive,
+        now: now,
+      );
+      return _readStock(txn, itemId);
     });
   }
 
@@ -1158,6 +1298,157 @@ class InventoryDatabase implements InventoryRepository {
         .toList(growable: false);
   }
 
+  // ---------- V3.10 数量打通 ----------
+
+  /// 单件物品的数量三口径（在库 / 在借 / 可借）。
+  ///
+  /// PM 2026-11-24 拍板①在库口径：`items.quantity` 就是**在库数**
+  /// （借出即扣减、归还即加回），可借数 = 在库数。
+  /// 在借数只作展示，**不再从在库数里减一次**。
+  @override
+  Future<QuantityInfo> getQuantityInfo(String itemName) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    final db = await open();
+    final rows = await db.query(
+      tableItems,
+      columns: <String>[columnId, columnQuantity],
+      where: '$columnName = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[valid],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return const QuantityInfo(stock: 0, lent: 0, available: 0);
+    }
+    final itemId = rows.first[columnId] as int;
+    final stock = (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
+    final lent = await _sumOutstandingLent(db, itemId);
+    return QuantityInfo(
+      stock: stock,
+      lent: lent,
+      available: stock,
+    );
+  }
+
+  /// 按 item_id 汇总未归还的借出总数（quantity − returned_qty）。
+  /// 已软删的借出记录（进回收站）不计入。
+  Future<int> _sumOutstandingLent(DatabaseExecutor db, int itemId) async {
+    final rows = await db.rawQuery(
+      'SELECT COALESCE(SUM(quantity - returned_qty), 0) AS lent '
+      'FROM $tableLoans '
+      'WHERE item_id = ? AND is_deleted = 0 AND returned_qty < quantity',
+      <Object?>[itemId],
+    );
+    return (rows.first['lent'] as num?)?.toInt() ?? 0;
+  }
+
+  /// 全部活跃物品的数量三口径（明细页用，一次查完避免 N+1）。
+  @override
+  Future<Map<int, QuantityInfo>> getAllQuantityInfo() async {
+    final db = await open();
+    final result = <int, QuantityInfo>{};
+    final itemRows = await db.query(
+      tableItems,
+      columns: <String>[columnId, columnQuantity],
+      where: '$columnIsDeleted = 0',
+    );
+    if (itemRows.isEmpty) return result;
+    // 一次性取全部未归还借出，按 item_id 分组。
+    final lentRows = await db.rawQuery(
+      'SELECT item_id AS item_id, '
+      'COALESCE(SUM(quantity - returned_qty), 0) AS lent '
+      'FROM $tableLoans '
+      'WHERE is_deleted = 0 AND returned_qty < quantity '
+      'GROUP BY item_id',
+    );
+    final lentByItem = <int, int>{};
+    for (final row in lentRows) {
+      lentByItem[row['item_id'] as int] = (row['lent'] as num?)?.toInt() ?? 0;
+    }
+    for (final row in itemRows) {
+      final id = row[columnId] as int;
+      final stock = (row[columnQuantity] as num?)?.toInt() ?? 1;
+      final lent = lentByItem[id] ?? 0;
+      result[id] = QuantityInfo(
+        stock: stock,
+        lent: lent,
+        available: stock,
+      );
+    }
+    return result;
+  }
+
+  /// V3.10「校准数量」工具（PM 2026-11-24 补充要求 2）：
+  /// 按用户**实物清点**把数量改准。
+  ///
+  /// [totals] = 物品 id → 用户清点的「家里一共几个」（总拥有数）。
+  /// 写入的**在库数 = 总拥有数 − 未归还借出数**（下限 0）。
+  ///
+  /// 为什么这样算：用户清点时数的是「我家一共有几个」，
+  /// 借出去的那些人手里的不在家，所以从总数里扣掉在借数才是真正的在库数。
+  /// 对存量老物品（`items.quantity` 恒为 1 的「总数」语义）和
+  /// 新流程物品（「在库数」语义）**同一套公式都成立**，而且**幂等**：
+  /// 同样的清点值反复校准，结果不变。
+  ///
+  /// 传空 [totals] = 只体检、不写库（details 里如实列出账面与清点的差异）。
+  /// 只处理活跃物品；已软删（回收站）的物品不动。
+  @override
+  Future<CalibrationReport> calibrateQuantities({
+    Map<int, int> totals = const <int, int>{},
+  }) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<CalibrationReport>((txn) async {
+      final itemRows = await txn.query(
+        tableItems,
+        columns: <String>[columnId, columnName, columnQuantity],
+        where: '$columnIsDeleted = 0',
+      );
+      final lentRows = await txn.rawQuery(
+        'SELECT item_id AS item_id, '
+        'COALESCE(SUM(quantity - returned_qty), 0) AS lent '
+        'FROM $tableLoans '
+        'WHERE is_deleted = 0 AND returned_qty < quantity '
+        'GROUP BY item_id',
+      );
+      final lentByItem = <int, int>{};
+      for (final row in lentRows) {
+        lentByItem[row['item_id'] as int] = (row['lent'] as num?)?.toInt() ?? 0;
+      }
+      var changed = 0;
+      final details = <String>[];
+      for (final row in itemRows) {
+        final id = row[columnId] as int;
+        final name = row[columnName] as String;
+        final curQty = (row[columnQuantity] as num?)?.toInt() ?? 1;
+        final lent = lentByItem[id] ?? 0;
+        final counted = totals[id];
+        if (counted == null) continue; // 没清点这件就不动它。
+        if (counted < lent) {
+          // 清点总数比在借数还少——账已经打架了，如实说明，不硬写。
+          details.add('$name：清点 $counted 个，比在借的 $lent 个还少，'
+              '已跳过（请核对后重试）');
+          continue;
+        }
+        final newQty = counted - lent;
+        if (newQty != curQty) {
+          await txn.update(
+            tableItems,
+            <String, Object?>{
+              columnQuantity: newQty,
+              columnUpdatedAt: now,
+            },
+            where: '$columnId = ?',
+            whereArgs: <Object?>[id],
+          );
+          changed++;
+          details.add('$name：共 $counted 个 − 在借 $lent 个 → 在库 $newQty 个'
+              '（原记录 $curQty 个）');
+        }
+      }
+      return CalibrationReport(changedCount: changed, details: details);
+    });
+  }
+
   /// 备份导出：全部表全量行（含软删行，保证还原保真），外加库名、schema 版本、导出时间。
   /// V3.7：新增 borrowers / loans 两张表；旧版恢复时缺表按空处理。
   /// 纯读取，不改库。
@@ -1281,7 +1572,47 @@ class InventoryDatabase implements InventoryRepository {
     final due = nowUtc.add(Duration(days: loanDays)).millisecondsSinceEpoch;
 
     return db.transaction<Loan>((txn) async {
-      final itemId = await _findOrCreateItem(txn, storeItem, now);
+      // V3.10（PM 拍板④）：**没记录过的东西不能直接借出**——引导用户先录入，
+      // 不凭空造账。原来这里直接 _findOrCreateItem 会自动建出库存 0 的物品，
+      // 让「家里没有的东西也能借走」，账面直接穿空。
+      final itemRows = await txn.query(
+        tableItems,
+        columns: <String>[columnId, columnQuantity],
+        where: '$columnName = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[storeItem],
+        limit: 1,
+      );
+      if (itemRows.isEmpty) {
+        throw ArgumentError.value(
+          storeItem,
+          'itemName',
+          '还没记录过「$storeItem」，先说一句「$storeItem放阳台」再借',
+        );
+      }
+      final itemId = itemRows.first[columnId] as int;
+      final stock = (itemRows.first[columnQuantity] as num?)?.toInt() ?? 1;
+
+      // 可借数校验（PM 拍板②：借超要拦截，不允许负数）。
+      // 在库数 = `items.quantity`（借出即扣、归还即加），可借数 = 在库数。
+      final lentRows = await txn.rawQuery(
+        'SELECT COALESCE(SUM(quantity - returned_qty), 0) AS lent '
+        'FROM $tableLoans '
+        'WHERE item_name = ? AND is_deleted = 0 AND returned_qty < quantity',
+        <Object?>[storeItem],
+      );
+      final lent = (lentRows.first['lent'] as num?)?.toInt() ?? 0;
+      final available = stock;
+      if (quantity > available) {
+        throw ArgumentError.value(
+          quantity,
+          'quantity',
+          stock <= 0
+              ? '「$storeItem」家里已经没有可借的了'
+                  '（$lent 个都借出去了），先记着家里还有几个再借'
+              : '家里只有$stock个「$storeItem」，可借$available个',
+        );
+      }
+
       // 借阅人：复用活跃行，软删的不复用（同名会新建）。
       final borrowerRows = await txn.query(
         tableBorrowers,
@@ -1296,6 +1627,14 @@ class InventoryDatabase implements InventoryRepository {
           Borrower(name: validBorrower, createdAt: now, updatedAt: now).toMap(),
         );
       }
+      // 在库口径（PM 拍板①）：借出即扣减库存数。
+      final newStock = stock - quantity;
+      await txn.update(
+        tableItems,
+        <String, Object?>{columnQuantity: newStock, columnUpdatedAt: now},
+        where: '$columnId = ?',
+        whereArgs: <Object?>[itemId],
+      );
       final loan = Loan(
         itemId: itemId,
         updatedAt: now,
@@ -1355,6 +1694,32 @@ class InventoryDatabase implements InventoryRepository {
         where: '$columnId = ?',
         whereArgs: <Object?>[loanId],
       );
+
+      // V3.10（PM 拍板①在库口径）：归还即加回库存数，与借出严格对称。
+      // 部分归还只加回本次还的数量（借 3 还 1 → 库存 +1，不是 +3）。
+      // 物品行可能已被软删（进回收站）或已物理清除——此时无处加回，
+      // 只更新 loans 即可，不报错（借出记录保留历史，V3.9.2 口径）。
+      final itemRows = await txn.query(
+        tableItems,
+        columns: <String>[columnId, columnQuantity],
+        where: '$columnId = ?',
+        whereArgs: <Object?>[loan.itemId],
+        limit: 1,
+      );
+      if (itemRows.isNotEmpty) {
+        final itemRow = itemRows.first;
+        final itemId = itemRow[columnId] as int;
+        final curQty = (itemRow[columnQuantity] as num?)?.toInt() ?? 1;
+        await txn.update(
+          tableItems,
+          <String, Object?>{
+            columnQuantity: curQty + amount,
+            columnUpdatedAt: now,
+          },
+          where: '$columnId = ?',
+          whereArgs: <Object?>[itemId],
+        );
+      }
     });
   }
 

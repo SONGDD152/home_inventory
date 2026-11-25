@@ -11,13 +11,33 @@ sealed class ParseResult {
 
 /// 录入意图：<物品>放<位置>
 class ParseUpsert extends ParseResult {
-  const ParseUpsert({required this.item, required this.location, this.quantity = 1});
+  const ParseUpsert({
+    required this.item,
+    required this.location,
+    this.quantity = 1,
+    this.additive = false,
+  });
 
   final String item;
   final String location;
 
   /// V3.7：录入数量（"记：2个梯子放阳台" → 2），默认 1。
   final int quantity;
+
+  /// V3.10：**累加语义**标记（PM 补充要求1）。
+  ///
+  /// false = 覆盖（默认）：说「3个梯子」是在纠正数量，直接覆盖原值
+  /// （PM 拍板③）。
+  /// true = 累加：「再放2个梯子」「又多了3个」这类说法是在补充，
+  /// 数量 += N 而不是覆盖。
+  final bool additive;
+
+  /// V3.10：累加语义下**允许没有位置**。
+  ///
+  /// 「再放2个梯子」「又多了2个梯子」说的是"又添了几个"，东西本来就在
+  /// 某处，不必重复说位置。location 为空串时，UI 层**只改数量、不挪位**，
+  /// 沿用物品原有位置关联。
+  bool get hasLocation => location.isNotEmpty;
 }
 
 /// 查询意图：<物品>在哪
@@ -219,6 +239,69 @@ bool _isValidWordOrder(String core) {
   return verbCount == 1;
 }
 
+/// V3.10：解析「又多了N个X」「再添N个X」这类**无位置**的累加表述。
+///
+/// 这类句子不含放置动词（「放/搁/塞…」），走 [_parseRecord] 会因
+/// 找不到动词而落空。但语义很清楚：物品已经在某处，又添了 N 个——
+/// 只改数量、不挪位。
+///
+/// 返回 null 表示不匹配（非累加表述，或没有数量）。
+ParseUpsert? _parseAdditiveNoLocation(String text) {
+  var rest = text.trim();
+  // 剥累加前缀（「又」/「再」）。
+  final additive = _extractAdditivePrefix(rest);
+  if (!additive.isAdditive) return null;
+  rest = additive.rest;
+  // 剥「多了/添了/多了些/来」等描述词。
+  for (final w in const <String>['多了', '添了', '多出', '增加', '来']) {
+    if (rest.startsWith(w)) {
+      rest = rest.substring(w.length).trim();
+      break;
+    }
+  }
+  // 剥掉尾随的「了」（「又来了2个梯子」）。
+  if (rest.startsWith('了')) {
+    rest = rest.substring(1).trim();
+  }
+  if (rest.isEmpty) return null;
+  // 必须带数量，否则不是「又添了几个」的说法。
+  final q = _extractLeadingQuantity(rest);
+  if (q == null || q.rest.isEmpty) return null;
+  final item = q.rest.trim();
+  if (item.isEmpty) return null;
+  // 物品名不能带位置词（「梯子阳台」不是物品名）——交给下游校验，
+  // 这里只做最基本的长度与字符检查。
+  if (item.length > 20) return null;
+  return ParseUpsert(
+    item: normalizeName(item),
+    location: '',
+    quantity: q.value,
+    additive: true,
+  );
+}
+
+/// V3.10：解析「3个梯子」这种**只带数量、不带位置也不带动词**的说法。
+///
+/// 语义（PM 拍板③）：普通说法 = 纠正数量，直接覆盖——只改数量、不挪位。
+/// 累加说法（「又多了2个梯子」）由 [_parseAdditiveNoLocation] 兜住。
+///
+/// 必须带量词（个/本/把/件/只/张）才认，避免把「5号电池」当成
+/// 「5 个 号电池」——那样物品名会被数量污染。
+ParseUpsert? _parseQuantityOnly(String text) {
+  final t = text.trim();
+  final m = RegExp(r'^(\d+)\s*[个本把件只张]\s*(.+)$').firstMatch(t);
+  if (m == null) return null;
+  final value = int.tryParse(m.group(1)!);
+  if (value == null || value < 1) return null;
+  final item = m.group(2)!.trim();
+  if (item.isEmpty || item.length > 20) return null;
+  // 物品名里不能有放置动词——有动词的句子归录入分支管。
+  for (var i = 0; i < item.length; i++) {
+    if (_placeVerbs.contains(item.substring(i, i + 1))) return null;
+  }
+  return ParseUpsert(item: normalizeName(item), location: '', quantity: value);
+}
+
 /// 剥离倒装前置的「把」字（可带一个显式主语）。
 String _stripBaPrefix(String text) {
   if (text.startsWith('把')) return text.substring(1).trim();
@@ -233,8 +316,18 @@ String _stripBaPrefix(String text) {
 /// 解析录入句式（核心，V1/V2 逻辑原样保留）。
 /// 返回 null 表示不符合录入句式。
 ParseUpsert? _parseRecord(String text) {
-  final core = _stripBaPrefix(text);
+  var core = _stripBaPrefix(text);
   if (core.isEmpty || !_isValidWordOrder(core)) return null;
+
+  // V3.10：前置数量（「3个梯子放阳台」）在**切动词之前**剥掉——
+  // 否则「个」这类量词里的字可能干扰动词定位，且数量会丢失。
+  var qty = 1;
+  final leadQty = _extractLeadingQuantity(core);
+  if (leadQty != null && leadQty.rest.isNotEmpty) {
+    qty = leadQty.value;
+    core = leadQty.rest;
+    if (core.isEmpty || !_isValidWordOrder(core)) return null;
+  }
 
   int? verbIndex;
   for (var i = 0; i < core.length; i++) {
@@ -243,7 +336,53 @@ ParseUpsert? _parseRecord(String text) {
       break;
     }
   }
-  if (verbIndex == null || verbIndex == 0 || verbIndex == core.length - 1) {
+  if (verbIndex == null || verbIndex == core.length - 1) {
+    return null;
+  }
+
+  // V3.10：支持「动词在前」的形式——「放2个梯子在阳台」「再放2个梯子」。
+  // 形式为：动词[介词][数量][物品][介词][位置]。
+  // 物品名在「物品+动词+位置」语序里位于动词之前；这里反之。
+  if (verbIndex == 0) {
+    var body = core.substring(1).trim();
+    // 剥动词后的助词「了」：「又放了3个梯子」→「3个梯子」。
+    if (body.startsWith('了')) body = body.substring(1).trim();
+    // 剥动词后的介词（放在/放到）。
+    if (_isPreposition(body)) body = body.substring(1).trim();
+    // 前置数量：「2个梯子」→ 数量 2、余下「梯子」。
+    final q = _extractLeadingQuantity(body);
+    var bodyQty = 1;
+    var rest = body;
+    if (q != null && q.rest.isNotEmpty) {
+      bodyQty = q.value;
+      rest = q.rest;
+    }
+    rest = rest.trim();
+    if (rest.isEmpty) return null;
+    // 余下部分可能是「梯子在阳台」（物品+介词+位置）或
+    // 「梯子放阳台」（物品+动词+位置）——后者用同一套切词逻辑处理。
+    final inner = _parseRecord(rest);
+    if (inner != null) {
+      return ParseUpsert(
+        item: inner.item,
+        location: inner.location,
+        quantity: bodyQty,
+      );
+    }
+    // 「梯子在阳台」形式：按介词切。
+    final locMatch = RegExp(r'^(.+?)(?:在|到|往|向)(.+)$').firstMatch(rest);
+    if (locMatch != null) {
+      final itemPart = locMatch.group(1)!.trim();
+      final locPart = locMatch.group(2)!.trim();
+      if (itemPart.isNotEmpty && locPart.isNotEmpty) {
+        return ParseUpsert(
+          item: normalizeName(itemPart),
+          location: normalizeName(locPart),
+          quantity: bodyQty,
+        );
+      }
+    }
+    // 没有位置——「放2个梯子」缺位置信息，不算完整录入句。
     return null;
   }
 
@@ -258,6 +397,7 @@ ParseUpsert? _parseRecord(String text) {
   return ParseUpsert(
     item: normalizeName(item),
     location: normalizeName(location),
+    quantity: qty,
   );
 }
 
@@ -436,29 +576,64 @@ const Map<String, int> _cnNumbers = <String, int>{
 };
 
 /// 从文本头部剥出数量（"2个梯子" → (2, "梯子")；"两个梯子" 同）。
-/// 识别阿拉伯数字与中文数字，量词 个/本/把/件/只/张 可跟可不跟。
+///
+/// 识别阿拉伯数字与中文数字，量词 个/本/把/件/只/张 跟在数字后面。
+///
+/// **量词是必需的**（V3.10 修）：原来量词可选，"5号电池" 会被切成
+/// 「5 个 号电池」——物品名被数量污染，之后按「电池」永远查不到它
+/// （V3.9.2「物品名必须干净」的教训，同一个坑）。
+/// 数字后没有量词就不当数量，物品名保持原样。
 ({int value, String rest})? _extractLeadingQuantity(String text) {
-  // 阿拉伯数字。
-  final arabic = RegExp(r'^(\d+)\s*[个本把件只张只]?\s*');
-  final m = arabic.firstMatch(text);
-  if (m != null) {
-    final value = int.tryParse(m.group(1)!);
+  // 阿拉伯数字（量词必需）。
+  final arabic = RegExp(r'^(\d+)\s*([个本把件只张])\s*').firstMatch(text);
+  if (arabic != null) {
+    final value = int.tryParse(arabic.group(1)!);
     if (value != null && value >= 1) {
-      return (value: value, rest: text.substring(m.end).trim());
+      return (value: value, rest: text.substring(arabic.end).trim());
     }
   }
-  // 中文数字（长词优先：十一 先于 一）。
+  // 中文数字（长词优先：十一 先于 一），量词同样必需。
   final keys = _cnNumbers.keys.toList()..sort((a, b) => b.length.compareTo(a.length));
   for (final key in keys) {
     if (!text.startsWith(key)) continue;
     var rest = text.substring(key.length).trim();
-    // 剥一个可选量词。
-    if (rest.isNotEmpty && '个本把件只张'.contains(rest.substring(0, 1))) {
-      rest = rest.substring(1).trim();
-    }
+    if (rest.isEmpty) continue;
+    if (!'个本把件只张'.contains(rest.substring(0, 1))) continue;
+    rest = rest.substring(1).trim();
     return (value: _cnNumbers[key]!, rest: rest);
   }
   return null;
+}
+
+/// V3.10：识别累加前缀（PM 补充要求1）。
+///
+/// 覆盖是默认口径（PM 拍板③）：说「3个梯子」= 纠正数量，直接覆盖。
+/// 但用户也需要一条累加路径——「再放2个梯子」「又多了3个」说的是
+/// **又添了几个**，语义是累加而非覆盖。
+///
+/// 返回 (isAdditive, rest)：命中累加词时剥掉它并标记 true。
+///
+/// 词表要窄：只认「再/又/多」这类**明确表示增加**的词，且必须紧邻数量
+/// 或物品名，避免误伤「还」这种在借还语境里高频的词（此处只处理录入分支，
+/// 且要求后面还跟着数量或物品）。
+const List<String> _additiveMarkers = <String>['又', '再', '多'];
+
+/// 返回 (isAdditive, rest)。
+({bool isAdditive, String rest}) _extractAdditivePrefix(String text) {
+  var rest = text.trim();
+  for (final marker in _additiveMarkers) {
+    if (!rest.startsWith(marker)) continue;
+    final after = rest.substring(marker.length).trim();
+    // 剥掉「了/了有」这类助词：「又放了2个」→「2个」。
+    var body = after;
+    if (body.startsWith('了')) body = body.substring(1).trim();
+    if (body.startsWith('有')) body = body.substring(1).trim();
+    if (body.isEmpty) continue;
+    // 后面必须还有实质内容（数量或物品），否则不认。
+    rest = body;
+    return (isAdditive: true, rest: rest);
+  }
+  return (isAdditive: false, rest: rest);
 }
 
 /// 解析借出句式。返回 null 表示不匹配。
@@ -998,17 +1173,18 @@ ParseResult parsePhrase(String input) {
     final rest = _stripTrailingParticle(
         text.substring(_recordPrefix.length).trim());
     if (rest.isEmpty) return const ParseUnrecognized();
-    // 先剥数量（"记：2个梯子放阳台" → quantity=2），再解析句式。
-    final q = _extractLeadingQuantity(rest);
-    if (q != null) {
-      final withQty = _parseRecord(q.rest);
-      if (withQty != null) {
-        return ParseUpsert(item: withQty.item, location: withQty.location,
-            quantity: q.value);
-      }
+    // V3.10：先剥累加前缀（「记：再放2个梯子」→ additive=true）。
+    final additive = _extractAdditivePrefix(rest);
+    final restForQty = additive.rest;
+    // 数量提取统一交给 [_parseRecord] 内部（见主录入路径的同名注释）。
+    final parsed = _parseRecord(restForQty);
+    if (parsed != null) {
+      return ParseUpsert(
+          item: parsed.item,
+          location: parsed.location,
+          quantity: parsed.quantity,
+          additive: additive.isAdditive);
     }
-    final parsed = _parseRecord(rest);
-    if (parsed != null) return parsed;
     return const ParseUnrecognized();
   }
   if (text.startsWith(_queryPrefixMark)) {
@@ -1052,16 +1228,29 @@ ParseResult parsePhrase(String input) {
   if (query != null) return query;
 
   // 录入：先试前置数量（"2个梯子放阳台" → quantity=2），再试原样。
-  final q = _extractLeadingQuantity(text);
-  if (q != null) {
-    final withQty = _parseRecord(q.rest);
-    if (withQty != null) {
-      return ParseUpsert(item: withQty.item, location: withQty.location,
-          quantity: q.value);
-    }
+  // V3.10：先剥累加前缀（「再放2个梯子」→ additive=true，语义是又添了2个）。
+  final additive = _extractAdditivePrefix(text);
+  final textForQty = additive.rest;
+  // V3.10：数量提取统一交给 [_parseRecord] 内部完成（它已能处理
+  // 「数量+物品+动词+位置」与「动词+数量+物品+位置」两种语序）。
+  // 外层不再单独剥数量，否则 [_parseRecord] 会看不到数量而静默丢成 1。
+  final record = _parseRecord(textForQty);
+  if (record != null) {
+    return ParseUpsert(
+        item: record.item,
+        location: record.location,
+        quantity: record.quantity,
+        additive: additive.isAdditive);
   }
-  final record = _parseRecord(text);
-  if (record != null) return record;
+
+  // V3.10：无位置的累加表述（「又多了2个梯子」）——不含放置动词，
+  // 走上面的录入分支会落空，这里单独兜住：只改数量、不挪位。
+  final noLoc = _parseAdditiveNoLocation(text);
+  if (noLoc != null) return noLoc;
+
+  // V3.10：只带数量的表述（「3个梯子」）——纠正数量，只改数量、不挪位。
+  final qtyOnly = _parseQuantityOnly(text);
+  if (qtyOnly != null) return qtyOnly;
 
   // 未识别：给 UI 一个意图猜测（含"借"→lend，含"还"→return），供确认框展示。
   final guess = text.contains('借')

@@ -50,6 +50,10 @@ class _ItemListPageState extends State<ItemListPage> {
   /// V3.10：数量三口径（按物品 id 索引）。
   Map<int, QuantityInfo> _quantities = const <int, QuantityInfo>{};
 
+  /// V3.13：删除物品前要说清「还有几笔在借」——PM 真机截图暴露：
+  /// 删除弹窗只说「删除后可在回收站恢复」，完全没提 2 个还借着的梯子。
+  List<Loan> _loans = const <Loan>[];
+
   /// V3.10（PM 拍板①）：借空的物品默认折叠，勾选「含已借出」才显示。
   bool _showLentOut = false;
 
@@ -69,10 +73,12 @@ class _ItemListPageState extends State<ItemListPage> {
     try {
       final rows = await widget.repository.getAllItemsWithLocations();
       final quantities = await widget.repository.getAllQuantityInfo();
+      final loans = await widget.repository.getAllLoans();
       if (!mounted) return;
       setState(() {
         _rows = rows;
         _quantities = quantities;
+        _loans = loans.where((l) => !l.isReturned).toList(growable: false);
         _error = null;
       });
     } on Exception catch (e) {
@@ -381,40 +387,76 @@ class _ItemListPageState extends State<ItemListPage> {
     await _guard(() => widget.repository.updateItem(row.item.id!, name));
   }
 
-  Future<void> _deleteItem(ItemWithLocations row) async {
-    // V3.12：删除仍是**整件删除**（带数量的部分废弃走语音），但确认框必须
-    // 明说会连带删掉几个、在哪些位置——别让用户以为只删了一个。
-    final total = row.item.quantity;
+  /// V3.13：删除物品的**唯一**确认弹窗——按钮删除与左滑删除共用一个口径。
+  ///
+  /// PM 2026-11-26 真机截图暴露的两个问题：
+  ///  ① 左滑删除的弹窗只说「删除后可在回收站恢复」，**完全没提还有 2 个在借**；
+  ///  ② 按钮删除的弹窗虽说了会删几个，但用了 Markdown `**` 语法
+  ///     （Flutter 不渲染，星号原样显示），且数字取 items.quantity——
+  ///     在库为 0 时会显示「一起删掉全部 0 个」。
+  ///
+  /// 现在两条路径共用本方法：说清在库几个、在借几个（借给谁）、
+  /// 会连带把在借记录移入回收站。
+  Future<bool> _confirmDeleteItem(
+    ItemWithLocations row, {
+    String keyPrefix = 'item_delete',
+  }) async {
+    final stock = row.item.quantity;
     final perLocation = row.locations
         .where((l) => l.id != null)
         .map((l) {
           final qty = row.quantityAt(l.id!) ?? 0;
-          return '$l $qty 个';
+          return '${l.name} $qty 个';
         })
         .join('、');
-    final detail = perLocation.isEmpty ? '' : '\n各位置：$perLocation';
+    // 该物品还在借的（借出中、未还清）。loans.item_id 是 NOT NULL，
+    // 按 id 精确匹配；历史脏数据里 item_id 可能对不上，再按名字兜一次。
+    final openLoans = _loans
+        .where((l) => l.itemId == row.item.id ||
+            l.itemName == row.item.name)
+        .toList(growable: false);
+    final lentTotal = openLoans
+        .fold<int>(0, (sum, l) => sum + (l.quantity - l.returnedQty));
+    final lentDetail = openLoans
+        .map((l) => '${l.borrowerName} ${l.quantity - l.returnedQty} 个')
+        .join('、');
+
+    final stockLine =
+        perLocation.isEmpty ? '在库 $stock 个' : '在库 $stock 个（$perLocation）';
+    final lentLine =
+        lentTotal == 0 ? '' : '\n在借 $lentTotal 个（$lentDetail）';
+    final consequence = lentTotal == 0
+        ? '删除后可在回收站恢复。'
+        : '\n删除后：物品和这 $lentTotal 个的借出记录会一并移入回收站，可随时恢复。';
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除物品'),
         content: Text('确定删除物品「${row.item.name}」吗？\n'
-            '会**一起删掉全部 $total 个**（不是只删一个）。$detail\n'
-            '删除后可在回收站查看或恢复。'),
+            '$stockLine$lentLine\n'
+            '$consequence'),
         actions: <Widget>[
           TextButton(
-            key: const Key('item_delete_cancel'),
+            key: Key('${keyPrefix}_cancel'),
             onPressed: () => Navigator.of(context).pop(false),
             child: const Text('取消'),
           ),
           TextButton(
-            key: const Key('item_delete_confirm'),
+            key: Key('${keyPrefix}_confirm'),
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('删除'),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    return confirmed == true;
+  }
+
+  /// 按钮入口：删除物品。
+  Future<void> _deleteItem(ItemWithLocations row) async {
+    final confirmed = await _confirmDeleteItem(row);
+    if (!confirmed || !mounted) return;
     await _guard(() => widget.repository.deleteItem(row.item.id!));
   }
 
@@ -463,27 +505,11 @@ class _ItemListPageState extends State<ItemListPage> {
             ),
           ),
           confirmDismiss: (direction) async {
-            final confirmed = await showDialog<bool>(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text('删除物品'),
-                content: Text(
-                    '确定删除物品「${row.item.name}」吗？\n删除后可在回收站恢复。'),
-                actions: <Widget>[
-                  TextButton(
-                    key: const Key('swipe_delete_cancel'),
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('取消'),
-                  ),
-                  TextButton(
-                    key: const Key('swipe_delete_confirm'),
-                    onPressed: () => Navigator.of(context).pop(true),
-                    child: const Text('删除'),
-                  ),
-                ],
-              ),
-            );
-            if (confirmed != true || !mounted) return false;
+            // V3.13：左滑删除与按钮删除**共用同一个确认弹窗**——
+            // 以前左滑只说「删除后可在回收站恢复」，压根没提还有 2 个在借。
+            final confirmed =
+                await _confirmDeleteItem(row, keyPrefix: 'swipe_delete');
+            if (!confirmed || !mounted) return false;
             await widget.repository.deleteItem(row.item.id!);
             await _reload();
             return true;

@@ -172,59 +172,102 @@ class _TrashPageState extends State<TrashPage> {
 
   /// V3.12：恢复一条部分废弃流水——**恢复时问位置**（PM 口径：
   /// 不依赖废弃时的原位置，用户想放哪儿就放哪儿）。
+  ///
+  /// V3.13（PM 2026-11-26 真机截图暴露）：原来只能选**已有位置**，
+  /// 原位置若已被删就无路可走。改为与「归还问位置」同一口径——
+  /// 列已有位置（并显示各处现在有几个），也能填新位置。
   Future<void> _restoreDiscard(ItemDiscard discard) async {
     final locations = await widget.repository.getAllLocations();
     if (!mounted) return;
-    if (locations.isEmpty) {
+    final live = locations.where((l) => !l.isDeleted).toList(growable: false);
+    if (live.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('还没有任何位置，先加一个位置再恢复。')),
       );
       return;
     }
-    final locationId = await showDialog<int>(
-      context: context,
-      builder: (context) => AlertDialog(
-        key: const Key('trash_restore_discard_dialog'),
-        title: Text('恢复 ${discard.pendingQuantity} 个「${discard.itemName}」'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              const Text('放到哪儿？恢复后的这几个会加到那个位置。',
-                  style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
-              const SizedBox(height: 6),
-              for (final loc in locations)
-                ListTile(
-                  key: Key('trash_restore_discard_${loc.name}'),
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.place_outlined),
-                  title: Text(loc.name),
-                  onTap: () => Navigator.of(context).pop(loc.id),
+    // 各处现有数量，让用户知道恢复后会变成多少。
+    final locQtys = <int, int>{};
+    final found = await widget.repository.findByName(discard.itemName);
+    if (found != null) locQtys.addAll(found.locationQuantities);
+    if (!mounted) return;
+
+    final newLocationController = TextEditingController();
+    String? pickedName;
+    try {
+      pickedName = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: const Key('trash_restore_discard_dialog'),
+          title: Text('恢复 ${discard.pendingQuantity} 个「${discard.itemName}」'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                const Text('放到哪儿？恢复后的这几个会加到那个位置。'
+                    '也可以填个新位置。',
+                    style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+                const SizedBox(height: 6),
+                for (final loc in live)
+                  ListTile(
+                    key: Key('trash_restore_discard_${loc.name}'),
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.place_outlined),
+                    title: Text(loc.name),
+                    subtitle: Text('这里现在有 ${locQtys[loc.id] ?? 0} 个',
+                        style: const TextStyle(
+                            fontSize: 12.5, color: Color(0xff607d8b))),
+                    onTap: () => Navigator.of(context).pop(loc.name),
+                  ),
+                const SizedBox(height: 6),
+                TextField(
+                  key: const Key('trash_restore_discard_field'),
+                  controller: newLocationController,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    labelText: '新位置',
+                    hintText: '比如：厨房吊柜',
+                  ),
                 ),
-            ],
+              ],
+            ),
           ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('trash_restore_discard_save'),
+              onPressed: () {
+                final typed = newLocationController.text.trim();
+                if (typed.isNotEmpty) Navigator.of(context).pop(typed);
+              },
+              child: const Text('放到这里'),
+            ),
+          ],
         ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('取消'),
-          ),
-        ],
-      ),
-    );
-    if (locationId == null || !mounted) return;
+      );
+    } finally {
+      newLocationController.dispose();
+    }
+    final name = pickedName;
+    if (name == null || !mounted) return;
+
     await _guard(() async {
+      // 选了已有位置就用它的 id；填了新位置就新建一个再恢复。
+      final target = live.where((l) => l.name == name).toList();
+      final locationId = target.isEmpty
+          ? await widget.repository.addLocation(name)
+          : target.first.id!;
       await widget.repository.restoreDiscard(discard.id!, locationId);
       if (!mounted) return;
-      final locName = locations
-          .where((l) => l.id == locationId)
-          .map((l) => l.name)
-          .firstOrNull;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('已恢复 ${discard.pendingQuantity} 个「${discard.itemName}」'
-              '到「$locName」。'),
+              '到「$name」。'),
         ),
       );
     });

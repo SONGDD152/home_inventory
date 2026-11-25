@@ -220,12 +220,17 @@ class _LoanListPageState extends State<LoanListPage> {
         _locations[loan.itemId] ?? _locationsByName[loan.itemName] ?? const <String>[];
     // V3.10：账实一目了然——家里还有几个、还有几个借出去没还。
     // （可借数 = 在库数，不再单独显示，免得两个一样的数字让人犯迷糊。）
+    //
+    // V3.13（PM 2026-11-26 真机截图暴露）：原来写「家里还有 0 个」——
+    // 家里明明有 3 个梯子（0 在库 + 2 在借 + 1 已废弃），这句话让人以为
+    // 东西全没了。改成「在库 N 个」，并把全局口径说清楚（这是**该物品**
+    // 合计在借几个，不是这一笔借了几个）。
     final q = _quantities[loan.itemId];
     final stockText = q == null
         ? null
         : (q.lent > 0
-            ? '家里还有 ${q.stock} 个 · 借出 ${q.lent} 个未还'
-            : '家里共 ${q.stock} 个');
+            ? '在库 ${q.stock} 个 · 该物品共借出 ${q.lent} 个未还'
+            : '在库 ${q.stock} 个');
     return Card(
       key: Key('loan_item_${loan.id ?? loan.itemName}'),
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),

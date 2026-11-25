@@ -1134,6 +1134,18 @@ class _HomePageState extends State<HomePage> {
     final qty = parsed.quantity!;
     final key = normalizeName(parsed.item);
 
+    // 各位置的现有数量（在库口径）——来源弹窗要显示"现在还有几个"，
+    // 否则 PM 只能在弹窗里看到「在库的那些」却不知道够不够，
+    // 点了才被告知"阳台只有 0 个"（PM 2026-11-26 真机截图暴露）。
+    final itemLocs = primary.locations.where((l) => l.id != null).toList();
+    final locQtys = <int, int>{
+      for (final l in itemLocs) l.id!: primary.quantityAt(l.id!) ?? 0,
+    };
+    final inStock = locQtys.values.fold<int>(0, (a, b) => a + b);
+    final stockDetail = itemLocs
+        .map((l) => '${l.name} ${locQtys[l.id!] ?? 0} 个')
+        .join('、');
+
     // ---- ① 废在库的，还是废借出去的那笔？ ----
     final loans = await widget.repository.getAllLoans();
     if (!mounted) return;
@@ -1142,7 +1154,12 @@ class _HomePageState extends State<HomePage> {
         .toList(growable: false);
     Loan? loanToReturn;
     if (openLoans.isNotEmpty) {
-      final choice = await _pickDiscardSource(openLoans, qty);
+      final choice = await _pickDiscardSource(
+        openLoans,
+        qty,
+        inStock: inStock,
+        stockDetail: stockDetail,
+      );
       if (!mounted) return;
       if (choice == null) {
         setState(() {
@@ -1168,7 +1185,6 @@ class _HomePageState extends State<HomePage> {
     }
 
     // ---- ② 从哪个位置废弃？ ----
-    final itemLocs = primary.locations.where((l) => l.id != null).toList();
     int? locationId;
     if (itemLocs.length > 1) {
       locationId = await _pickLocation(
@@ -1277,10 +1293,19 @@ class _HomePageState extends State<HomePage> {
 
   /// V3.12：废弃来源选择——一次列全所有候选（在库的 + 每一笔在借），
   /// 让用户自己点；**多笔在借时不静默选**（元宝批复第 3 条）。
+  ///
+  /// V3.13（PM 2026-11-26 真机截图暴露）：每个来源必须显示**现在还有几个**。
+  /// 以前「在库的那些」只写「从家里现在的存放位置扣 1 个」，而两个借出来源
+  /// 都带数量（「王借走的那 1 个」）——PM 无法在弹窗里判断哪个来源有货，
+  /// 点了才被告知"阳台只有 0 个"。现在在库来源也写清数量与分布，
+  /// 不够的**直接置灰不可点**，别让人白点一次。
   Future<_DiscardChoice?> _pickDiscardSource(
     List<Loan> openLoans,
-    int qty,
-  ) async {
+    int qty, {
+    required int inStock,
+    required String stockDetail,
+  }) async {
+    final inStockEnough = inStock >= qty;
     return showDialog<_DiscardChoice>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1297,14 +1322,32 @@ class _HomePageState extends State<HomePage> {
               ListTile(
                 key: const Key('discard_source_in_stock'),
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.home_outlined),
-                title: const Text('在库的那些',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-                subtitle: Text('从家里现在的存放位置扣 $qty 个',
-                    style: const TextStyle(
-                        fontSize: 12.5, color: Color(0xff607d8b))),
-                onTap: () =>
-                    Navigator.of(context).pop(const _DiscardChoice.inStock()),
+                leading: Icon(Icons.home_outlined,
+                    color: inStockEnough
+                        ? const Color(0xff37474f)
+                        : const Color(0xffb0bec5)),
+                title: Text(
+                  '在库的那些',
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: inStockEnough
+                          ? const Color(0xff1a2b3c)
+                          : const Color(0xffb0bec5)),
+                ),
+                subtitle: Text(
+                  inStockEnough
+                      ? '家里现在有 $inStock 个（$stockDetail），从这儿扣 $qty 个'
+                      : '家里现在只有 $inStock 个（$stockDetail），不够废弃 $qty 个',
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      color: inStockEnough
+                          ? const Color(0xff607d8b)
+                          : const Color(0xffe57373)),
+                ),
+                onTap: inStockEnough
+                    ? () => Navigator.of(context).pop(const _DiscardChoice.inStock())
+                    : null,
               ),
               for (final loan in openLoans)
                 ListTile(

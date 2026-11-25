@@ -29,6 +29,13 @@ class FakeListRepository with FakeLoanMixin implements InventoryRepository {
   /// V3.8：预置的「已删除借出记录」（回收站借出区块用）。
   final List<Loan> deletedLoans = <Loan>[];
 
+  /// V3.13：预置「在借中」的借出记录——删除物品的确认框要显示
+  /// 「还有几笔在借、借给谁」（PM 2026-11-26 真机截图暴露）。
+  final List<Loan> openLoans = <Loan>[];
+
+  @override
+  Future<List<Loan>> getAllLoans() async => List<Loan>.unmodifiable(openLoans);
+
   /// V3.8：借出记录恢复/彻底删除的调用记录。
   int restoreLoanCalls = 0;
   int purgeLoanCalls = 0;
@@ -599,6 +606,60 @@ void main() {
     expect(find.text('梯子'), findsNothing);
     expect(find.text('充电器'), findsOneWidget);
     expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
+  });
+
+  testWidgets('V3.13 删除物品：弹窗必须写明还有几笔在借、借给谁', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    repo.openLoans.addAll(<Loan>[
+      Loan(
+          itemId: 1,
+          itemName: '梯子',
+          borrowerName: '王',
+          quantity: 1,
+          borrowedAt: 1,
+          dueAt: 2),
+      Loan(
+          itemId: 1,
+          itemName: '梯子',
+          borrowerName: '李',
+          quantity: 1,
+          borrowedAt: 1,
+          dueAt: 2),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+
+    // 按钮删除
+    await tester.tap(find.byKey(const Key('item_delete_梯子')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('在借 2 个'), findsOneWidget,
+        reason: '必须告诉用户还有 2 个在借，不然删了账就乱了');
+    expect(find.textContaining('王 1 个'), findsOneWidget);
+    expect(find.textContaining('李 1 个'), findsOneWidget);
+    expect(find.textContaining('一并移入回收站'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('item_delete_cancel')));
+    await tester.pumpAndSettle();
+
+    // 左滑删除：与按钮删除**同一口径**（以前左滑只说「可在回收站恢复」）
+    await tester.drag(find.byKey(const Key('detail_item_梯子')), const Offset(-500, 0));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('在借 2 个'), findsOneWidget,
+        reason: '左滑删除也必须说明在借情况');
+    await tester.tap(find.byKey(const Key('swipe_delete_cancel')));
+    await tester.pumpAndSettle();
+    expect(repo.deleteItemCalls, 0);
+  });
+
+  testWidgets('V3.13 删除物品：没有在借时不啰嗦', (tester) async {
+    final repo = FakeListRepository(<ItemWithLocations>[
+      _row('梯子', <String>['阳台'], id: 1),
+    ]);
+    await _pumpPage(tester, repo: repo, gateway: FakeBackupGateway());
+    await tester.tap(find.byKey(const Key('item_delete_梯子')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('在借'), findsNothing);
+    expect(find.textContaining('在库'), findsOneWidget);
   });
 
 

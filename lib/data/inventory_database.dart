@@ -781,6 +781,12 @@ class InventoryDatabase implements InventoryRepository {
   ///
   /// 整件废弃（[deleteItem]）与「部分废弃废完整个物品」共用这一段，
   /// 保证两条路径的软删语义**完全一致**（同一时间戳、同一留底口径）。
+  ///
+  /// V3.13（PM 2026-11-26 真机截图暴露）：**级联软删该物品的在借记录**。
+  /// 之前只删 items + item_locations，loans 原封不动 → 物品进了回收站，
+  /// 借出管理页却照常显示「梯子 ×1 借出中」，留下一笔**孤儿借出**：
+  /// 账平不了，而且从回收站恢复梯子后会凭空多出 2 个在借。
+  /// 现在一并软删进回收站（与 [deleteLoan] 同一留底口径，可追溯可恢复）。
   Future<void> _softDeleteWholeItem(
     DatabaseExecutor txn,
     int itemId,
@@ -803,6 +809,33 @@ class InventoryDatabase implements InventoryRepository {
       where: '$columnItemId = ? AND $columnIsDeleted = 0',
       whereArgs: <Object?>[itemId],
     );
+    // V3.13：级联软删在借记录 —— 绝不留孤儿借出。
+    //
+    // ⚠ 老库升级路径的坑：loans 表是 V3.7 才引入的，v5→v6 升级过程中
+    // loans 表**还不存在**，直接 UPDATE 会报 "no such table: loans" 把
+    // 升级打挂（inventory_database_test 的 v5 旧库升级用例守住了这个）。
+    // 所以先确认表在不在。
+    if (await _tableExists(txn, tableLoans)) {
+      await txn.update(
+        tableLoans,
+        <String, Object?>{
+          columnIsDeleted: 1,
+          columnDeletedAt: now,
+          columnUpdatedAt: now,
+        },
+        where: '$columnItemId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[itemId],
+      );
+    }
+  }
+
+  /// 某张表在当前库里存在吗？（老库升级时后加的表可能还没有）
+  Future<bool> _tableExists(DatabaseExecutor txn, String table) async {
+    final rows = await txn.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      <Object?>[table],
+    );
+    return rows.isNotEmpty;
   }
 
   // ==================== V3.12 部分废弃（废弃流水） ====================
@@ -1048,6 +1081,22 @@ class InventoryDatabase implements InventoryRepository {
         problems.add('「${row['name']}」物品数 $qty ≠ 位置数之和 $locTotal');
       }
     }
+    // V3.13：补上「在借 ↔ 物品」这一维——之前只看物品↔位置，
+    // 物品整件被删后恒等式反而成立，**孤儿借出查不出来**。
+    final orphans = await txn.rawQuery(
+      'SELECT l.id AS id, l.item_name AS name, l.borrower_name AS borrower, '
+      'l.quantity AS qty, l.returned_qty AS returned '
+      'FROM $tableLoans l '
+      'LEFT JOIN $tableItems i ON i.id = l.item_id '
+      'WHERE l.is_deleted = 0 AND l.returned_qty < l.quantity '
+      'AND (i.id IS NULL OR i.is_deleted = 1)',
+    );
+    for (final row in orphans) {
+      final qty = (row['qty'] as num?)?.toInt() ?? 0;
+      final returned = (row['returned'] as num?)?.toInt() ?? 0;
+      problems.add('「${row['name']}」有 ${row['borrower']} 借走 '
+          '${qty - returned} 个，但物品已被删除（孤儿借出）');
+    }
     return problems;
   }
 
@@ -1116,6 +1165,15 @@ class InventoryDatabase implements InventoryRepository {
           deletedAt: deletedAt,
           now: now,
         );
+        // V3.13：随物品级联软删的借出记录也要跟着合并到存活物品名下，
+        // 否则 loans.item_id 仍指向已物理删除的行 → 变成孤儿借出。
+        await _reviveLoans(
+          txn,
+          fromItemId: id,
+          toItemId: conflictId,
+          deletedAt: deletedAt,
+          now: now,
+        );
         final total = await _syncItemTotal(txn, conflictId, now: now);
         await txn.delete(
           tableItems,
@@ -1138,6 +1196,17 @@ class InventoryDatabase implements InventoryRepository {
         },
         where: '$columnId = ?',
         whereArgs: <Object?>[id],
+      );
+      // V3.13：复活随本次删除级联软删的借出记录。
+      // 只认「删除时活跃」的那批——用 `updated_at == 物品 deleted_at` 精确匹配，
+      // 与 item_locations 的复活口径完全一致：用户单独删过的那笔借出记录
+      // （deleted_at 与本次删除不同）不该被顺带复活。
+      await _reviveLoans(
+        txn,
+        fromItemId: id,
+        toItemId: id,
+        deletedAt: deletedAt,
+        now: now,
       );
       // 历史软删行（deleted_at 为 NULL 的 v3.2 时代数据）无"删除时活跃"
       // 关联行可精确匹配，复活其全部软删关联行（当时物理删改软删前的
@@ -1236,6 +1305,49 @@ class InventoryDatabase implements InventoryRepository {
     }
   }
 
+  /// V3.13：复活随物品一起被级联软删的借出记录。
+  ///
+  /// 为什么要复活：借出是从**位置**扣减的（阳台 3 个 → 借给王 1 个 → 阳台剩 2 个）。
+  /// 整件删除时位置关联被软删，借出记录也被级联软删；此时总拥有数 = 0。
+  /// 若只恢复物品、不恢复借出记录，位置数量会回到 1（在库），在借却是 0 ——
+  /// 总拥有数从 3 掉到 1，**账凭空少两个**。所以两边必须一起复活。
+  ///
+  /// 只复活「本次删除时活跃」的那批：用 `updated_at == deletedAt` 精确匹配
+  /// （级联软删时写入的同一时间戳），与 [item_locations] 的复活口径一致。
+  /// 用户在别处单独删过的那笔借出记录（deleted_at 不同）不会被顺带复活。
+  ///
+  /// [toItemId] 与 [fromItemId] 不同 = 撞名合并场景：借出记录的 item_id 要
+  /// 改指到存活的物品行，否则它会指向已物理删除的行，变成孤儿借出。
+  Future<void> _reviveLoans(
+    DatabaseExecutor txn, {
+    required int fromItemId,
+    required int toItemId,
+    required int? deletedAt,
+    required int now,
+  }) async {
+    if (!await _tableExists(txn, tableLoans)) return;
+    // 老库（v3.2 时代）软删数据没有 deleted_at 锚点，无法精确匹配，
+    // 只能按 item_id 全量复活——与 item_locations 的历史兜底同口径。
+    final where = deletedAt == null
+        ? '$columnItemId = ? AND $columnIsDeleted = 1'
+        : '$columnItemId = ? AND $columnIsDeleted = 1 '
+            'AND $columnUpdatedAt = ?';
+    final args = deletedAt == null
+        ? <Object?>[fromItemId]
+        : <Object?>[fromItemId, deletedAt];
+    await txn.update(
+      tableLoans,
+      <String, Object?>{
+        columnItemId: toItemId,
+        columnIsDeleted: 0,
+        columnDeletedAt: null,
+        columnUpdatedAt: now,
+      },
+      where: where,
+      whereArgs: args,
+    );
+  }
+
   /// V3.6：彻底删除回收站物品（物理 DELETE，不可恢复）。
   ///
   /// 物品行与其**全部**关联行（活跃/软删历史一并）物理清除。
@@ -1261,6 +1373,17 @@ class InventoryDatabase implements InventoryRepository {
         where: '$columnItemId = ?',
         whereArgs: <Object?>[id],
       );
+      // V3.13：连带物理清除这件物品的借出记录。
+      // 之前完全没碰 loans → 彻底删除梯子后，回收站里还挂着两笔
+      //「梯子借给王/李」，而梯子已经不存在了 = 永久孤儿借出，账再也平不了。
+      // 按 item_id 删（活跃与已软删都清），因为这一行物品马上就没了。
+      if (await _tableExists(txn, tableLoans)) {
+        await txn.delete(
+          tableLoans,
+          where: '$columnItemId = ?',
+          whereArgs: <Object?>[id],
+        );
+      }
       // V3.12：彻底删除这件物品 = 它的一切痕迹都没了——
       // 同名/同 id 的部分废弃流水一并清掉（否则回收站里还留着
       // "梯子 1 个"，恢复它会凭空多出一个梯子）。
@@ -2580,13 +2703,42 @@ class InventoryDatabase implements InventoryRepository {
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final rows = await db.query(
       tableLoans,
-      columns: <String>[columnId],
+      columns: <String>[columnId, columnItemId, columnItemName],
       where: '$columnId = ? AND $columnIsDeleted = 1',
       whereArgs: <Object?>[id],
       limit: 1,
     );
     if (rows.isEmpty) {
       throw ArgumentError.value(id, 'id', '没有已删除的借出记录');
+    }
+    // V3.13：借出记录挂在物品上——**物品必须已恢复（存活）才能恢复这笔借出**。
+    // 否则会造出孤儿借出：物品还在回收站里，这笔借出却活了，
+    // 借出管理页显示「梯子借出中」而梯子根本不在明细里。
+    // （同一个坑换了个入口重现——整件删除时级联软删借出记录，
+    //   PM 却在回收站里单独点「恢复」这一笔。）
+    final itemId = rows.first[columnItemId] as int;
+    final itemRows = await db.query(
+      tableItems,
+      columns: <String>[columnName, columnIsDeleted],
+      where: '$columnId = ?',
+      whereArgs: <Object?>[itemId],
+      limit: 1,
+    );
+    if (itemRows.isEmpty) {
+      throw ArgumentError.value(
+        id,
+        'id',
+        '「${rows.first[columnItemName]}」这件物品已经不在了，'
+            '没法恢复它的借出记录',
+      );
+    }
+    if ((itemRows.first[columnIsDeleted] as num?)?.toInt() == 1) {
+      throw ArgumentError.value(
+        id,
+        'id',
+        '「${rows.first[columnItemName]}」还在回收站里，'
+            '先把这件物品恢复出来，再恢复它的借出记录',
+      );
     }
     await db.update(
       tableLoans,

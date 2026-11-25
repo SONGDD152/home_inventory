@@ -2629,6 +2629,42 @@ void main() {
           reason: '没选中的那笔不动');
     });
 
+    // ============ V3.13 来源弹窗要显示可用数量（PM 真机截图暴露） ============
+
+    testWidgets('V3.13 来源弹窗写明在库还有几个、分别在哪', (tester) async {
+      await seedTwoLocations();
+      await repo.lendItem('梯子', '张三', quantity: 1);
+      await repo.lendItem('梯子', '李四', quantity: 1);
+      await pumpApp(tester);
+
+      await submit(tester, '废弃1个梯子');
+
+      expect(find.byKey(const Key('discard_source_dialog')), findsOneWidget);
+      // 阳台 2 + 客厅 1 = 3，借出 2 个 → 在库剩 1 个。
+      expect(find.textContaining('家里现在有 1 个'), findsOneWidget,
+          reason: '必须告诉用户在库还有几个，否则只能点了才知道够不够');
+      expect(find.textContaining('客厅 1 个'), findsOneWidget,
+          reason: '还要写清各处分布');
+    });
+
+    testWidgets('V3.13 在库不够时，该来源置灰不可点（别让人白点一次）',
+        (tester) async {
+      final balcony = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', balcony, quantity: 2);
+      await repo.lendItem('梯子', '张三', quantity: 1);
+      await repo.lendItem('梯子', '李四', quantity: 1);
+      await pumpApp(tester);
+
+      await submit(tester, '废弃1个梯子');
+
+      expect(find.textContaining('家里现在只有 0 个'), findsOneWidget);
+      expect(find.textContaining('不够废弃 1 个'), findsOneWidget);
+      // 点它不应该有任何动作（列表项已禁用）。
+      final tile = tester.widget<ListTile>(
+          find.byKey(const Key('discard_source_in_stock')));
+      expect(tile.onTap, isNull, reason: '在库 0 个时这个来源不该可点');
+    });
+
     testWidgets('废弃在借的：借出的那笔也只动说好的数量', (tester) async {
       await seedTwoLocations();
       await repo.lendItem('梯子', '张三', quantity: 1);

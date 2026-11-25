@@ -262,8 +262,12 @@ class _ItemListPageState extends State<ItemListPage> {
       final activeRows = _rows ?? const <ItemWithLocations>[];
       final deletedRows = await widget.repository.getDeletedItems();
       final loanData = await _loanExportData();
+      // V3.12：废弃流水一并导出（新增「废弃流水」Sheet）。
+      final discards = await widget.repository.getDiscards(includeRestored: true);
       final bytes = exporter.buildWorkbook(activeRows, deletedRows,
-          loans: loanData.loans, locationByItem: loanData.locationByItem);
+          loans: loanData.loans,
+          locationByItem: loanData.locationByItem,
+          discards: discards);
       final fileName = exporter.fileNameFor(DateTime.now());
       final saved = await gateway.saveBytesToDevice(fileName, bytes);
       if (!mounted) return;
@@ -294,10 +298,13 @@ class _ItemListPageState extends State<ItemListPage> {
       final activeRows = _rows ?? const <ItemWithLocations>[];
       final deletedRows = await widget.repository.getDeletedItems();
       final loanData = await _loanExportData();
+      // V3.12：废弃流水一并导出。
+      final discards = await widget.repository.getDiscards(includeRestored: true);
       final path = await (widget.exporter ?? const ExcelExporter())
           .writeExcelFile(activeRows, deletedRows,
               loans: loanData.loans,
-              locationByItem: loanData.locationByItem);
+              locationByItem: loanData.locationByItem,
+              discards: discards);
       await gateway.shareFile(path);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -375,11 +382,23 @@ class _ItemListPageState extends State<ItemListPage> {
   }
 
   Future<void> _deleteItem(ItemWithLocations row) async {
+    // V3.12：删除仍是**整件删除**（带数量的部分废弃走语音），但确认框必须
+    // 明说会连带删掉几个、在哪些位置——别让用户以为只删了一个。
+    final total = row.item.quantity;
+    final perLocation = row.locations
+        .where((l) => l.id != null)
+        .map((l) {
+          final qty = row.quantityAt(l.id!) ?? 0;
+          return '$l $qty 个';
+        })
+        .join('、');
+    final detail = perLocation.isEmpty ? '' : '\n各位置：$perLocation';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('删除物品'),
         content: Text('确定删除物品「${row.item.name}」吗？\n'
+            '会**一起删掉全部 $total 个**（不是只删一个）。$detail\n'
             '删除后可在回收站查看或恢复。'),
         actions: <Widget>[
           TextButton(

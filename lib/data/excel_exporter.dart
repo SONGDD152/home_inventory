@@ -30,15 +30,19 @@ class ExcelExporter {
   static const String sheetDeleted = '回收站';
   /// V3.7：借出明细 Sheet。
   static const String sheetLoans = '借出明细';
+  /// V3.12：废弃流水 Sheet（只废了几个的那些）。
+  static const String sheetDiscards = '废弃流水';
 
   /// 生成工作簿字节。已删物品为空时不创建回收站 Sheet。
   /// [loans] V3.7：借出记录，非空时创建第三张「借出明细」Sheet。
   /// [locationByItem] 物品 id → 位置名（借出明细的「位置」列）。
+  /// [discards] V3.12：部分废弃流水，非空时创建「废弃流水」Sheet。
   Uint8List buildWorkbook(
     List<ItemWithLocations> activeRows,
     List<ItemWithLocations> deletedRows, {
     List<Loan> loans = const <Loan>[],
     Map<int, String> locationByItem = const <int, String>{},
+    List<ItemDiscard> discards = const <ItemDiscard>[],
   }) {
     final excel = Excel.createExcel();
 
@@ -57,6 +61,10 @@ class ExcelExporter {
     if (loans.isNotEmpty) {
       _writeLoanSheet(excel[sheetLoans], loans, locationByItem);
     }
+
+    if (discards.isNotEmpty) {
+      _writeDiscardSheet(excel[sheetDiscards], discards);
+    }
     return Uint8List.fromList(excel.encode()!);
   }
 
@@ -68,9 +76,10 @@ class ExcelExporter {
     List<ItemWithLocations> deletedRows, {
     List<Loan> loans = const <Loan>[],
     Map<int, String> locationByItem = const <int, String>{},
+    List<ItemDiscard> discards = const <ItemDiscard>[],
   }) async {
     final bytes = buildWorkbook(activeRows, deletedRows,
-        loans: loans, locationByItem: locationByItem);
+        loans: loans, locationByItem: locationByItem, discards: discards);
     final writer = fileWriter ?? defaultWrite;
     return writer(bytes);
   }
@@ -191,6 +200,37 @@ class ExcelExporter {
   String _formatDate(int ms) {
     final t = DateTime.fromMillisecondsSinceEpoch(ms);
     return '${t.year}-${_two(t.month)}-${_two(t.day)}';
+  }
+
+  /// V3.12：废弃流水 Sheet。列头：
+  /// 物品名 / 废弃数量 / 已恢复 / 待恢复 / 来源 / 原位置 / 废弃时间。
+  void _writeDiscardSheet(Sheet sheet, List<ItemDiscard> discards) {
+    final headers = <String>[
+      '物品名', '废弃数量', '已恢复', '待恢复', '来源', '原位置', '废弃时间',
+    ];
+    sheet.appendRow(<CellValue?>[for (final h in headers) TextCellValue(h)]);
+    for (var c = 0; c < headers.length; c++) {
+      final cell = sheet.cell(CellIndex.indexByColumnRow(
+          columnIndex: c, rowIndex: 0));
+      cell.cellStyle = CellStyle(bold: true, fontFamily: 'Calibri');
+    }
+    for (final d in discards) {
+      final values = <Object?>[
+        d.itemName,
+        d.quantity,
+        d.restoredQuantity,
+        d.pendingQuantity,
+        d.sourceType == DiscardSource.onLoan ? '借出的那批' : '在库的那批',
+        (d.locationName == null || d.locationName!.isEmpty)
+            ? '—'
+            : d.locationName,
+        _formatTime(d.discardedAt),
+      ];
+      sheet.appendRow(<CellValue?>[
+        for (final v in values) TextCellValue(v.toString()),
+      ]);
+    }
+    _fitColumnWidths(sheet, headers.length);
   }
 
   /// 列宽按内容估算（中文按 2 个单位计），设上限避免超宽列。

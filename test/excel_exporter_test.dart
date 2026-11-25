@@ -111,6 +111,102 @@ void main() {
       expect(data[7], '阳台');
     });
 
+    test('V3.12：非空废弃流水 → 生成「废弃流水」Sheet，列头与数据正确', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'], id: 1)],
+        const <ItemWithLocations>[],
+        discards: <ItemDiscard>[
+          ItemDiscard(
+            id: 1,
+            itemId: 1,
+            itemName: '梯子',
+            quantity: 2,
+            locationId: 1,
+            locationName: '阳台',
+            discardedAt: now,
+            sourceType: DiscardSource.inStock,
+            restoredQuantity: 1,
+          ),
+        ],
+      );
+      expect(bytes[0], 0x50);
+      expect(bytes[1], 0x4B);
+
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('废弃流水'), isTrue);
+      final sheet = excel['废弃流水'];
+      final header = sheet.row(0).map((c) => c?.value?.toString()).toList();
+      expect(header, <String?>[
+        '物品名', '废弃数量', '已恢复', '待恢复', '来源', '原位置', '废弃时间',
+      ]);
+      final data = sheet.row(1).map((c) => c?.value?.toString()).toList();
+      expect(data[0], '梯子');
+      expect(data[1], '2');
+      expect(data[2], '1');
+      expect(data[3], '1', reason: '待恢复 = 废弃 - 已恢复');
+      expect(data[4], '在库的那批');
+      expect(data[5], '阳台');
+    });
+
+    test('V3.12：空废弃流水不创建该 Sheet', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'], id: 1)],
+        const <ItemWithLocations>[],
+      );
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('废弃流水'), isFalse);
+    });
+
+    test('V3.12：非空废弃流水 → 生成「废弃流水」Sheet，列头与数据正确', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'], id: 1)],
+        const <ItemWithLocations>[],
+        discards: <ItemDiscard>[
+          ItemDiscard(
+            id: 1,
+            itemId: 1,
+            itemName: '梯子',
+            quantity: 2,
+            locationId: 1,
+            locationName: '阳台',
+            discardedAt: now,
+            sourceType: DiscardSource.inStock,
+            restoredQuantity: 1,
+          ),
+        ],
+      );
+      expect(bytes[0], 0x50);
+      expect(bytes[1], 0x4B);
+
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('废弃流水'), isTrue);
+      final sheet = excel['废弃流水'];
+      final header = sheet.row(0).map((c) => c?.value?.toString()).toList();
+      expect(header, <String?>[
+        '物品名', '废弃数量', '已恢复', '待恢复', '来源', '原位置', '废弃时间',
+      ]);
+      final data = sheet.row(1).map((c) => c?.value?.toString()).toList();
+      expect(data[0], '梯子');
+      expect(data[1], '2');
+      expect(data[2], '1');
+      expect(data[3], '1', reason: '待恢复 = 废弃 - 已恢复');
+      expect(data[4], '在库的那批');
+      expect(data[5], '阳台');
+    });
+
+    test('V3.12：空废弃流水不创建该 Sheet', () {
+      const exporter = ExcelExporter();
+      final bytes = exporter.buildWorkbook(
+        <ItemWithLocations>[row('梯子', <String>['阳台'], id: 1)],
+        const <ItemWithLocations>[],
+      );
+      final excel = Excel.decodeBytes(bytes);
+      expect(excel.tables.containsKey('废弃流水'), isFalse);
+    });
+
     test('既有双 Sheet 列头不变（回归锁）', () {
       const exporter = ExcelExporter();
       final bytes = exporter.buildWorkbook(

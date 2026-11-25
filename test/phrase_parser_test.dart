@@ -846,4 +846,120 @@ void main() {
       expect(r.days, 5);
     });
   });
+  // ============ V3.12 部分废弃：带数量的废弃句式 ============
+  group('V3.12 部分废弃句式', () {
+    test('不带数量 → quantity 为 null（整件废弃，老行为不变）', () {
+      final r = parsePhrase('梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, isNull);
+    });
+
+    test('「废弃1个梯子」→ 数量 1、物品名干净', () {
+      final r = parsePhrase('废弃1个梯子') as ParseDiscard;
+      expect(r.item, '梯子', reason: '数量不许粘进物品名');
+      expect(r.quantity, 1);
+    });
+
+    test('「把1个梯子废弃了」→ 数量 1（旧版会把「1个」粘进物品名）', () {
+      final r = parsePhrase('把1个梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('中文数字：废弃一个梯子 → 数量 1', () {
+      final r = parsePhrase('废弃一个梯子') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('中文数字：梯子报废三个 → 数量 3', () {
+      final r = parsePhrase('梯子报废三个') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 3);
+    });
+
+    test('「梯子不要了1个」→ 数量 1（旧版报歧义）', () {
+      final r = parsePhrase('梯子不要了1个') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('「梯子坏了1个」→ 数量 1；「梯子坏了」→ 整件废弃', () {
+      final one = parsePhrase('梯子坏了1个') as ParseDiscard;
+      expect(one.item, '梯子');
+      expect(one.quantity, 1);
+      final whole = parsePhrase('梯子坏了') as ParseDiscard;
+      expect(whole.item, '梯子');
+      expect(whole.quantity, isNull);
+    });
+
+    test('指名 + 数量同时给：借给王五的1个梯子废弃了', () {
+      final r = parsePhrase('借给王五的1个梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, '王五');
+      expect(r.quantity, 1);
+    });
+
+    test('「梯子扔阳台」不被废弃抢答（V1 口径：精确模板外未识别）', () {
+      expect(parsePhrase('梯子扔阳台'), isA<ParseUnrecognized>());
+    });
+  });
+  // ============ V3.12 部分废弃：带数量的废弃句式 ============
+  group('V3.12 部分废弃句式', () {
+    test('不带数量 → quantity 为 null（整件废弃，老行为不变）', () {
+      final r = parsePhrase('梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, isNull);
+    });
+
+    test('「废弃1个梯子」→ 数量 1、物品名干净', () {
+      final r = parsePhrase('废弃1个梯子') as ParseDiscard;
+      expect(r.item, '梯子', reason: '数量不许粘进物品名');
+      expect(r.quantity, 1);
+    });
+
+    test('「把1个梯子废弃了」→ 数量 1（旧版会把「1个」粘进物品名）', () {
+      final r = parsePhrase('把1个梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('中文数字：废弃一个梯子 → 数量 1', () {
+      final r = parsePhrase('废弃一个梯子') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('中文数字：梯子报废三个 → 数量 3', () {
+      final r = parsePhrase('梯子报废三个') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 3);
+    });
+
+    test('「梯子不要了1个」→ 数量 1（旧版报歧义）', () {
+      final r = parsePhrase('梯子不要了1个') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.quantity, 1);
+    });
+
+    test('「梯子坏了1个」→ 数量 1；「梯子坏了」→ 整件废弃', () {
+      final one = parsePhrase('梯子坏了1个') as ParseDiscard;
+      expect(one.item, '梯子');
+      expect(one.quantity, 1);
+      final whole = parsePhrase('梯子坏了') as ParseDiscard;
+      expect(whole.item, '梯子');
+      expect(whole.quantity, isNull);
+    });
+
+    test('指名 + 数量同时给：借给王五的1个梯子废弃了', () {
+      final r = parsePhrase('借给王五的1个梯子废弃了') as ParseDiscard;
+      expect(r.item, '梯子');
+      expect(r.borrower, '王五');
+      expect(r.quantity, 1);
+    });
+
+    test('「梯子扔阳台」不被废弃抢答（V1 口径：精确模板外未识别）', () {
+      expect(parsePhrase('梯子扔阳台'), isA<ParseUnrecognized>());
+    });
+  });
 }

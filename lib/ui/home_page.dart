@@ -985,6 +985,13 @@ class _HomePageState extends State<HomePage> {
     final extraNames =
         names.where((n) => n != primary.item.name).toList(growable: false);
 
+    // V3.12：带数量的废弃 = **部分废弃**（只废这几个，其余留在明细里）。
+    // 整件废弃（不带数量）继续走下面那条老链路，行为不变。
+    if (parsed.quantity != null) {
+      await _handlePartialDiscard(parsed, primary, siblings: extraNames);
+      return;
+    }
+
     // 借出中的物品：先自动归还（PM 拍板）。
     // 按物品名匹配未还清借出（语音本来就是按名字说的，不依赖 item_id 一致性）。
     final loans = await widget.repository.getAllLoans();
@@ -1108,6 +1115,221 @@ class _HomePageState extends State<HomePage> {
           : '已先归还给$who，再把「${parsed.item}」转入回收站$untouchedNote。';
       _result = null;
     });
+  }
+
+  /// V3.12：部分废弃——「废弃1个梯子」只废 1 个，其余留在明细里。
+  ///
+  /// 弹窗链（PM 2026-11-25 拍板 + 元宝批复第 3 条）：
+  ///  ① 该物品有在借 → 问「废在库的、还是废借出去的那笔」；
+  ///     **多笔在借时一次列全**，让用户自己点，绝不静默选最早/最晚；
+  ///  ② 物品在多个位置 → 问「从哪个位置废弃」（带上各处现有数量）；
+  ///  ③ 确认框明说后果（在哪儿扣几个、借给谁的先归还）。
+  ///
+  /// 取消任何一步都零副作用（确认之前不写库）。
+  Future<void> _handlePartialDiscard(
+    ParseDiscard parsed,
+    ItemWithLocations primary, {
+    List<String> siblings = const <String>[],
+  }) async {
+    final qty = parsed.quantity!;
+    final key = normalizeName(parsed.item);
+
+    // ---- ① 废在库的，还是废借出去的那笔？ ----
+    final loans = await widget.repository.getAllLoans();
+    if (!mounted) return;
+    final openLoans = loans
+        .where((l) => itemNamesMatch(l.itemName, key) && !l.isReturned)
+        .toList(growable: false);
+    Loan? loanToReturn;
+    if (openLoans.isNotEmpty) {
+      final choice = await _pickDiscardSource(openLoans, qty);
+      if (!mounted) return;
+      if (choice == null) {
+        setState(() {
+          _busy = false;
+          _notice = '已取消废弃，什么都没改。';
+          _result = null;
+        });
+        return;
+      }
+      loanToReturn = choice.loan;
+      if (loanToReturn != null) {
+        final lent = loanToReturn.quantity - loanToReturn.returnedQty;
+        if (lent < qty) {
+          setState(() {
+            _busy = false;
+            _notice = '${loanToReturn!.borrowerName}那笔只借走 $lent 个，'
+                '不够废弃 $qty 个。什么都没改。';
+            _result = null;
+          });
+          return;
+        }
+      }
+    }
+
+    // ---- ② 从哪个位置废弃？ ----
+    final itemLocs = primary.locations.where((l) => l.id != null).toList();
+    int? locationId;
+    if (itemLocs.length > 1) {
+      locationId = await _pickLocation(
+        title: '从哪儿废弃 $qty 个？',
+        subtitle: '只从你选的地方扣，其余位置不动。',
+        locations: itemLocs,
+        itemName: primary.item.name,
+      );
+      if (!mounted) return;
+      if (locationId == null) {
+        setState(() {
+          _busy = false;
+          _notice = '已取消废弃，什么都没改。';
+          _result = null;
+        });
+        return;
+      }
+    } else if (itemLocs.length == 1) {
+      locationId = itemLocs.first.id;
+    } else {
+      setState(() {
+        _busy = false;
+        _notice = '「${parsed.item}」现在没有记在任何位置上，没法废弃。';
+        _result = null;
+      });
+      return;
+    }
+
+    final locName = itemLocs
+        .where((l) => l.id == locationId)
+        .map((l) => l.name)
+        .firstOrNull ??
+        '当前位置';
+    final hereQty = await _positionQty(primary.item.name, locationId!);
+    if (hereQty < qty) {
+      setState(() {
+        _busy = false;
+        _notice = '$locName 只有 $hereQty 个，不够废弃 $qty 个。什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+
+    // ---- ③ 确认（说清后果） ----
+    final siblingNote = siblings.isEmpty
+        ? ''
+        : '\n（另有一条历史记录「${siblings.join('、')}」不动）';
+    final body = loanToReturn == null
+        ? '从「$locName」废弃 $qty 个「${parsed.item}」。\n'
+            '$locName 还剩 ${hereQty - qty} 个，其余位置照常不动。$siblingNote\n确定吗？'
+        : '会先归还给${loanToReturn.borrowerName} $qty 个，再从「$locName」废弃。\n'
+            '$locName 还剩 ${hereQty - qty} 个，其余位置照常不动。$siblingNote\n确定吗？';
+    final confirmed = await _confirmAction(
+      '废弃 $qty 个「${parsed.item}」',
+      body,
+      confirmLabel: '废弃',
+    );
+    if (!mounted) return;
+    if (!confirmed) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消废弃，什么都没改。';
+        _result = null;
+      });
+      return;
+    }
+
+    try {
+      if (loanToReturn != null) {
+        await widget.repository.returnLoan(
+          loanToReturn.id!,
+          quantity: qty,
+        );
+      }
+      final outcome = await widget.repository.discardQuantity(
+        primary.item.name,
+        qty,
+        locationId: locationId,
+        sourceType: loanToReturn == null
+            ? DiscardSource.inStock
+            : DiscardSource.onLoan,
+      );
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        if (outcome.wholeItem) {
+          _notice = '已把「${outcome.itemName}」全部转入回收站。';
+        } else {
+          final borrowNote = loanToReturn == null
+              ? ''
+              : '（先归还给${loanToReturn.borrowerName}）';
+          _notice = '已从「${outcome.locationName}」废弃 $qty 个「${outcome.itemName}」'
+              '$borrowNote，家里还剩 ${outcome.remainingInStock} 个。';
+        }
+        _result = null;
+      });
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = e.message is String ? e.message as String : '废弃失败，什么都没改。';
+        _result = null;
+      });
+    }
+  }
+
+  /// V3.12：废弃来源选择——一次列全所有候选（在库的 + 每一笔在借），
+  /// 让用户自己点；**多笔在借时不静默选**（元宝批复第 3 条）。
+  Future<_DiscardChoice?> _pickDiscardSource(
+    List<Loan> openLoans,
+    int qty,
+  ) async {
+    return showDialog<_DiscardChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('discard_source_dialog'),
+        title: Text('废弃哪 $qty 个？'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const Text('家里在借的也有这件，选一个来源：',
+                  style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+              const SizedBox(height: 4),
+              ListTile(
+                key: const Key('discard_source_in_stock'),
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.home_outlined),
+                title: const Text('在库的那些',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                subtitle: Text('从家里现在的存放位置扣 $qty 个',
+                    style: const TextStyle(
+                        fontSize: 12.5, color: Color(0xff607d8b))),
+                onTap: () =>
+                    Navigator.of(context).pop(const _DiscardChoice.inStock()),
+              ),
+              for (final loan in openLoans)
+                ListTile(
+                  key: Key('discard_source_loan_${loan.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.person_outline),
+                  title: Text('${loan.borrowerName}借走的那 ${loan.quantity - loan.returnedQty} 个',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  subtitle: Text('先归还回来，再废弃 $qty 个',
+                      style: const TextStyle(
+                          fontSize: 12.5, color: Color(0xff607d8b))),
+                  onTap: () => Navigator.of(context).pop(_DiscardChoice.loan(loan)),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 废弃候选框：同一借阅人多笔在借时让用户点是哪一笔
@@ -1566,7 +1788,7 @@ class _HomePageState extends State<HomePage> {
           // V3.9 语音化第一批：三个新意图的句式一并列进来，
           // 否则用户不知道能这么说。
           // V3.9.2：废弃句补指名说法——「借给王五的梯子废弃了」只动王五那笔账。
-          _syntaxRow('废弃', '梯子废弃了｜借给王五的梯子废弃了'),
+          _syntaxRow('废弃', '梯子废弃了｜废弃1个梯子｜借给王五的梯子废弃了'),
           _syntaxRow('恢复', '恢复梯子'),
           _syntaxRow('改借期', '梯子借期改成5天｜再借3天'),
           const SizedBox(height: 2),
@@ -1840,4 +2062,15 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
+
+/// V3.12：废弃来源的选择结果。
+///
+/// [loan] 为 null = 废弃"在库的那些"；否则 = 先归还这一笔借出、再废弃它。
+class _DiscardChoice {
+  const _DiscardChoice.inStock() : loan = null;
+
+  const _DiscardChoice.loan(this.loan);
+
+  final Loan? loan;
 }

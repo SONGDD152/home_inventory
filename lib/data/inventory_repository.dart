@@ -171,4 +171,35 @@ abstract class InventoryRepository {
     bool additive = false,
   }) async =>
       0;
+
+  // ---------- V3.12 部分废弃 ----------
+
+  /// 部分废弃：把某位置的 [quantity] 个移出明细，其余留在明细里。
+  ///
+  /// 数量 == 在库总数时自动转整件废弃（物品进回收站）；位置数量不够
+  /// 抛 ArgumentError 且**不改任何数量**。
+  Future<DiscardOutcome> discardQuantity(
+    String itemName,
+    int quantity, {
+    required int locationId,
+    DiscardSource sourceType = DiscardSource.inStock,
+  }) async =>
+      throw UnimplementedError('discardQuantity 需由真实仓储实现');
+
+  /// 恢复一条废弃流水：[toLocationId] 是恢复落点（PM 口径：恢复时问位置）。
+  /// [quantity] 为空 = 恢复全部未恢复的数量。
+  Future<ItemDiscard> restoreDiscard(int discardId, int toLocationId,
+          {int? quantity}) async =>
+      throw UnimplementedError('restoreDiscard 需由真实仓储实现');
+
+  /// 废弃流水列表（默认只返回还有待恢复数量的）。
+  Future<List<ItemDiscard>> getDiscards({bool includeRestored = false}) async =>
+      const <ItemDiscard>[];
+
+  /// 彻底删除一条废弃流水（物理清除，不可恢复）。
+  Future<void> purgeDiscard(int discardId) async {}
+
+  /// V3.12：数量守恒自检（`items.quantity == SUM(活跃位置数量)` 逐件成立）。
+  /// 测试与诊断用；生产每次写操作后也会在 debug 模式自检。
+  Future<bool> checkConservation() async => true;
 }

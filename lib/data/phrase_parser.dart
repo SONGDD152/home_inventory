@@ -122,7 +122,7 @@ class ParseUnrecognized extends ParseResult {
 ///
 /// PM 原话「东西废弃的话能语音输入，说一句话就把物品从明细里转到回收站」。
 class ParseDiscard extends ParseResult {
-  const ParseDiscard({required this.item, this.borrower});
+  const ParseDiscard({required this.item, this.borrower, this.quantity});
 
   final String item;
 
@@ -130,6 +130,10 @@ class ParseDiscard extends ParseResult {
   ///
   /// V3.9.2：指名时只废弃该借阅人那一笔借出，不连带销掉别人的账。
   final String? borrower;
+
+  /// V3.12：废弃几个。null = 整件废弃（老行为，物品整条进回收站）；
+  /// 有值 = 部分废弃（只废这几个，其余留在明细里）。
+  final int? quantity;
 }
 
 /// 恢复意图（V3.9）：把回收站里的物品恢复到明细。
@@ -1066,6 +1070,10 @@ bool _looksLikeBorrowerName(String head) {
 /// 不是丢弃，收进来会把这类句子抢答成废弃（V1「精确模板外未识别」）。
 const List<String> _discardMarkers = <String>[
   '不需要了', '不要了', '不用了', '废弃了', '报废了', '丢掉了', '扔了', '扔掉',
+  // V3.12：坏掉的说法也算废弃（「梯子坏了1个」= 废 1 个）。
+  // 「坏」也要收：parsePhrase 会先剥句尾助词「了」，
+  // 「梯子坏了」进来时已经是「梯子坏」，只认「坏了」会漏。
+  '坏掉了', '坏了', '坏',
   '不需要', '不要', '不用', '废弃', '报废', '扔', '丢',
 ];
 
@@ -1116,12 +1124,39 @@ ParseResult? _parseDiscard(String text) {
   // UI 才能只还他那一笔，不连带清零李四张三的账（PM 真机复验新缺陷）。
   final modifierPerson = _extractModifierPerson(head);
   head = _stripLendModifier(head);
-  final item = normalizeName(_stripTrailingParticle(head));
-  if (item.isEmpty) return null; // 「不要了」这类没有物品名的句子不是废弃句。
+
+  // V3.12：数量可能在动词**前面**——「把1个梯子废弃了」。
+  // 不剥会把「1个」粘进物品名（建成「1个梯子」这种新物品，明细多一行）。
+  int? quantity;
+  final headQty = _extractLeadingQuantity(head);
+  if (headQty != null && headQty.rest.isNotEmpty) {
+    quantity = headQty.value;
+    head = headQty.rest;
+  }
 
   var tail = text.substring(markerIdx + marker.length).trim();
   tail = _stripTrailingParticle(tail);
-  if (tail.isEmpty) return ParseDiscard(item: item, borrower: modifierPerson);
+
+  // V3.12：数量也可能在动词**后面**——「梯子报废1个」「废弃1个梯子」。
+  // 原来这里一律当"动词后还有东西 = 歧义"，导致「梯子不要了1个」报歧义。
+  var tailRest = tail;
+  final tailQty = _extractDiscardQuantity(tail);
+  if (tailQty != null) {
+    quantity ??= tailQty.value;
+    tailRest = tailQty.rest;
+    // 「废弃1个梯子」：动词前没有物品名，物品名在数量后面。
+    if (head.isEmpty && tailRest.isNotEmpty) {
+      head = tailRest;
+      tailRest = '';
+    }
+  }
+
+  final item = normalizeName(_stripTrailingParticle(head));
+  if (item.isEmpty) return null; // 「不要了」这类没有物品名的句子不是废弃句。
+
+  if (tailRest.isEmpty) {
+    return ParseDiscard(item: item, borrower: modifierPerson, quantity: quantity);
+  }
 
   // 单字丢弃动词（扔/丢）后面还带东西 → 是"放到某处"不是丢弃，
   // 例如「梯子扔阳台」。这层不认废弃，交给后面的放置/未识别分支，
@@ -1130,8 +1165,10 @@ ParseResult? _parseDiscard(String text) {
 
   // 动词后面还有内容 → 报歧义：既可能是「放弃这件东西」，也可能是
   // 「放到某个位置」。
-  final location = _extractPlacementLocation(tail);
-  final candidates = <ParseResult>[ParseDiscard(item: item, borrower: modifierPerson)];
+  final location = _extractPlacementLocation(tailRest);
+  final candidates = <ParseResult>[
+    ParseDiscard(item: item, borrower: modifierPerson, quantity: quantity),
+  ];
   if (location != null) {
     candidates.add(ParseUpsert(item: item, location: normalizeName(location)));
   }
@@ -1140,6 +1177,27 @@ ParseResult? _parseDiscard(String text) {
     hint: '「$item」这句有两种理解：'
         '${location != null ? '放到$location，或' : ''}把它转入回收站？',
   );
+}
+
+/// V3.12：废弃句里的数量（阿拉伯 + 中文数字，量词 个/本/把/件/只/张）。
+///
+/// 与 [_extractLeadingQuantity] 的差别：中文数字后面**不再要求有字**
+/// （「梯子报废一个」也算数），而 [_extractLeadingQuantity] 在录入场景
+/// 需要后面的物品名，所以那里保持"必须有字"的老口径不动。
+({int value, String rest})? _extractDiscardQuantity(String text) {
+  final direct = _extractLeadingQuantity(text);
+  if (direct != null) return direct;
+  final keys = _cnNumbers.keys.toList()
+    ..sort((a, b) => b.length.compareTo(a.length));
+  for (final key in keys) {
+    if (!text.startsWith(key)) continue;
+    var rest = text.substring(key.length).trim();
+    if (rest.isEmpty) continue;
+    if (!'个本把件只张'.contains(rest.substring(0, 1))) continue;
+    rest = rest.substring(1).trim();
+    return (value: _cnNumbers[key]!, rest: rest);
+  }
+  return null;
 }
 
 /// 从片段里取出放置位置（动词 + 介词之后的干净部分）。

@@ -462,3 +462,112 @@ class CalibrationReport {
   bool get isNoop => changedCount == 0;
 }
 
+/// V3.12：废弃来源（废弃流水表的 `source_type`）。
+///
+/// * [inStock] 废弃的是在库的东西（家里清出来的）。
+/// * [onLoan] 废弃的是借出去的东西（先归还再废弃）。
+enum DiscardSource {
+  inStock('in_stock'),
+  onLoan('on_loan');
+
+  const DiscardSource(this.code);
+
+  /// 落库字符串。
+  final String code;
+
+  /// 从库里的字符串解析（兼容旧值/未知值 → [inStock]）。
+  static DiscardSource fromCode(String? code) {
+    for (final s in DiscardSource.values) {
+      if (s.code == code) return s;
+    }
+    return DiscardSource.inStock;
+  }
+}
+
+/// V3.12：废弃流水（`item_discards` 表一行 = 一次"废了几个"）。
+///
+/// **为什么单独建表**：整件废弃（物品行软删）和部分废弃（物品还在，
+/// 只挪走几个）是两种语义，不能塞进同一张表，否则恢复时没法分清
+/// 「原样还原各位置」和「恢复时问位置」。
+///
+/// 数量守恒口径（V3.12 精确化）：
+/// ```
+/// 总拥有数 = 在库(活跃 items.quantity)
+///          + 在借(SUM(未还清 loans))
+///          + 整件废弃未恢复(SUM(软删 items.quantity))
+///          + 部分废弃未恢复(SUM(discards.quantity - discards.restored_quantity))
+/// ```
+class ItemDiscard {
+  const ItemDiscard({
+    this.id,
+    required this.itemId,
+    required this.itemName,
+    required this.quantity,
+    this.locationId,
+    this.locationName,
+    required this.discardedAt,
+    this.sourceType = DiscardSource.inStock,
+    this.restoredQuantity = 0,
+  });
+
+  final int? id;
+
+  /// 关联的物品 id（部分废弃时物品仍活跃；整件废弃后该行会变软删）。
+  final int itemId;
+
+  /// 物品名快照（物品改名/删除后仍可读）。
+  final String itemName;
+
+  /// 这次废弃了几个。
+  final int quantity;
+
+  /// 废弃时的来源位置（仅展示；恢复时按 PM 口径重新问位置）。
+  final int? locationId;
+
+  /// 来源位置名快照。
+  final String? locationName;
+
+  /// 废弃时间戳（毫秒）。
+  final int discardedAt;
+
+  /// 废弃来源：在库 / 在借。
+  final DiscardSource sourceType;
+
+  /// 已恢复的数量（元宝批复：支持"恢复 1 个、另 1 个还在回收站"）。
+  final int restoredQuantity;
+
+  /// 还没恢复的数量。
+  int get pendingQuantity => quantity - restoredQuantity;
+
+  /// 是否已全部恢复（流水不再是有效待恢复项）。
+  bool get isFullyRestored => pendingQuantity <= 0;
+}
+
+/// V3.12：部分废弃的执行结果。
+///
+/// [wholeItem] 为 true 表示"废的数量 == 在库总数"，已自动转成整件废弃
+/// （物品整条进回收站），没有生成流水。
+class DiscardOutcome {
+  const DiscardOutcome({
+    required this.itemName,
+    required this.quantity,
+    required this.wholeItem,
+    this.locationName,
+    this.remainingInStock = 0,
+  });
+
+  final String itemName;
+
+  /// 废弃了几个。
+  final int quantity;
+
+  /// true=整件废弃（物品进回收站）；false=部分废弃（物品仍在明细）。
+  final bool wholeItem;
+
+  /// 扣减的位置名（部分废弃时有值）。
+  final String? locationName;
+
+  /// 废弃后在库还剩几个（部分废弃时有值）。
+  final int remainingInStock;
+}
+

@@ -28,6 +28,8 @@ class TrashPage extends StatefulWidget {
 class _TrashPageState extends State<TrashPage> {
   List<ItemWithLocations>? _rows;
   List<Loan>? _loans;
+  /// V3.12：部分废弃流水（只废了几个，物品本身还在明细里）。
+  List<ItemDiscard>? _discards;
   String? _error;
   bool _busy = false;
 
@@ -41,10 +43,12 @@ class _TrashPageState extends State<TrashPage> {
     try {
       final rows = await widget.repository.getDeletedItems();
       final loans = await widget.repository.getDeletedLoans();
+      final discards = await widget.repository.getDiscards();
       if (!mounted) return;
       setState(() {
         _rows = rows;
         _loans = loans;
+        _discards = discards;
         _error = null;
       });
     } on Exception catch (e) {
@@ -52,6 +56,7 @@ class _TrashPageState extends State<TrashPage> {
       setState(() {
         _rows = const <ItemWithLocations>[];
         _loans = const <Loan>[];
+        _discards = const <ItemDiscard>[];
         _error = '加载失败：$e';
       });
     }
@@ -151,16 +156,90 @@ class _TrashPageState extends State<TrashPage> {
   Future<void> _purgeAll() async {
     // 元宝 V3.8 批复补充要求：purgeAll() 连带清空已删借出记录，
     // 二次确认文案必须写明「包括已删除的借出记录」，不能让用户误删。
+    // V3.12：再加一条「部分废弃的记录」（级联清空，元宝批复第 6 条）。
     final confirmed = await _confirm(
       '全部清空',
       '将彻底删除回收站全部内容：\n'
           '· 全部物品（含其位置记录）\n'
           '· 已删除的借出记录\n'
+          '· 部分废弃的记录（只废了几个的那些）\n'
           '此操作不可恢复。',
       confirmLabel: '全部清空',
     );
     if (!confirmed || !mounted) return;
     await _guard(() => widget.repository.purgeAll());
+  }
+
+  /// V3.12：恢复一条部分废弃流水——**恢复时问位置**（PM 口径：
+  /// 不依赖废弃时的原位置，用户想放哪儿就放哪儿）。
+  Future<void> _restoreDiscard(ItemDiscard discard) async {
+    final locations = await widget.repository.getAllLocations();
+    if (!mounted) return;
+    if (locations.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('还没有任何位置，先加一个位置再恢复。')),
+      );
+      return;
+    }
+    final locationId = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('trash_restore_discard_dialog'),
+        title: Text('恢复 ${discard.pendingQuantity} 个「${discard.itemName}」'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              const Text('放到哪儿？恢复后的这几个会加到那个位置。',
+                  style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+              const SizedBox(height: 6),
+              for (final loc in locations)
+                ListTile(
+                  key: Key('trash_restore_discard_${loc.name}'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.place_outlined),
+                  title: Text(loc.name),
+                  onTap: () => Navigator.of(context).pop(loc.id),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (locationId == null || !mounted) return;
+    await _guard(() async {
+      await widget.repository.restoreDiscard(discard.id!, locationId);
+      if (!mounted) return;
+      final locName = locations
+          .where((l) => l.id == locationId)
+          .map((l) => l.name)
+          .firstOrNull;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已恢复 ${discard.pendingQuantity} 个「${discard.itemName}」'
+              '到「$locName」。'),
+        ),
+      );
+    });
+  }
+
+  /// V3.12：彻底删除一条部分废弃流水。
+  Future<void> _purgeDiscard(ItemDiscard discard) async {
+    final confirmed = await _confirm(
+      '彻底删除',
+      '彻底删除这条「${discard.itemName} ×${discard.pendingQuantity}」的废弃记录？\n'
+          '此操作不可恢复。',
+      confirmLabel: '彻底删除',
+    );
+    if (!confirmed || !mounted) return;
+    await _guard(() => widget.repository.purgeDiscard(discard.id!));
   }
 
   String _deletedAtLabel(ItemWithLocations row) {
@@ -176,13 +255,14 @@ class _TrashPageState extends State<TrashPage> {
   Widget build(BuildContext context) {
     final rows = _rows ?? const <ItemWithLocations>[];
     final loans = _loans ?? const <Loan>[];
+    final discards = _discards ?? const <ItemDiscard>[];
     return Scaffold(
       appBar: AppBar(
-        title: Text('回收站（${rows.length + loans.length}）'),
+        title: Text('回收站（${rows.length + loans.length + discards.length}）'),
         actions: <Widget>[
           TextButton.icon(
             key: const Key('trash_purge_all'),
-            onPressed: _busy || (rows.isEmpty && loans.isEmpty)
+            onPressed: _busy || (rows.isEmpty && loans.isEmpty && discards.isEmpty)
                 ? null
                 : _purgeAll,
             icon: const Icon(Icons.delete_forever, size: 18),
@@ -191,18 +271,22 @@ class _TrashPageState extends State<TrashPage> {
           ),
         ],
       ),
-      body: _buildBody(rows, loans),
+      body: _buildBody(rows, loans, discards),
     );
   }
 
-  Widget _buildBody(List<ItemWithLocations> rows, List<Loan> loans) {
+  Widget _buildBody(
+    List<ItemWithLocations> rows,
+    List<Loan> loans,
+    List<ItemDiscard> discards,
+  ) {
     if (_error != null) {
       return Center(child: Text(_error!));
     }
     if (_rows == null) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (rows.isEmpty && loans.isEmpty) {
+    if (rows.isEmpty && loans.isEmpty && discards.isEmpty) {
       return const Center(
         child: Text(
           '回收站为空',
@@ -217,12 +301,74 @@ class _TrashPageState extends State<TrashPage> {
           _sectionHeader('已删除的借出记录（${loans.length}）'),
           for (final loan in loans) _buildLoanCard(loan),
         ],
+        if (discards.isNotEmpty) ...<Widget>[
+          _sectionHeader('部分废弃的物品（${discards.length}）'),
+          for (final discard in discards) _buildDiscardCard(discard),
+        ],
         if (rows.isNotEmpty) ...<Widget>[
           _sectionHeader('已删除的物品（${rows.length}）'),
           for (final row in rows) _buildItemCard(row),
         ],
       ],
     );
+  }
+
+  /// V3.12：部分废弃流水卡片（恢复时问位置 / 彻底删除）。
+  Widget _buildDiscardCard(ItemDiscard discard) {
+    final id = discard.id ?? 0;
+    final from = discard.locationName;
+    final sourceNote =
+        discard.sourceType == DiscardSource.onLoan ? '借出的那批' : '在库的那批';
+    return Card(
+      key: Key('trash_discard_$id'),
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              '${discard.itemName} ×${discard.pendingQuantity}',
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              '来源：$sourceNote'
+              '${from == null || from.isEmpty ? '' : ' · 原在「$from」'}'
+              ' · 废弃于 ${_discardDate(discard.discardedAt)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12.5, color: Color(0xff607d8b)),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: <Widget>[
+                TextButton(
+                  key: Key('trash_discard_restore_$id'),
+                  onPressed: _busy ? null : () => _restoreDiscard(discard),
+                  child: const Text('恢复'),
+                ),
+                const Spacer(),
+                TextButton(
+                  key: Key('trash_discard_purge_$id'),
+                  onPressed: _busy ? null : () => _purgeDiscard(discard),
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                  child: const Text('彻底删除'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _discardDate(int at) {
+    final t = DateTime.fromMillisecondsSinceEpoch(at);
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}-${two(t.month)}-${two(t.day)} '
+        '${two(t.hour)}:${two(t.minute)}';
   }
 
   /// 区块标题（纯文字，无图标）。

@@ -101,4 +101,30 @@ mixin FakeLoanMixin {
   Future<ItemWithLocations?> findByName(String name) async => null;
 
   Future<List<Location>> getAllLocations() async => const <Location>[];
+
+  // ---------- V3.12 部分废弃 ----------
+
+  Future<DiscardOutcome> discardQuantity(
+    String itemName,
+    int quantity, {
+    required int locationId,
+    DiscardSource sourceType = DiscardSource.inStock,
+  }) async =>
+      DiscardOutcome(
+        itemName: itemName,
+        quantity: quantity,
+        wholeItem: false,
+        remainingInStock: 0,
+      );
+
+  Future<ItemDiscard> restoreDiscard(int discardId, int toLocationId,
+          {int? quantity}) async =>
+      throw UnimplementedError('restoreDiscard 需由真实仓储实现');
+
+  Future<List<ItemDiscard>> getDiscards({bool includeRestored = false}) async =>
+      const <ItemDiscard>[];
+
+  Future<void> purgeDiscard(int discardId) async {}
+
+  Future<bool> checkConservation() async => true;
 }

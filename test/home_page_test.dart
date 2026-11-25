@@ -23,6 +23,10 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   final List<Loan> _loans = <Loan>[];
   int _loanId = 0;
 
+  // V3.12：部分废弃流水（内存实现与生产同语义）。
+  final List<ItemDiscard> _discards = <ItemDiscard>[];
+  int _discardId = 0;
+
   @override
   Future<Loan> lendItem(String itemName, String borrowerName,
       {int quantity = 1, int? days, int? fromLocationId}) async {
@@ -456,8 +460,12 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
 
   @override
   Future<void> purgeItem(int id) async {
+    final name = _items.where((i) => i.id == id).map((i) => i.name).firstOrNull;
     _items.removeWhere((i) => i.id == id && i.isDeleted);
     _links.removeWhere((l) => l.itemId == id);
+    // V3.12：彻底删除这件物品 = 它的一切痕迹都没了 → 同名流水一并清掉。
+    _discards.removeWhere(
+        (d) => d.itemId == id || (name != null && d.itemName == name));
   }
 
   @override
@@ -465,6 +473,135 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     final ids = _items.where((i) => i.isDeleted).map((i) => i.id!).toList();
     _items.removeWhere((i) => i.isDeleted);
     _links.removeWhere((l) => ids.contains(l.itemId));
+    // V3.12：清空回收站级联清流水（元宝批复第 6 条）。
+    _discards.clear();
+  }
+
+  // ---------- V3.12 部分废弃：内存实现与生产同语义 ----------
+
+  /// V3.12：部分废弃——只扣指定位置，写一条流水；废完则转整件废弃。
+  @override
+  Future<DiscardOutcome> discardQuantity(
+    String itemName,
+    int quantity, {
+    required int locationId,
+    DiscardSource sourceType = DiscardSource.inStock,
+  }) async {
+    final key = normalizeName(itemName);
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      throw ArgumentError.value(itemName, 'itemName', '还没记录过「$key」');
+    }
+    final itemId = hit.id!;
+    final locName = _locations
+        .where((l) => l.id == locationId)
+        .map((l) => l.name)
+        .firstOrNull;
+    if (locName == null) {
+      throw ArgumentError.value(locationId, 'locationId', '位置不存在或已删除');
+    }
+    final locQty = _locationQty(itemId, locationId);
+    if (locQty < quantity) {
+      throw ArgumentError.value(quantity, 'quantity',
+          '$locName 只有 $locQty 个，不够废弃 $quantity 个');
+    }
+    final stock = hit.quantity;
+    if (stock < quantity) {
+      throw ArgumentError.value(quantity, 'quantity',
+          '「$key」一共只有 $stock 个，不够废弃 $quantity 个');
+    }
+    if (stock == quantity) {
+      await deleteItem(itemId);
+      return DiscardOutcome(
+        itemName: key,
+        quantity: quantity,
+        wholeItem: true,
+        locationName: locName,
+      );
+    }
+    _writeLocationQty(itemId, locationId, locQty - quantity);
+    _syncTotal(itemId);
+    _discards.add(ItemDiscard(
+      id: ++_discardId,
+      itemId: itemId,
+      itemName: key,
+      quantity: quantity,
+      locationId: locationId,
+      locationName: locName,
+      discardedAt: DateTime.now().millisecondsSinceEpoch,
+      sourceType: sourceType,
+      restoredQuantity: 0,
+    ));
+    final remaining = _items
+        .where((i) => i.id == itemId)
+        .map((i) => i.quantity)
+        .firstOrNull ??
+        0;
+    return DiscardOutcome(
+      itemName: key,
+      quantity: quantity,
+      wholeItem: false,
+      locationName: locName,
+      remainingInStock: remaining,
+    );
+  }
+
+  @override
+  Future<ItemDiscard> restoreDiscard(int discardId, int toLocationId,
+      {int? quantity}) async {
+    final idx = _discards.indexWhere((d) => d.id == discardId);
+    if (idx < 0) {
+      throw ArgumentError.value(discardId, 'discardId', '找不到这条废弃记录');
+    }
+    final old = _discards[idx];
+    final pending = old.pendingQuantity;
+    if (pending <= 0) {
+      throw ArgumentError.value(
+          discardId, 'discardId', '这条废弃记录已经全部恢复过了');
+    }
+    final want = quantity ?? pending;
+    if (want < 1 || want > pending) {
+      throw ArgumentError.value(quantity, 'quantity',
+          '要恢复的数量必须在 1 ~ $pending 之间');
+    }
+    final item = _items.where((i) => i.id == old.itemId).firstOrNull;
+    if (item == null || item.isDeleted) {
+      throw ArgumentError.value(discardId, 'discardId',
+          '「${old.itemName}」已整体进回收站，请先恢复物品再恢复这几个');
+    }
+    final locName = _locations
+        .where((l) => l.id == toLocationId)
+        .map((l) => l.name)
+        .firstOrNull;
+    if (locName == null) {
+      throw ArgumentError.value(toLocationId, 'toLocationId', '位置不存在或已删除');
+    }
+    final cur = _locationQty(old.itemId, toLocationId);
+    _writeLocationQty(old.itemId, toLocationId, cur + want);
+    _syncTotal(old.itemId);
+    _discards[idx] = ItemDiscard(
+      id: old.id,
+      itemId: old.itemId,
+      itemName: old.itemName,
+      quantity: old.quantity,
+      locationId: old.locationId,
+      locationName: old.locationName,
+      discardedAt: old.discardedAt,
+      sourceType: old.sourceType,
+      restoredQuantity: old.restoredQuantity + want,
+    );
+    return _discards[idx];
+  }
+
+  @override
+  Future<List<ItemDiscard>> getDiscards({bool includeRestored = false}) async {
+    if (includeRestored) return List<ItemDiscard>.from(_discards);
+    return _discards.where((d) => d.pendingQuantity > 0).toList();
+  }
+
+  @override
+  Future<void> purgeDiscard(int discardId) async {
+    _discards.removeWhere((d) => d.id == discardId);
   }
 
   @override
@@ -765,7 +902,8 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   @override
   Future<ItemWithLocations?> findByName(String name) async {
     final key = normalizeName(name);
-    final item = _items.where((i) => i.name == key).toList();
+    // 与生产一致：只查活跃物品（软删的在回收站，不算"记录过"）。
+    final item = _items.where((i) => i.name == key && !i.isDeleted).toList();
     if (item.isEmpty) return null;
     // V3.11：软删关联是历史留底，不能出现在当前位置查询里。
     final locationIds = _links
@@ -2359,6 +2497,174 @@ void main() {
       expect(found.quantityAt(found.locations
           .firstWhere((l) => l.name == '阳台')
           .id!), 3, reason: '阳台保持上一步的结果');
+    });
+  });
+
+  // ============ V3.12 部分废弃（只废 1 个，不连坐） ============
+  group('V3.12 部分废弃', () {
+    Future<void> seedTwoLocations() async {
+      final balcony = await repo.addLocation('阳台');
+      final living = await repo.addLocation('客厅');
+      await repo.upsertItemLocation('梯子', balcony, quantity: 2);
+      await repo.upsertItemLocation('梯子', living, quantity: 1);
+    }
+
+    testWidgets('「废弃1个梯子」：问从哪废弃，只废 1 个，其余留在明细',
+        (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '废弃1个梯子');
+
+      // 多位置 → 先问从哪儿废弃（带上各处数量）。
+      expect(find.byKey(const Key('pick_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('pick_location_阳台')));
+      await settle(tester);
+
+      // 确认框要说清后果。
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      expect(find.textContaining('会'), findsWidgets);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      expect(found, isNotNull, reason: '物品不能被整条删掉');
+      expect(found!.item.quantity, 2, reason: '3 个废 1 个剩 2 个');
+      final balconyId = found.locations
+          .firstWhere((l) => l.name == '阳台')
+          .id!;
+      final livingId = found.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!;
+      expect(found.quantityAt(balconyId), 1, reason: '阳台 2 → 1');
+      expect(found.quantityAt(livingId), 1, reason: '客厅不受影响');
+
+      final discards = await repo.getDiscards();
+      expect(discards.length, 1);
+      expect(discards.first.quantity, 1);
+      expect(discards.first.locationName, '阳台');
+    });
+
+    testWidgets('「废弃一个梯子」中文数字同样认得', (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '废弃一个梯子');
+
+      expect(find.byKey(const Key('pick_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('pick_location_客厅')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      expect(found!.item.quantity, 2);
+      final livingId = found.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!;
+      expect(found.quantityAt(livingId), 0, reason: '客厅那 1 个被废弃');
+    });
+
+    testWidgets('单位置物品：不用问位置，直接确认后只废 1 个', (tester) async {
+      final balcony = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', balcony, quantity: 3);
+      await pumpApp(tester);
+      await submit(tester, '废弃1个梯子');
+
+      expect(find.byKey(const Key('pick_location_dialog')), findsNothing,
+          reason: '只有一个位置不必问');
+      expect(find.byKey(const Key('action_confirm_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      expect(found!.item.quantity, 2);
+    });
+
+    testWidgets('取消确认：零副作用（什么都没改）', (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '废弃1个梯子');
+      await tester.tap(find.byKey(const Key('pick_location_阳台')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('action_confirm_cancel')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      expect(found!.item.quantity, 3, reason: '取消后数量不变');
+      expect((await repo.getDiscards()).length, 0, reason: '取消不留流水');
+    });
+
+    testWidgets('多笔在借：弹窗问是哪笔，不静默选（元宝批复第 3 条）',
+        (tester) async {
+      await seedTwoLocations();
+      // 两笔在借：张三 1 个、李四 1 个。
+      final zhang = await repo.lendItem('梯子', '张三', quantity: 1);
+      await repo.lendItem('梯子', '李四', quantity: 1);
+      await pumpApp(tester);
+
+      await submit(tester, '废弃1个梯子');
+
+      // 来源弹窗：一次列全（在库的 + 每一笔在借）。
+      expect(find.byKey(const Key('discard_source_dialog')), findsOneWidget);
+      expect(find.byKey(const Key('discard_source_in_stock')), findsOneWidget);
+      expect(find.byKey(Key('discard_source_loan_${zhang.id}')), findsOneWidget);
+      expect(find.textContaining('李四'), findsWidgets);
+
+      // 选李四那笔 → 先归还再废弃。
+      final liLoan = (await repo.getAllLoans())
+          .firstWhere((l) => l.borrowerName == '李四');
+      await tester.tap(find.byKey(Key('discard_source_loan_${liLoan.id}')));
+      await settle(tester);
+
+      expect(find.byKey(const Key('pick_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('pick_location_客厅')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      // 李四那笔已归还（不再是在借），张三那笔不动。
+      final loans = await repo.getAllLoans();
+      expect(loans.firstWhere((l) => l.id == liLoan.id).isReturned, isTrue,
+          reason: '选中的那笔先归还');
+      expect(loans.firstWhere((l) => l.id == zhang.id).isReturned, isFalse,
+          reason: '没选中的那笔不动');
+    });
+
+    testWidgets('废弃在借的：借出的那笔也只动说好的数量', (tester) async {
+      await seedTwoLocations();
+      await repo.lendItem('梯子', '张三', quantity: 1);
+      await pumpApp(tester);
+
+      await submit(tester, '废弃1个梯子');
+      final loan = (await repo.getAllLoans()).first;
+      await tester.tap(find.byKey(Key('discard_source_loan_${loan.id}')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('pick_location_客厅')));
+      await settle(tester);
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      // 归还 1 个 + 废弃 1 个 → 家里还是 2 个（3 - 1 借出 + 1 归还 - 1 废弃）。
+      final found = await repo.findByName('梯子');
+      expect(found!.item.quantity, 2);
+      final discards = await repo.getDiscards();
+      expect(discards.length, 1);
+      expect(discards.first.sourceType, DiscardSource.onLoan,
+          reason: '来源标成在借');
+    });
+
+    testWidgets('整件废弃不受影响：「梯子废弃了」仍是全件进回收站',
+        (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '梯子废弃了');
+      await tester.tap(find.byKey(const Key('action_confirm_ok')));
+      await settle(tester);
+
+      expect(await repo.findByName('梯子'), isNull, reason: '整条进回收站');
+      final deleted = await repo.getDeletedItems();
+      expect(deleted.any((d) => d.item.name == '梯子'), isTrue);
+      expect((await repo.getDiscards()).length, 0,
+          reason: '整件废弃不产生部分废弃流水');
     });
   });
 }

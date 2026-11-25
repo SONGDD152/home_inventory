@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
@@ -20,7 +21,7 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 9,
+    this.version = 10,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
@@ -28,7 +29,8 @@ class InventoryDatabase implements InventoryRepository {
         _migrationV6FailureHook = null,
         _migrationV7FailureHook = null,
         _migrationV8FailureHook = null,
-        _migrationV9FailureHook = null;
+        _migrationV9FailureHook = null,
+        _migrationV10FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
@@ -36,13 +38,14 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 9,
+    this.version = 10,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
     void Function()? migrationV6FailureHook,
     void Function()? migrationV7FailureHook,
     void Function()? migrationV8FailureHook,
     void Function()? migrationV9FailureHook,
+    void Function()? migrationV10FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = migrationFailureHook,
@@ -50,7 +53,8 @@ class InventoryDatabase implements InventoryRepository {
         _migrationV6FailureHook = migrationV6FailureHook,
         _migrationV7FailureHook = migrationV7FailureHook,
         _migrationV8FailureHook = migrationV8FailureHook,
-        _migrationV9FailureHook = migrationV9FailureHook;
+        _migrationV9FailureHook = migrationV9FailureHook,
+        _migrationV10FailureHook = migrationV10FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -58,6 +62,8 @@ class InventoryDatabase implements InventoryRepository {
   // V3.7 借阅管理：借阅人表 + 借出记录表。
   static const String tableBorrowers = 'borrowers';
   static const String tableLoans = 'loans';
+  // V3.12 部分废弃：废弃流水表（一次"废了几个"一行）。
+  static const String tableItemDiscards = 'item_discards';
 
   static const String columnId = 'id';
   static const String columnName = 'name';
@@ -83,6 +89,13 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnIsPartial = 'is_partial';
   // V3.11：按位置记数量——item_locations.quantity（每个位置几个）。
   static const String columnLocationQuantity = 'quantity';
+  // V3.12：废弃流水字段。
+  static const String columnDiscardQuantity = 'quantity';
+  static const String columnDiscardLocationId = 'location_id';
+  static const String columnDiscardLocationName = 'location_name';
+  static const String columnDiscardedAt = 'discarded_at';
+  static const String columnSourceType = 'source_type';
+  static const String columnRestoredQuantity = 'restored_quantity';
 
   /// 未删除记录的唯一约束：物品名唯一、位置名唯一、同一(物品,位置)关联唯一。
   static const String itemsUniqueIndex = 'idx_items_name_unique';
@@ -120,6 +133,10 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.11：v9 迁移失败注入点（item_locations 加数量列/分配前调用），
   /// 验证整体回滚、版本退回 8。私有字段，仅 forTesting 可注入。
   final void Function()? _migrationV9FailureHook;
+
+  /// V3.12：v10 迁移失败注入点（建废弃流水表前调用），
+  /// 验证整体回滚、版本退回 9。私有字段，仅 forTesting 可注入。
+  final void Function()? _migrationV10FailureHook;
 
   Database? _db;
 
@@ -190,7 +207,36 @@ class InventoryDatabase implements InventoryRepository {
       )
     ''');
     await _createBorrowTables(db);
+    await _createDiscardTables(db);
     await _createIndexes(db);
+  }
+
+  /// V3.12：废弃流水表。
+  ///
+  /// 一行 = 一次"废了几个"。与"整件废弃"（items 行软删）是两种语义，
+  /// 彻底分开：整件废弃走老链路（恢复时各位置原样还原），部分废弃走
+  /// 流水（恢复时按 PM 口径重新问位置）。
+  ///
+  /// [columnRestoredQuantity] 取代 is_deleted/flag，支持"恢复 1 个、
+  /// 另 1 个还在回收站"（元宝批复第 1 条）。
+  Future<void> _createDiscardTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableItemDiscards (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnItemId INTEGER NOT NULL,
+        $columnItemName TEXT NOT NULL,
+        $columnDiscardQuantity INTEGER NOT NULL,
+        $columnDiscardLocationId INTEGER,
+        $columnDiscardLocationName TEXT,
+        $columnDiscardedAt INTEGER NOT NULL,
+        $columnSourceType TEXT NOT NULL DEFAULT 'in_stock',
+        $columnRestoredQuantity INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_discards_item '
+      'ON $tableItemDiscards($columnItemId)',
+    );
   }
 
   /// V3.7：借阅人表 + 借出记录表。
@@ -423,6 +469,18 @@ class InventoryDatabase implements InventoryRepository {
           );
         }
       }
+    }
+
+    // v9 → v10：V3.12 部分废弃——新建「废弃流水」表。
+    //
+    // 老库（v9 及更早）没有部分废弃这个概念，物品只有"在/不在明细"
+    // 两态，所以**不需要任何数据搬迁**：新表建出来是空的，老数据语义
+    // 天然对齐（老库的整件废弃仍是 items 软删行，恢复时原样还原）。
+    // 全程在 sqflite 升级事务内，失败整体回滚、版本退回 9。
+    if (oldVersion < 10 && newVersion >= 10) {
+      final v10Hook = _migrationV10FailureHook;
+      if (v10Hook != null) v10Hook();
+      await _createDiscardTables(db);
     }
   }
 
@@ -715,23 +773,291 @@ class InventoryDatabase implements InventoryRepository {
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
-      final updated = await txn.update(
+      await _softDeleteWholeItem(txn, id, now);
+    });
+  }
+
+  /// V3.12：软删整件物品（物品行 + 全部活跃位置关联）。
+  ///
+  /// 整件废弃（[deleteItem]）与「部分废弃废完整个物品」共用这一段，
+  /// 保证两条路径的软删语义**完全一致**（同一时间戳、同一留底口径）。
+  Future<void> _softDeleteWholeItem(
+    DatabaseExecutor txn,
+    int itemId,
+    int now,
+  ) async {
+    final updated = await txn.update(
+      tableItems,
+      <String, Object?>{
+        columnIsDeleted: 1,
+        columnDeletedAt: now,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[itemId],
+    );
+    if (updated == 0) return; // 不存在或已删除，幂等返回。
+    await txn.update(
+      tableItemLocations,
+      <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
+      where: '$columnItemId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[itemId],
+    );
+  }
+
+  // ==================== V3.12 部分废弃（废弃流水） ====================
+
+  /// V3.12：部分废弃——把某位置的 N 个移出明细，其余留在明细里。
+  ///
+  /// 口径（PM 2026-11-25 拍板）：
+  ///  * 从**哪个位置**扣 → 由 UI 弹窗问好后传 [locationId]；
+  ///  * 数量 == 在库总数 → **自动转整件废弃**（物品整条进回收站），
+  ///    不留 0 数量的僵尸记录；
+  ///  * 数量 < 在库总数 → 该位置数量减 N，写一条废弃流水，
+  ///    物品记录保留，明细里还剩其余的；
+  ///  * 位置上的数量不够 → 抛中文错误，**不改任何数量**。
+  ///
+  /// [sourceType] 标记废弃来源（在库 / 在借），供未来统计维度用
+  /// （元宝批复第 2 条）。
+  @override
+  Future<DiscardOutcome> discardQuantity(
+    String itemName,
+    int quantity, {
+    required int locationId,
+    DiscardSource sourceType = DiscardSource.inStock,
+  }) async {
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '废弃数量至少 1 个');
+    }
+    final valid = normalizeName(itemName);
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<DiscardOutcome>((txn) async {
+      final itemId = await _requireItemId(txn, valid);
+      final locName = await _locationName(txn, locationId);
+      if (locName == null) {
+        throw ArgumentError.value(locationId, 'locationId', '位置不存在或已删除');
+      }
+      final locQty = await _readLocationQty(txn, itemId, locationId);
+      if (locQty < quantity) {
+        throw ArgumentError.value(quantity, 'quantity',
+            '$locName 只有 $locQty 个，不够废弃 $quantity 个');
+      }
+      final stock = await _readStock(txn, itemId);
+      if (stock < quantity) {
+        throw ArgumentError.value(quantity, 'quantity',
+            '「$valid」一共只有 $stock 个，不够废弃 $quantity 个');
+      }
+      // 废完 → 自动转整件废弃（物品进回收站，不产生流水）。
+      if (stock == quantity) {
+        await _softDeleteWholeItem(txn, itemId, now);
+        await _assertConservation(txn);
+        return DiscardOutcome(
+          itemName: valid,
+          quantity: quantity,
+          wholeItem: true,
+          locationName: locName,
+        );
+      }
+      await _writeLocationQty(txn, itemId, locationId, locQty - quantity, now);
+      await txn.insert(tableItemDiscards, <String, Object?>{
+        columnItemId: itemId,
+        columnItemName: valid,
+        columnDiscardQuantity: quantity,
+        columnDiscardLocationId: locationId,
+        columnDiscardLocationName: locName,
+        columnDiscardedAt: now,
+        columnSourceType: sourceType.code,
+        columnRestoredQuantity: 0,
+      });
+      final remaining = await _syncItemTotal(txn, itemId, now: now);
+      await _assertConservation(txn);
+      return DiscardOutcome(
+        itemName: valid,
+        quantity: quantity,
+        wholeItem: false,
+        locationName: locName,
+        remainingInStock: remaining,
+      );
+    });
+  }
+
+  /// V3.12：恢复一条废弃流水（PM 口径：**恢复时问位置**，不依赖废弃时
+  /// 的原位置）。
+  ///
+  /// [quantity] 为 null 时恢复全部未恢复的数量；支持只恢复一部分
+  /// （元宝批复第 1 条：restored_quantity 字段先留着，不等改口径时再加列）。
+  /// 物品若已整件废弃（行软删）则拒绝——那属于「恢复物品」那条路。
+  @override
+  Future<ItemDiscard> restoreDiscard(
+    int discardId,
+    int toLocationId, {
+    int? quantity,
+  }) async {
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<ItemDiscard>((txn) async {
+      final rows = await txn.query(
+        tableItemDiscards,
+        where: '$columnId = ?',
+        whereArgs: <Object?>[discardId],
+        limit: 1,
+      );
+      if (rows.isEmpty) {
+        throw ArgumentError.value(discardId, 'discardId', '找不到这条废弃记录');
+      }
+      final row = rows.first;
+      final itemId = (row[columnItemId] as num).toInt();
+      final name = row[columnItemName] as String;
+      final total = (row[columnDiscardQuantity] as num?)?.toInt() ?? 0;
+      final restored = (row[columnRestoredQuantity] as num?)?.toInt() ?? 0;
+      final pending = total - restored;
+      if (pending <= 0) {
+        throw ArgumentError.value(
+            discardId, 'discardId', '这条废弃记录已经全部恢复过了');
+      }
+      final want = quantity ?? pending;
+      if (want < 1 || want > pending) {
+        throw ArgumentError.value(quantity, 'quantity',
+            '要恢复的数量必须在 1 ~ $pending 之间');
+      }
+      final itemRows = await txn.query(
         tableItems,
-        <String, Object?>{
-          columnIsDeleted: 1,
-          columnDeletedAt: now,
-          columnUpdatedAt: now,
-        },
-        where: '$columnId = ? AND $columnIsDeleted = 0',
-        whereArgs: <Object?>[id],
+        columns: <String>[columnId, columnIsDeleted],
+        where: '$columnId = ?',
+        whereArgs: <Object?>[itemId],
+        limit: 1,
       );
-      if (updated == 0) return; // 不存在或已删除，幂等返回。
+      if (itemRows.isEmpty ||
+          (itemRows.first[columnIsDeleted] as num).toInt() == 1) {
+        throw ArgumentError.value(discardId, 'discardId',
+            '「$name」已整体进回收站，请先恢复物品再恢复这几个');
+      }
+      final locName = await _locationName(txn, toLocationId);
+      if (locName == null) {
+        throw ArgumentError.value(toLocationId, 'toLocationId', '位置不存在或已删除');
+      }
+      final cur = await _readLocationQty(txn, itemId, toLocationId);
+      await _writeLocationQty(txn, itemId, toLocationId, cur + want, now);
       await txn.update(
-        tableItemLocations,
-        <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
-        where: '$columnItemId = ? AND $columnIsDeleted = 0',
-        whereArgs: <Object?>[id],
+        tableItemDiscards,
+        <String, Object?>{columnRestoredQuantity: restored + want},
+        where: '$columnId = ?',
+        whereArgs: <Object?>[discardId],
       );
+      await _syncItemTotal(txn, itemId, now: now);
+      await _assertConservation(txn);
+      final updated = await txn.query(
+        tableItemDiscards,
+        where: '$columnId = ?',
+        whereArgs: <Object?>[discardId],
+        limit: 1,
+      );
+      return _discardFromRow(updated.first);
+    });
+  }
+
+  /// V3.12：读废弃流水（默认只返回还有待恢复数量的）。
+  @override
+  Future<List<ItemDiscard>> getDiscards({bool includeRestored = false}) async {
+    final db = await open();
+    final rows = await db.query(tableItemDiscards, orderBy: '$columnId DESC');
+    final list = rows.map(_discardFromRow).toList(growable: false);
+    if (includeRestored) return list;
+    return list.where((d) => d.pendingQuantity > 0).toList(growable: false);
+  }
+
+  /// V3.12：彻底删除一条废弃流水（物理清除，不可恢复）。
+  @override
+  Future<void> purgeDiscard(int discardId) async {
+    final db = await open();
+    await db.delete(
+      tableItemDiscards,
+      where: '$columnId = ?',
+      whereArgs: <Object?>[discardId],
+    );
+  }
+
+  ItemDiscard _discardFromRow(Map<String, Object?> row) {
+    return ItemDiscard(
+      id: (row[columnId] as num).toInt(),
+      itemId: (row[columnItemId] as num).toInt(),
+      itemName: row[columnItemName] as String,
+      quantity: (row[columnDiscardQuantity] as num?)?.toInt() ?? 0,
+      locationId: (row[columnDiscardLocationId] as num?)?.toInt(),
+      locationName: row[columnDiscardLocationName] as String?,
+      discardedAt: (row[columnDiscardedAt] as num?)?.toInt() ?? 0,
+      sourceType: DiscardSource.fromCode(row[columnSourceType] as String?),
+      restoredQuantity: (row[columnRestoredQuantity] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// V3.12：写一条废弃流水（部分废弃 / 校准差额共用）。
+  Future<void> _insertDiscard(
+    DatabaseExecutor txn, {
+    required int itemId,
+    required String itemName,
+    required int quantity,
+    int? locationId,
+    String? locationName,
+    required int now,
+    DiscardSource sourceType = DiscardSource.inStock,
+  }) async {
+    if (quantity <= 0) return;
+    await txn.insert(tableItemDiscards, <String, Object?>{
+      columnItemId: itemId,
+      columnItemName: itemName,
+      columnDiscardQuantity: quantity,
+      columnDiscardLocationId: locationId,
+      columnDiscardLocationName: locationName,
+      columnDiscardedAt: now,
+      columnSourceType: sourceType.code,
+      columnRestoredQuantity: 0,
+    });
+  }
+
+  /// V3.12（元宝批复第 4 条）：数量守恒自检。
+  ///
+  /// 逐件校验 `items.quantity == SUM(活跃位置数量)`；
+  /// 全局口径：总拥有数 = 在库 + 在借 + 整件废弃未恢复 + 部分废弃未恢复。
+  ///
+  /// **每次写操作后**都要过一次（不是只在测试场景跑）——写路径漏调
+  /// [_syncItemTotal] 时这里会当场炸，而不是等到用户发现账不对。
+  /// 仅在 debug 模式执行，release 下立即返回、无运行时开销。
+  Future<void> _assertConservation(DatabaseExecutor txn) async {
+    if (!kDebugMode) return;
+    final broken = await _findConservationBreak(txn);
+    if (broken.isNotEmpty) {
+      throw StateError('V3.12 数量守恒被破坏：$broken');
+    }
+  }
+
+  /// 返回守恒被破坏的说明；空列表表示账是平的。测试与诊断共用。
+  Future<List<String>> _findConservationBreak(DatabaseExecutor txn) async {
+    final rows = await txn.rawQuery(
+      'SELECT i.id AS id, i.name AS name, i.quantity AS qty, '
+      'COALESCE((SELECT SUM(l.quantity) FROM $tableItemLocations l '
+      'WHERE l.item_id = i.id AND l.is_deleted = 0), 0) AS loc_total '
+      'FROM $tableItems i WHERE i.is_deleted = 0',
+    );
+    final problems = <String>[];
+    for (final row in rows) {
+      final qty = (row['qty'] as num?)?.toInt() ?? 0;
+      final locTotal = (row['loc_total'] as num?)?.toInt() ?? 0;
+      if (qty != locTotal) {
+        problems.add('「${row['name']}」物品数 $qty ≠ 位置数之和 $locTotal');
+      }
+    }
+    return problems;
+  }
+
+  /// V3.12：对外的守恒校验（测试与诊断用；返回是否守恒）。
+  @override
+  Future<bool> checkConservation() async {
+    final db = await open();
+    return db.transaction<bool>((txn) async {
+      final problems = await _findConservationBreak(txn);
+      return problems.isEmpty;
     });
   }
 
@@ -918,6 +1244,13 @@ class InventoryDatabase implements InventoryRepository {
   Future<void> purgeItem(int id) async {
     final db = await open();
     await db.transaction<void>((txn) async {
+      final rows = await txn.query(
+        tableItems,
+        columns: <String>[columnName],
+        where: '$columnId = ? AND $columnIsDeleted = 1',
+        whereArgs: <Object?>[id],
+        limit: 1,
+      );
       await txn.delete(
         tableItems,
         where: '$columnId = ? AND $columnIsDeleted = 1',
@@ -928,6 +1261,16 @@ class InventoryDatabase implements InventoryRepository {
         where: '$columnItemId = ?',
         whereArgs: <Object?>[id],
       );
+      // V3.12：彻底删除这件物品 = 它的一切痕迹都没了——
+      // 同名/同 id 的部分废弃流水一并清掉（否则回收站里还留着
+      // "梯子 1 个"，恢复它会凭空多出一个梯子）。
+      if (rows.isNotEmpty) {
+        await txn.delete(
+          tableItemDiscards,
+          where: '$columnItemId = ? OR $columnItemName = ?',
+          whereArgs: <Object?>[id, rows.first[columnName] as String],
+        );
+      }
     });
   }
 
@@ -947,6 +1290,9 @@ class InventoryDatabase implements InventoryRepository {
       // V3.8：连带清空已软删的借出记录（回收站一并清空）。
       await txn.delete(tableLoans,
           where: '$columnIsDeleted = 1');
+      // V3.12（元宝批复第 6 条，方案 A）：清空回收站 = 彻底不要了，
+      // 部分废弃流水一并清掉（不选灰显——级联才符合直觉）。
+      await txn.delete(tableItemDiscards);
     });
   }
 
@@ -1670,9 +2016,27 @@ class InventoryDatabase implements InventoryRepository {
             details.add('$name：某位置数量不能是负数，已跳过');
             continue;
           }
+          final beforeQty = await _readLocationQty(txn, id, locId);
           await _writeLocationQty(txn, id, locId, qty, now);
+          // V3.12（元宝批复第 7 条）：校准把某个位置的数量调少 → 自动生成
+          // 一条废弃流水。否则守恒公式会断裂（活跃数减了，但"已废弃未恢复"
+          // 没加，总拥有数凭空少一截）。
+          if (qty < beforeQty) {
+            await _insertDiscard(
+              txn,
+              itemId: id,
+              itemName: name,
+              quantity: beforeQty - qty,
+              locationId: locId,
+              locationName: await _locationName(txn, locId),
+              now: now,
+            );
+            details.add('$name：${await _locationName(txn, locId) ?? '某位置'}'
+                ' 清点后少 ${beforeQty - qty} 个，已记入回收站（可恢复）');
+          }
         }
         final after = await _syncItemTotal(txn, id, now: now);
+        await _assertConservation(txn);
         if (after != before) {
           changed++;
           details.add('$name：逐位置清点后在库 $after 个（原 $before 个）');
@@ -1704,9 +2068,23 @@ class InventoryDatabase implements InventoryRepository {
             limit: 1,
           );
           if (links.isNotEmpty) {
-            await _writeLocationQty(
-                txn, id, links.first[columnLocationId] as int, newQty, now);
+            final locId = links.first[columnLocationId] as int;
+            await _writeLocationQty(txn, id, locId, newQty, now);
+            // V3.12（元宝批复第 7 条）：旧口径校准把总数调少 → 同样生成
+            // 废弃流水，保证守恒公式不裂。
+            if (newQty < curQty) {
+              await _insertDiscard(
+                txn,
+                itemId: id,
+                itemName: name,
+                quantity: curQty - newQty,
+                locationId: locId,
+                locationName: await _locationName(txn, locId),
+                now: now,
+              );
+            }
             await _syncItemTotal(txn, id, now: now);
+            await _assertConservation(txn);
           }
           changed++;
           details.add('$name：共 $counted 个 − 在借 $lent 个 → 在库 $newQty 个'
@@ -1733,6 +2111,9 @@ class InventoryDatabase implements InventoryRepository {
           await db.query(tableItemLocations, orderBy: '$columnId ASC'),
       tableBorrowers: await db.query(tableBorrowers, orderBy: '$columnId ASC'),
       tableLoans: await db.query(tableLoans, orderBy: '$columnId ASC'),
+      // V3.12：废弃流水一并导出（否则恢复后"废掉的那几个"就找不回来了）。
+      tableItemDiscards:
+          await db.query(tableItemDiscards, orderBy: '$columnId ASC'),
     };
   }
 
@@ -1762,11 +2143,17 @@ class InventoryDatabase implements InventoryRepository {
     final loanMaps = data.containsKey(tableLoans)
         ? _rowsOf(data, tableLoans)
         : <Map<String, Object?>>[];
+    // V3.12：v9 及更早的备份没有废弃流水表 → 按空表处理（老数据本就没有
+    // "部分废弃"这个概念，语义天然对齐）。
+    final discardMaps = data.containsKey(tableItemDiscards)
+        ? _rowsOf(data, tableItemDiscards)
+        : <Map<String, Object?>>[];
 
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
       // 清空顺序：先子表后主表，避免外键/索引干扰。
+      await txn.delete(tableItemDiscards);
       await txn.delete(tableLoans);
       await txn.delete(tableBorrowers);
       await txn.delete(tableItemLocations);
@@ -1786,6 +2173,9 @@ class InventoryDatabase implements InventoryRepository {
       }
       for (final row in loanMaps) {
         await txn.insert(tableLoans, Loan.fromMap(row).toMap());
+      }
+      for (final row in discardMaps) {
+        await txn.insert(tableItemDiscards, _discardMapForInsert(row));
       }
       // V3.11（元宝批复第 8 条）：恢复收口统一走 _syncItemTotal，
       // 禁止另写一套重算逻辑（两套迟早漂移）。
@@ -1840,6 +2230,21 @@ class InventoryDatabase implements InventoryRepository {
         whereArgs: <Object?>[links[i][columnId] as int],
       );
     }
+  }
+
+  /// V3.12：备份里的废弃流水行 → 可插入的 map（缺列补默认值）。
+  Map<String, Object?> _discardMapForInsert(Map<String, Object?> row) {
+    return <String, Object?>{
+      columnItemId: (row[columnItemId] as num?)?.toInt() ?? 0,
+      columnItemName: row[columnItemName] as String? ?? '',
+      columnDiscardQuantity: (row[columnDiscardQuantity] as num?)?.toInt() ?? 0,
+      columnDiscardLocationId: (row[columnDiscardLocationId] as num?)?.toInt(),
+      columnDiscardLocationName: row[columnDiscardLocationName] as String?,
+      columnDiscardedAt: (row[columnDiscardedAt] as num?)?.toInt() ?? 0,
+      columnSourceType: row[columnSourceType] as String? ?? 'in_stock',
+      columnRestoredQuantity:
+          (row[columnRestoredQuantity] as num?)?.toInt() ?? 0,
+    };
   }
 
   List<Map<String, Object?>> _rowsOf(Map<String, Object?> data, String key) {

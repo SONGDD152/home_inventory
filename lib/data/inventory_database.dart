@@ -20,14 +20,15 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 8,
+    this.version = 9,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
         _migrationV5FailureHook = null,
         _migrationV6FailureHook = null,
         _migrationV7FailureHook = null,
-        _migrationV8FailureHook = null;
+        _migrationV8FailureHook = null,
+        _migrationV9FailureHook = null;
 
   /// 测试专用构造：注入迁移失败钩子，验证 onUpgrade 事务整体回滚。
   /// 仅供测试使用，生产代码路径不调用（见 V1_ACCEPTANCE.md R2）。
@@ -35,19 +36,21 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 8,
+    this.version = 9,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
     void Function()? migrationV6FailureHook,
     void Function()? migrationV7FailureHook,
     void Function()? migrationV8FailureHook,
+    void Function()? migrationV9FailureHook,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = migrationFailureHook,
         _migrationV5FailureHook = migrationV5FailureHook,
         _migrationV6FailureHook = migrationV6FailureHook,
         _migrationV7FailureHook = migrationV7FailureHook,
-        _migrationV8FailureHook = migrationV8FailureHook;
+        _migrationV8FailureHook = migrationV8FailureHook,
+        _migrationV9FailureHook = migrationV9FailureHook;
 
   static const String tableItems = 'items';
   static const String tableLocations = 'locations';
@@ -78,6 +81,8 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnDueAt = 'due_at';
   static const String columnReturnedAt = 'returned_at';
   static const String columnIsPartial = 'is_partial';
+  // V3.11：按位置记数量——item_locations.quantity（每个位置几个）。
+  static const String columnLocationQuantity = 'quantity';
 
   /// 未删除记录的唯一约束：物品名唯一、位置名唯一、同一(物品,位置)关联唯一。
   static const String itemsUniqueIndex = 'idx_items_name_unique';
@@ -111,6 +116,10 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.8：v8 迁移失败注入点（loans 加软删两列前调用），验证整体回滚、版本退回 7。
   /// 私有字段，仅 forTesting 可注入。
   final void Function()? _migrationV8FailureHook;
+
+  /// V3.11：v9 迁移失败注入点（item_locations 加数量列/分配前调用），
+  /// 验证整体回滚、版本退回 8。私有字段，仅 forTesting 可注入。
+  final void Function()? _migrationV9FailureHook;
 
   Database? _db;
 
@@ -176,7 +185,8 @@ class InventoryDatabase implements InventoryRepository {
         $columnCreatedAt INTEGER NOT NULL,
         $columnUpdatedAt INTEGER NOT NULL,
         $columnRawText TEXT,
-        $columnTags TEXT
+        $columnTags TEXT,
+        $columnLocationQuantity INTEGER NOT NULL DEFAULT 1
       )
     ''');
     await _createBorrowTables(db);
@@ -252,6 +262,23 @@ class InventoryDatabase implements InventoryRepository {
   /// v1/v2 是单表 items(name, location, ...)；v3 改三张表；v4 起所有名称走
   /// [normalizeName] 单一入口。升级时按顺序补齐缺失的版本。
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    // V3.11：位置数量列必须在**所有历史迁移路径**开始前就存在。
+    // v3→v4 / v5→v6 的迁移会重写 item_locations 行（ItemLocation.toMap
+    // 现在会写 quantity），而加列原本排在最后的 v8→v9，导致旧库升级
+    // 中途报「table item_locations has no column named quantity」。
+    // 提前幂等加列，v8→v9 再负责把老总数分配进各位置（两步职责不混）。
+    final locationTables = await db.query(
+      'sqlite_master',
+      columns: <String>['name'],
+      where: "type = 'table' AND name = ?",
+      whereArgs: <Object?>[tableItemLocations],
+    );
+    if (locationTables.isNotEmpty) {
+      await _addColumnIfMissing(db, tableItemLocations,
+          columnLocationQuantity,
+          type: 'INTEGER NOT NULL DEFAULT 1');
+    }
+
     if (oldVersion < 3) {
       // v1/v2 单表 → v3 三张表：每条旧 (name, location) 转成物品 + 位置 + 关联。
       List<Map<String, Object?>> legacyRows = const <Map<String, Object?>>[];
@@ -347,6 +374,55 @@ class InventoryDatabase implements InventoryRepository {
           type: 'INTEGER NOT NULL DEFAULT 0');
       await _addColumnIfMissing(db, tableLoans, columnDeletedAt,
           type: 'INTEGER');
+    }
+
+    // v8 → v9：V3.11 按位置记数量——item_locations 加 quantity 列，
+    // 并把每件物品的 in 库总数（items.quantity）分配到它的活跃位置关联上。
+    //
+    // 分配口径（元宝批复）：按位置数平均分配，余数给「主位置」（活跃关联
+    // id 最小者）。核心不变式：迁移前后 items.quantity 一分不差，且
+    // SUM(活跃关联 quantity) == items.quantity。
+    // 全程在 sqflite 升级事务内，失败整体回滚、版本退回 8。
+    if (oldVersion < 9 && newVersion >= 9) {
+      final v9Hook = _migrationV9FailureHook;
+      if (v9Hook != null) v9Hook();
+      await _addColumnIfMissing(db, tableItemLocations, columnLocationQuantity,
+          type: 'INTEGER NOT NULL DEFAULT 1');
+
+      // 逐件物品重新分配，保证总数守恒。
+      final itemRows = await db.query(
+        tableItems,
+        columns: <String>[columnId, columnQuantity],
+        where: '$columnIsDeleted = 0',
+        orderBy: '$columnId ASC',
+      );
+      for (final itemRow in itemRows) {
+        final itemId = itemRow[columnId] as int;
+        final total = (itemRow[columnQuantity] as num?)?.toInt() ?? 1;
+        final links = await db.query(
+          tableItemLocations,
+          columns: <String>[columnId],
+          where: '$columnItemId = ? AND $columnIsDeleted = 0',
+          whereArgs: <Object?>[itemId],
+          orderBy: '$columnId ASC', // id 最小 = 主位置，拿余数。
+        );
+        if (links.isEmpty) continue;
+        final n = links.length;
+        final base = total ~/ n;
+        final remainder = total % n;
+        for (var i = 0; i < links.length; i++) {
+          // 数量允许为 0（物品少于位置数时，多余位置记 0）——
+          // 这样才能严格保证 SUM(位置数量) == 迁移前 items.quantity。
+          // 把 0 抬成 1 会让总数凭空变多，违反双向对账。
+          final qty = base + (i == 0 ? remainder : 0);
+          await db.update(
+            tableItemLocations,
+            <String, Object?>{columnLocationQuantity: qty},
+            where: '$columnId = ?',
+            whereArgs: <Object?>[links[i][columnId] as int],
+          );
+        }
+      }
     }
   }
 
@@ -480,7 +556,7 @@ class InventoryDatabase implements InventoryRepository {
   }
 
   Future<int> _link(DatabaseExecutor db, int itemId, int locationId, int now,
-      {String? rawText}) async {
+      {String? rawText, int quantity = 1}) async {
     final rows = await db.query(
       tableItemLocations,
       columns: <String>[columnId],
@@ -497,6 +573,94 @@ class InventoryDatabase implements InventoryRepository {
         createdAt: now,
         updatedAt: now,
         rawText: rawText,
+        quantity: quantity,
+      ).toMap(),
+    );
+  }
+
+  /// V3.11 全局不变式的单一入口：重算某物品全部**活跃**关联的数量之和，
+  /// 写回 items.quantity 作为总数缓存。元宝批复要求所有改动位置的路径
+  /// （录入/累加/挪位/借出/归还/校准/备份恢复收口）都走这里，禁止另写一套。
+  ///
+  /// 返回写回后的总数。调用方必须在同一个事务的 executor 上调用。
+  Future<int> _syncItemTotal(
+    DatabaseExecutor txn,
+    int itemId, {
+    int? now,
+  }) async {
+    final rows = await txn.rawQuery(
+      'SELECT COALESCE(SUM($columnLocationQuantity), 0) AS total '
+      'FROM $tableItemLocations '
+      'WHERE $columnItemId = ? AND $columnIsDeleted = 0',
+      <Object?>[itemId],
+    );
+    final total = (rows.first['total'] as num?)?.toInt() ?? 0;
+    await txn.update(
+      tableItems,
+      <String, Object?>{
+        columnQuantity: total,
+        if (now != null) columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[itemId],
+    );
+    return total;
+  }
+
+  /// V3.11：读某物品在指定位置的数量（活跃关联）。无关联返回 0。
+  Future<int> _readLocationQty(
+    DatabaseExecutor txn,
+    int itemId,
+    int locationId,
+  ) async {
+    final rows = await txn.query(
+      tableItemLocations,
+      columns: <String>[columnLocationQuantity],
+      where: '$columnItemId = ? AND $columnLocationId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[itemId, locationId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return 0;
+    return (rows.first[columnLocationQuantity] as num?)?.toInt() ?? 0;
+  }
+
+  /// V3.11：写某物品在指定位置的数量（活跃关联）。关联不存在则新建。
+  Future<void> _writeLocationQty(
+    DatabaseExecutor txn,
+    int itemId,
+    int locationId,
+    int qty,
+    int now, {
+    String? rawText,
+  }) async {
+    final rows = await txn.query(
+      tableItemLocations,
+      columns: <String>[columnId],
+      where: '$columnItemId = ? AND $columnLocationId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[itemId, locationId],
+      limit: 1,
+    );
+    if (rows.isNotEmpty) {
+      await txn.update(
+        tableItemLocations,
+        <String, Object?>{
+          columnLocationQuantity: qty,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[rows.first[columnId] as int],
+      );
+      return;
+    }
+    await txn.insert(
+      tableItemLocations,
+      ItemLocation(
+        itemId: itemId,
+        locationId: locationId,
+        createdAt: now,
+        updatedAt: now,
+        rawText: rawText,
+        quantity: qty,
       ).toMap(),
     );
   }
@@ -602,7 +766,6 @@ class InventoryDatabase implements InventoryRepository {
       }
       final itemName = rows.first[columnName] as String;
       final deletedAt = (rows.first[columnDeletedAt] as num?)?.toInt();
-      final deletedQty = (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
 
       final conflicts = await txn.query(
         tableItems,
@@ -618,16 +781,8 @@ class InventoryDatabase implements InventoryRepository {
       // （它已并入同名物品，不再作为独立物品存在）。
       if (conflicts.isNotEmpty) {
         final conflictId = (conflicts.first[columnId] as num).toInt();
-        final conflictQty =
-            (conflicts.first[columnQuantity] as num?)?.toInt() ?? 1;
-        final total = conflictQty + deletedQty;
-
-        await txn.update(
-          tableItems,
-          <String, Object?>{columnQuantity: total, columnUpdatedAt: now},
-          where: '$columnId = ?',
-          whereArgs: <Object?>[conflictId],
-        );
+        // V3.11：合并数量以「位置数量之和」为准——先并关联（同位置数量相加），
+        // 再 sync 重算总数，不再用旧的 items.quantity 简单相加（会与位置脱节）。
         await _mergeItemAssociations(
           txn,
           fromItemId: id,
@@ -635,6 +790,7 @@ class InventoryDatabase implements InventoryRepository {
           deletedAt: deletedAt,
           now: now,
         );
+        final total = await _syncItemTotal(txn, conflictId, now: now);
         await txn.delete(
           tableItems,
           where: '$columnId = ? AND $columnIsDeleted = 1',
@@ -676,6 +832,9 @@ class InventoryDatabase implements InventoryRepository {
           whereArgs: <Object?>[id, deletedAt],
         );
       }
+      // V3.11：复活后逐位置数量已原样保留（quantity 列未动），
+      // sync 让 items.quantity = SUM(位置数量)，保证「废弃再恢复原样还原」。
+      await _syncItemTotal(txn, id, now: now);
       return RestoreOutcome(itemName: itemName, merged: false);
     });
   }
@@ -702,17 +861,31 @@ class InventoryDatabase implements InventoryRepository {
     for (final row in assoc) {
       final assocId = (row[columnId] as num).toInt();
       final locationId = (row[columnLocationId] as num).toInt();
-      final wasActive = (row[columnIsDeleted] as num?)?.toInt() == 0;
 
       final dup = await txn.query(
         tableItemLocations,
-        columns: <String>[columnId],
+        columns: <String>[columnId, columnLocationQuantity],
         where: '$columnItemId = ? AND $columnLocationId = ? '
             'AND $columnIsDeleted = 0',
         whereArgs: <Object?>[toItemId, locationId],
         limit: 1,
       );
       if (dup.isNotEmpty) {
+        // V3.11（元宝批复第 5 条）：同名合并且撞位置——把来源位置的
+        // 数量**加到**目标同位置，而不是丢弃（丢了就等于那批东西凭空消失）。
+        final dupId = dup.first[columnId] as int;
+        final dupQty =
+            (dup.first[columnLocationQuantity] as num?)?.toInt() ?? 0;
+        final srcQty = (row[columnLocationQuantity] as num?)?.toInt() ?? 0;
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{
+            columnLocationQuantity: dupQty + srcQty,
+            columnUpdatedAt: now,
+          },
+          where: '$columnId = ?',
+          whereArgs: <Object?>[dupId],
+        );
         await txn.delete(
           tableItemLocations,
           where: '$columnId = ?',
@@ -721,7 +894,9 @@ class InventoryDatabase implements InventoryRepository {
         continue;
       }
 
-      final revive = deletedAt == null ? true : wasActive;
+      // 废弃时关联行被软删留底；恢复（含撞名合并）必须把它们复活，
+      // 否则「阳台2客厅1」废弃再恢复只剩位置空壳（元宝第 5 条）。
+      final revive = true;
       await txn.update(
         tableItemLocations,
         <String, Object?>{
@@ -874,11 +1049,11 @@ class InventoryDatabase implements InventoryRepository {
   /// 查重与写入在同一事务内，命中已有 (物品,位置) 关联只刷新时间戳、返回原 id。
   /// 界面连点两下不会产生重复关联。名称做 trim 与长度校验。
   ///
-  /// V3.10：新增 [quantity] 与 [additive]。
-  ///  * [quantity] 为 null = 本次不带数量，物品数量保持原样。
-  ///  * [quantity] 有值 + [additive] false = **覆盖**（PM 拍板③：说「3个梯子」
-  ///    是在纠正数量，覆盖原值）。
-  ///  * [quantity] 有值 + [additive] true = **累加**（补充要求1：「再放N个」）。
+  /// V3.11 按位置记数量：数量写到**目标位置的关联行**上，其他位置不动。
+  ///  * [quantity] 为 null = 本次不带数量：新建关联默认 1、已有关联保持原值；
+  ///  * [quantity] 有值 + additive=false = **覆盖该位置数量**为 N；
+  ///  * [quantity] 有值 + additive=true = **该位置 += N**。
+  /// 三种情况最后都走 [_syncItemTotal] 重算 items.quantity（全局不变式）。
   @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText, int? quantity, bool additive = false}) async {
@@ -899,38 +1074,50 @@ class InventoryDatabase implements InventoryRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<UpsertResult>((txn) async {
       final itemId = await _findOrCreateItem(txn, valid, now);
-      if (quantity != null) {
-        await _applyQuantity(
-          txn,
-          itemId: itemId,
-          quantity: quantity,
-          additive: additive,
-          now: now,
-        );
-      }
-      final rows = await txn.query(
+      final linkRows = await txn.query(
         tableItemLocations,
-        columns: <String>[columnId, columnCreatedAt],
+        columns: <String>[columnId, columnLocationQuantity],
         where: '$columnItemId = ? AND $columnLocationId = ? AND $columnIsDeleted = 0',
         whereArgs: <Object?>[itemId, locationId],
         limit: 1,
       );
-      if (rows.isNotEmpty) {
-        final linkId = rows.first[columnId] as int;
-        await txn.update(
-          tableItemLocations,
-          <String, Object?>{columnUpdatedAt: now},
-          where: '$columnId = ?',
-          whereArgs: <Object?>[linkId],
-        );
-        return UpsertResult(
-          itemId: itemId,
-          locationId: locationId,
-          created: false,
-        );
+      final existed = linkRows.isNotEmpty;
+      if (existed) {
+        if (quantity != null) {
+          final cur =
+              (linkRows.first[columnLocationQuantity] as num?)?.toInt() ?? 0;
+          final next = additive ? cur + quantity : quantity;
+          if (next < 0) {
+            throw ArgumentError.value(next, 'quantity', '位置数量不能为负');
+          }
+          await txn.update(
+            tableItemLocations,
+            <String, Object?>{
+              columnLocationQuantity: next,
+              columnUpdatedAt: now,
+            },
+            where: '$columnId = ?',
+            whereArgs: <Object?>[linkRows.first[columnId] as int],
+          );
+        } else {
+          await txn.update(
+            tableItemLocations,
+            <String, Object?>{columnUpdatedAt: now},
+            where: '$columnId = ?',
+            whereArgs: <Object?>[linkRows.first[columnId] as int],
+          );
+        }
+      } else {
+        // 新关联：不带数量默认 1；带数量按覆盖（新位置无旧值可加）。
+        await _link(txn, itemId, locationId, now,
+            rawText: rawText, quantity: quantity ?? 1);
       }
-      await _link(txn, itemId, locationId, now, rawText: rawText);
-      return UpsertResult(itemId: itemId, locationId: locationId, created: true);
+      await _syncItemTotal(txn, itemId, now: now);
+      return UpsertResult(
+        itemId: itemId,
+        locationId: locationId,
+        created: !existed,
+      );
     });
   }
 
@@ -951,176 +1138,174 @@ class InventoryDatabase implements InventoryRepository {
     return (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
   }
 
-  /// V3.10：写入物品的在库数量。
+  /// V3.11 元宝批复第 1 条：挪位拆成两个**独立方法**，
+  /// 禁止靠 `quantity` 是否为 null 分流——参数分流是 bug 温床。
+  ///  * [moveItemWhole]：不带数量的「把梯子挪到客厅」——整体挪，旧位置软删，
+  ///    目标位置拿走全部数量，总数不变。
+  ///  * [moveItemPartial]：带数量的「把1个梯子挪到客厅」——只挪若干个，
+  ///    源位置减、目标位置加，总数不变；源位不够要拦截。
   ///
-  /// 覆盖语义（PM 拍板③）：quantity 直接作为新的在库数。
-  /// 累加语义（补充要求1：「再放N个」）：在库数 += quantity。
-  ///
-  /// 累加以**当前在库数**为基准——在库数已经是扣过借出的净值，
-  /// 不再拿在借数去兜底，避免增量被吃掉或重复计。
-  Future<void> _applyQuantity(
-    DatabaseExecutor txn, {
-    required int itemId,
-    required int quantity,
-    required bool additive,
-    required int now,
-  }) async {
-    if (quantity < 1) {
-      throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
-    }
-    final rows = await txn.query(
-      tableItems,
-      columns: <String>[columnQuantity],
-      where: '$columnId = ?',
-      whereArgs: <Object?>[itemId],
-      limit: 1,
-    );
-    if (rows.isEmpty) return;
-    final curQty = (rows.first[columnQuantity] as num?)?.toInt() ?? 1;
-    final newQty = additive ? curQty + quantity : quantity;
-    if (newQty == curQty) return;
-    await txn.update(
-      tableItems,
-      <String, Object?>{columnQuantity: newQty, columnUpdatedAt: now},
-      where: '$columnId = ?',
-      whereArgs: <Object?>[itemId],
-    );
-  }
+  /// 两者都只处理"已记录过"的物品（不凭空造账），最后都走 [_syncItemTotal]。
 
-  /// 挪位语义（V3.2，UI 主链路）：把物品记到 [locationId]，此前所在的其他
-  /// 位置关联**软删**（历史留底可审计），只保留目标位置。
-  ///
-  /// 返回 [MoveResult]：previousLocations 为挪位前其他位置名（不含目标）。
-  /// 物品本身与位置本身只复用既有行，不做删除。
+  /// 整体挪（兼容旧名）：与 [moveItemWhole] 完全等价。
+  /// 保留旧签名不含 quantity——元宝批复的要点就是**不再靠 quantity 分流**：
+  /// 带数量的挪位一律显式走 [moveItemPartial]，这里永远只做整体挪。
   @override
-  Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText, int? quantity, bool additive = false}) async {
+  Future<MoveResult> moveItem(String itemName, int toLocationId,
+      {String? rawText}) => moveItemWhole(itemName, toLocationId, rawText: rawText);
+
+  @override
+  Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
+      {String? rawText}) async {
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
-
-    final locationRows = await db.query(
-      tableLocations,
-      columns: <String>[columnId],
-      where: '$columnId = ? AND $columnIsDeleted = 0',
-      whereArgs: <Object?>[locationId],
-      limit: 1,
-    );
-    if (locationRows.isEmpty) {
-      throw ArgumentError.value(locationId, 'locationId', '位置不存在或已删除');
-    }
-
+    await _activeLocationRow(db, toLocationId);
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<MoveResult>((txn) async {
+      // 无数量的「放/搁/塞…」既是首次录入也是整体挪：物品不存在时要建，
+      // 否则「梯子放阳台」这句最基础的录入在生产上会被 _requireItemId 拒绝。
+      // 部分挪才要求物品已存在（见 moveItemPartial）。
       final itemId = await _findOrCreateItem(txn, valid, now);
-
-      // V3.10：数量写入（覆盖 / 累加）。
-      var quantityChanged = false;
-      var finalQuantity = 1;
-      if (quantity != null) {
-        final before = await _readStock(txn, itemId);
-        await _applyQuantity(
-          txn,
-          itemId: itemId,
-          quantity: quantity,
-          additive: additive,
-          now: now,
-        );
-        final after = await _readStock(txn, itemId);
-        finalQuantity = after;
-        quantityChanged = after != before;
-      } else {
-        finalQuantity = await _readStock(txn, itemId);
-      }
-
-      // 挪位前该物品的全部活动关联（含目标位）。
-      final currentLinks = await txn.query(
+      final before = await _readStock(txn, itemId);
+      final links = await txn.query(
         tableItemLocations,
         columns: <String>[columnId, columnLocationId],
         where: '$columnItemId = ? AND $columnIsDeleted = 0',
         whereArgs: <Object?>[itemId],
+        orderBy: '$columnId ASC',
       );
 
-      bool targetLinked = false;
-      final staleLinkIds = <int>[];
-      final staleLocationIds = <int>[];
-      for (final row in currentLinks) {
-        final linkLocationId = row[columnLocationId] as int;
-        if (linkLocationId == locationId) {
-          targetLinked = true;
-        } else {
-          staleLinkIds.add(row[columnId] as int);
-          staleLocationIds.add(linkLocationId);
-        }
-      }
-
-      // 其他位置名（挪位前），按关联 id 顺序（即记录顺序）。
       final previousLocations = <String>[];
-      for (final staleLocationId in staleLocationIds) {
-        final locRows = await txn.query(
-          tableLocations,
-          columns: <String>[columnName],
-          where: '$columnId = ? AND $columnIsDeleted = 0',
-          whereArgs: <Object?>[staleLocationId],
-          limit: 1,
-        );
-        if (locRows.isNotEmpty) {
-          previousLocations.add(locRows.first[columnName] as String);
+      var targetLinked = false;
+      for (final link in links) {
+        final lid = link[columnLocationId] as int;
+        if (lid == toLocationId) {
+          targetLinked = true;
+          continue;
         }
-      }
-
-      // 软删旧关联（留底）。
-      for (final linkId in staleLinkIds) {
+        final name = await _locationName(txn, lid);
+        if (name != null) previousLocations.add(name);
         await txn.update(
           tableItemLocations,
           <String, Object?>{columnIsDeleted: 1, columnUpdatedAt: now},
           where: '$columnId = ?',
-          whereArgs: <Object?>[linkId],
+          whereArgs: <Object?>[link[columnId] as int],
         );
       }
 
-      if (targetLinked) {
-        // 物品已在目标位置：刷新时间戳即可。
-        final targetLinkRow = currentLinks.firstWhere(
-          (row) => row[columnLocationId] as int == locationId,
-        );
-        await txn.update(
-          tableItemLocations,
-          <String, Object?>{columnUpdatedAt: now},
-          where: '$columnId = ?',
-          whereArgs: <Object?>[targetLinkRow[columnId] as int],
-        );
-        return MoveResult(
-          itemId: itemId,
-          locationId: locationId,
-          created: false,
-          previousLocations: previousLocations,
-          quantity: finalQuantity,
-          quantityChanged: quantityChanged,
-        );
-      }
-
-      await _link(txn, itemId, locationId, now, rawText: rawText);
+      // 目标位置拿到全部数量（整体挪，总数守恒）。
+      await _writeLocationQty(txn, itemId, toLocationId, before, now,
+          rawText: rawText);
+      final total = await _syncItemTotal(txn, itemId, now: now);
       return MoveResult(
         itemId: itemId,
-        locationId: locationId,
-        created: true,
+        locationId: toLocationId,
+        created: !targetLinked,
         previousLocations: previousLocations,
-        quantity: finalQuantity,
-        quantityChanged: quantityChanged,
+        quantity: total,
+        quantityChanged: total != before,
       );
     });
   }
 
-  /// V3.10：只改数量，**不动位置**。
+  @override
+  Future<MoveResult> moveItemPartial(
+    String itemName,
+    int fromLocationId,
+    int toLocationId, {
+    required int quantity,
+    String? rawText,
+  }) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '挪动数量至少为 1');
+    }
+    final db = await open();
+    await _activeLocationRow(db, fromLocationId);
+    await _activeLocationRow(db, toLocationId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<MoveResult>((txn) async {
+      final itemId = await _requireItemId(txn, valid);
+      final fromQty = await _readLocationQty(txn, itemId, fromLocationId);
+      // 元宝批复第 4 条：源位不足必须提示，不许静默挪走能挪的部分。
+      if (fromQty < quantity) {
+        final fromName = await _locationName(txn, fromLocationId) ?? '这个位置';
+        throw ArgumentError.value(
+          quantity,
+          'quantity',
+          '$fromName只有 $fromQty 个，不够挪 $quantity 个。'
+          '请说个更小的数，或先补货再挪。',
+        );
+      }
+      final before = await _readStock(txn, itemId);
+      await _writeLocationQty(
+          txn, itemId, fromLocationId, fromQty - quantity, now);
+      final toQty = await _readLocationQty(txn, itemId, toLocationId);
+      await _writeLocationQty(txn, itemId, toLocationId, toQty + quantity, now,
+          rawText: rawText);
+      final total = await _syncItemTotal(txn, itemId, now: now);
+      final fromName = await _locationName(txn, fromLocationId) ?? '原位置';
+      return MoveResult(
+        itemId: itemId,
+        locationId: toLocationId,
+        created: toQty == 0,
+        previousLocations: <String>[fromName],
+        quantity: total,
+        quantityChanged: total != before,
+      );
+    });
+  }
+
+  /// 取一条活跃位置行，不存在抛 ArgumentError。
+  Future<Map<String, Object?>> _activeLocationRow(
+      DatabaseExecutor db, int locationId) async {
+    final rows = await db.query(
+      tableLocations,
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[locationId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(locationId, 'locationId', '位置不存在或已删除');
+    }
+    return rows.first;
+  }
+
+  /// 按 id 取位置名（活跃）；找不到返回 null。
+  Future<String?> _locationName(DatabaseExecutor db, int locationId) async {
+    final rows = await db.query(
+      tableLocations,
+      columns: <String>[columnName],
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[locationId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first[columnName] as String;
+  }
+
+  /// 按名取活跃物品 id；不存在抛 ArgumentError（不能凭空造账）。
+  Future<int> _requireItemId(DatabaseExecutor db, String name) async {
+    final rows = await db.query(
+      tableItems,
+      columns: <String>[columnId],
+      where: '$columnName = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[name],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      throw ArgumentError.value(
+        name, 'itemName', '还没记录过「$name」，先说一句「$name放阳台」再操作');
+    }
+    return rows.first[columnId] as int;
+  }
+
+  /// V3.11：只改**总数**——用户在弹窗里明确选了「家里一共 N 个」时用。
   ///
-  /// 与 [moveItem] 分开的原因：`moveItem` 是「挪位」语义——会把物品的其他
-  /// 位置关联软删掉。「说『3个梯子』纠正数量」只想改数字，不想动位置，
-  /// 走 moveItem 会顺手把「车库」的关联删了（真会被用户遇到的坑）。
-  ///
-  /// [quantity] ≥ 1；[additive] 为 true 时是「又添了 N 个」= 在库数 += N，
-  /// 否则是「纠正数量」= 直接覆盖为 N。
-  /// 物品没记录过 → 抛 ArgumentError（PM 拍板④：不能凭空造账）。
-  /// 返回改完后的在库数。
+  /// 差额落到主位置（活跃关联 id 最小者），再走 [_syncItemTotal] 保证不变式。
+  /// 注意：本方法只在用户明确选择「改总数」后调用；多位置下静默改总数是
+  /// 元宝批复第 3 条明令禁止的（会偷改用户没提的位置），UI 必须先弹窗。
+  /// [quantity] ≥ 1；additive=true 累加、否则覆盖。物品没记录过抛 ArgumentError。
   @override
   Future<int> setItemQuantity(
     String itemName,
@@ -1134,29 +1319,65 @@ class InventoryDatabase implements InventoryRepository {
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<int>((txn) async {
-      final rows = await txn.query(
-        tableItems,
-        columns: <String>[columnId],
-        where: '$columnName = ? AND $columnIsDeleted = 0',
-        whereArgs: <Object?>[valid],
+      final itemId = await _requireItemId(txn, valid);
+      final cur = await _readStock(txn, itemId);
+      final target = additive ? cur + quantity : quantity;
+      final delta = target - cur;
+
+      // 差额落到主位置（id 最小的活跃关联）。
+      final links = await txn.query(
+        tableItemLocations,
+        columns: <String>[columnId, columnLocationQuantity],
+        where: '$columnItemId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[itemId],
+        orderBy: '$columnId ASC',
         limit: 1,
       );
-      if (rows.isEmpty) {
-        throw ArgumentError.value(
-          valid,
-          'itemName',
-          '还没记录过「$valid」，先说一句「$valid放阳台」再记数量',
+      if (links.isNotEmpty) {
+        final link = links.first;
+        final linkId = link[columnId] as int;
+        final linkQty = (link[columnLocationQuantity] as num?)?.toInt() ?? 0;
+        final nextQty = linkQty + delta;
+        if (nextQty < 0) {
+          throw ArgumentError.value(
+            quantity, 'quantity', '主位置数量不够减，请用「校准数量」逐位置清点');
+        }
+        await txn.update(
+          tableItemLocations,
+          <String, Object?>{
+            columnLocationQuantity: nextQty,
+            columnUpdatedAt: now,
+          },
+          where: '$columnId = ?',
+          whereArgs: <Object?>[linkId],
         );
       }
-      final itemId = rows.first[columnId] as int;
-      await _applyQuantity(
-        txn,
-        itemId: itemId,
-        quantity: quantity,
-        additive: additive,
-        now: now,
-      );
-      return _readStock(txn, itemId);
+      return _syncItemTotal(txn, itemId, now: now);
+    });
+  }
+
+  /// V3.11：只改**某个位置**的数量——用户在弹窗里选了「某个位置 N 个」时用。
+  /// 不动其他位置，走 [_syncItemTotal] 保证不变式（元宝批复第 3 条的另一分支）。
+  @override
+  Future<int> setLocationQuantity(
+    String itemName,
+    int locationId,
+    int quantity, {
+    bool additive = false,
+  }) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
+    }
+    final db = await open();
+    await _activeLocationRow(db, locationId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.transaction<int>((txn) async {
+      final itemId = await _requireItemId(txn, valid);
+      final cur = await _readLocationQty(txn, itemId, locationId);
+      final next = additive ? cur + quantity : quantity;
+      await _writeLocationQty(txn, itemId, locationId, next, now);
+      return _syncItemTotal(txn, itemId, now: now);
     });
   }
 
@@ -1180,7 +1401,8 @@ class InventoryDatabase implements InventoryRepository {
       'SELECT loc.$columnId AS loc_id, loc.$columnName AS loc_name, '
       'loc.$columnIsDeleted AS loc_deleted, '
       'loc.$columnCreatedAt AS loc_created, '
-      'loc.$columnUpdatedAt AS loc_updated '
+      'loc.$columnUpdatedAt AS loc_updated, '
+      'assoc.$columnLocationQuantity AS assoc_qty '
       'FROM $tableItemLocations AS assoc '
       'INNER JOIN $tableLocations AS loc ON assoc.$columnLocationId = loc.$columnId '
       'WHERE assoc.$columnItemId = ? AND assoc.$columnIsDeleted = 0 '
@@ -1188,18 +1410,25 @@ class InventoryDatabase implements InventoryRepository {
       'ORDER BY loc.$columnName ASC',
       <Object?>[item.id],
     );
-    final locations = rows
-        .map(
-          (row) => Location(
-            id: row['loc_id'] as int,
-            name: row['loc_name'] as String,
-            isDeleted: (row['loc_deleted'] as int) == 1,
-            createdAt: (row['loc_created'] as num).toInt(),
-            updatedAt: (row['loc_updated'] as num).toInt(),
-          ),
-        )
-        .toList(growable: false);
-    return ItemWithLocations(item: item, locations: locations);
+    final locations = <Location>[];
+    final locationQuantities = <int, int>{};
+    for (final row in rows) {
+      final id = row['loc_id'] as int;
+      locations.add(Location(
+        id: id,
+        name: row['loc_name'] as String,
+        isDeleted: (row['loc_deleted'] as int) == 1,
+        createdAt: (row['loc_created'] as num).toInt(),
+        updatedAt: (row['loc_updated'] as num).toInt(),
+      ));
+      // V3.11：多位置弹窗要显示「这里有 N 个」，必须把位置数量一起查出来。
+      locationQuantities[id] = (row['assoc_qty'] as num?)?.toInt() ?? 1;
+    }
+    return ItemWithLocations(
+      item: item,
+      locations: locations,
+      locationQuantities: locationQuantities,
+    );
   }
 
   /// 全部未删除物品（按名称排序）。
@@ -1248,6 +1477,7 @@ class InventoryDatabase implements InventoryRepository {
       'SELECT assoc.$columnItemId AS assoc_item_id, '
       'assoc.$columnRawText AS assoc_raw_text, '
       'assoc.$columnTags AS assoc_tags, '
+      'assoc.$columnLocationQuantity AS assoc_qty, '
       'loc.$columnId AS loc_id, loc.$columnName AS loc_name, '
       'loc.$columnIsDeleted AS loc_deleted, '
       'loc.$columnCreatedAt AS loc_created, '
@@ -1261,11 +1491,14 @@ class InventoryDatabase implements InventoryRepository {
     );
 
     final locationsByItem = <int, Map<int, Location>>{};
+    final qtyByItem = <int, Map<int, int>>{};
     final rawTextsByItem = <int, Set<String>>{};
     final tagsByItem = <int, Set<String>>{};
     for (final row in assocRows) {
       final itemId = row['assoc_item_id'] as int;
       final locId = row['loc_id'] as int;
+      (qtyByItem[itemId] ??= <int, int>{})[locId] =
+          (row['assoc_qty'] as num?)?.toInt() ?? 1;
       locationsByItem[itemId] ??= <int, Location>{};
       locationsByItem[itemId]![locId] = Location(
         id: locId,
@@ -1297,6 +1530,7 @@ class InventoryDatabase implements InventoryRepository {
                 const <String>[],
             tags: tagsByItem[item.id]?.toList(growable: false) ??
                 const <String>[],
+            locationQuantities: qtyByItem[item.id] ?? const <int, int>{},
           );
         })
         .toList(growable: false);
@@ -1381,23 +1615,22 @@ class InventoryDatabase implements InventoryRepository {
     return result;
   }
 
-  /// V3.10「校准数量」工具（PM 2026-11-24 补充要求 2）：
-  /// 按用户**实物清点**把数量改准。
+  /// V3.11「校准数量」工具（元宝批复第 5 条：按位置分别清点，不降级）。
   ///
-  /// [totals] = 物品 id → 用户清点的「家里一共几个」（总拥有数）。
-  /// 写入的**在库数 = 总拥有数 − 未归还借出数**（下限 0）。
+  /// [locationTotals] = 物品 id → (位置 id → 用户清点的「这里有几个」)。
+  ///   逐位置写数量；在借数**只展示、不重复扣减**（沿用 V3.10 定案：
+  ///   逐位置清点就是家里实物、即在库数）。支持新增位置行——位置 id 是新
+  ///   建的活跃关联，这里直接写入。每件最后走 [_syncItemTotal]。
   ///
-  /// 为什么这样算：用户清点时数的是「我家一共有几个」，
-  /// 借出去的那些人手里的不在家，所以从总数里扣掉在借数才是真正的在库数。
-  /// 对存量老物品（`items.quantity` 恒为 1 的「总数」语义）和
-  /// 新流程物品（「在库数」语义）**同一套公式都成立**，而且**幂等**：
-  /// 同样的清点值反复校准，结果不变。
+  /// [totals]（旧口径兼容）= 物品 id → 清点的「一共几个」（总拥有数）；
+  ///   写入在库数 = 总拥有数 − 未归还借出数，差额落到主位置后 sync。
+  ///   保留给旧测试/旧调用；新 UI 走 [locationTotals]。
   ///
-  /// 传空 [totals] = 只体检、不写库（details 里如实列出账面与清点的差异）。
-  /// 只处理活跃物品；已软删（回收站）的物品不动。
+  /// 幂等：同样的清点值反复校准，结果不变。只处理活跃物品。
   @override
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async {
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -1407,6 +1640,7 @@ class InventoryDatabase implements InventoryRepository {
         columns: <String>[columnId, columnName, columnQuantity],
         where: '$columnIsDeleted = 0',
       );
+      final activeIds = itemRows.map((r) => r[columnId] as int).toSet();
       final lentRows = await txn.rawQuery(
         'SELECT item_id AS item_id, '
         'COALESCE(SUM(quantity - returned_qty), 0) AS lent '
@@ -1420,30 +1654,60 @@ class InventoryDatabase implements InventoryRepository {
       }
       var changed = 0;
       final details = <String>[];
+
+      // ---- 新口径：逐位置清点 ----
+      for (final entry in locationTotals.entries) {
+        final id = entry.key;
+        if (!activeIds.contains(id)) continue;
+        final name =
+            itemRows.where((r) => r[columnId] as int == id).first[columnName]
+                as String;
+        final before = await _readStock(txn, id);
+        for (final posEntry in entry.value.entries) {
+          final locId = posEntry.key;
+          final qty = posEntry.value;
+          if (qty < 0) {
+            details.add('$name：某位置数量不能是负数，已跳过');
+            continue;
+          }
+          await _writeLocationQty(txn, id, locId, qty, now);
+        }
+        final after = await _syncItemTotal(txn, id, now: now);
+        if (after != before) {
+          changed++;
+          details.add('$name：逐位置清点后在库 $after 个（原 $before 个）');
+        }
+      }
+
+      // ---- 旧口径兼容：总拥有数 → 减在借 → 落主位置 ----
       for (final row in itemRows) {
         final id = row[columnId] as int;
+        if (locationTotals.containsKey(id)) continue; // 新口径已处理这件。
         final name = row[columnName] as String;
         final curQty = (row[columnQuantity] as num?)?.toInt() ?? 1;
         final lent = lentByItem[id] ?? 0;
         final counted = totals[id];
-        if (counted == null) continue; // 没清点这件就不动它。
+        if (counted == null) continue;
         if (counted < lent) {
-          // 清点总数比在借数还少——账已经打架了，如实说明，不硬写。
           details.add('$name：清点 $counted 个，比在借的 $lent 个还少，'
               '已跳过（请核对后重试）');
           continue;
         }
         final newQty = counted - lent;
         if (newQty != curQty) {
-          await txn.update(
-            tableItems,
-            <String, Object?>{
-              columnQuantity: newQty,
-              columnUpdatedAt: now,
-            },
-            where: '$columnId = ?',
+          final links = await txn.query(
+            tableItemLocations,
+            columns: <String>[columnId, columnLocationId, columnLocationQuantity],
+            where: '$columnItemId = ? AND $columnIsDeleted = 0',
             whereArgs: <Object?>[id],
+            orderBy: '$columnId ASC',
+            limit: 1,
           );
+          if (links.isNotEmpty) {
+            await _writeLocationQty(
+                txn, id, links.first[columnLocationId] as int, newQty, now);
+            await _syncItemTotal(txn, id, now: now);
+          }
           changed++;
           details.add('$name：共 $counted 个 − 在借 $lent 个 → 在库 $newQty 个'
               '（原记录 $curQty 个）');
@@ -1500,6 +1764,7 @@ class InventoryDatabase implements InventoryRepository {
         : <Map<String, Object?>>[];
 
     final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
       // 清空顺序：先子表后主表，避免外键/索引干扰。
       await txn.delete(tableLoans);
@@ -1522,7 +1787,59 @@ class InventoryDatabase implements InventoryRepository {
       for (final row in loanMaps) {
         await txn.insert(tableLoans, Loan.fromMap(row).toMap());
       }
+      // V3.11（元宝批复第 8 条）：恢复收口统一走 _syncItemTotal，
+      // 禁止另写一套重算逻辑（两套迟早漂移）。
+      //  * v9 备份：位置 quantity 原样恢复，sync 幂等（不重新分配，
+      //    否则会破坏用户已分的布局，如「阳台1客厅2」被平均成「阳台2客厅1」）。
+      //  * v8 及更早备份：位置无 quantity（补默认 1），需把 items.quantity
+      //    按迁移同款口径分配到位置，再 sync，才不丢校准则。
+      final legacy = backupVersion < 9;
+      final restoredItems = await txn.query(
+        tableItems,
+        columns: <String>[columnId, columnQuantity],
+      );
+      for (final row in restoredItems) {
+        final itemId = row[columnId] as int;
+        if (legacy) {
+          final total = (row[columnQuantity] as num?)?.toInt() ?? 1;
+          await _distributeTotalToLocations(txn, itemId, total, now);
+        }
+        await _syncItemTotal(txn, itemId, now: now);
+      }
     });
+  }
+
+  /// 把物品总数按「平均分配 + 余数给主位置」分配到各活跃位置（允许 0）。
+  /// v9 迁移与 v8 备份恢复收口共用同一口径，避免两套逻辑漂移。
+  Future<void> _distributeTotalToLocations(
+    DatabaseExecutor txn,
+    int itemId,
+    int total,
+    int now,
+  ) async {
+    final links = await txn.query(
+      tableItemLocations,
+      columns: <String>[columnId],
+      where: '$columnItemId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[itemId],
+      orderBy: '$columnId ASC',
+    );
+    if (links.isEmpty) return;
+    final n = links.length;
+    final base = total ~/ n;
+    final remainder = total % n;
+    for (var i = 0; i < links.length; i++) {
+      final qty = base + (i == 0 ? remainder : 0);
+      await txn.update(
+        tableItemLocations,
+        <String, Object?>{
+          columnLocationQuantity: qty,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[links[i][columnId] as int],
+      );
+    }
   }
 
   List<Map<String, Object?>> _rowsOf(Map<String, Object?> data, String key) {
@@ -1553,6 +1870,7 @@ class InventoryDatabase implements InventoryRepository {
     String borrowerName, {
     int quantity = 1,
     int? days,
+    int? fromLocationId,
   }) async {
     final validItem = _normalizeName(itemName, '物品名称');
     // V3.9.1 真机打回：解析器漏掉的一路（口语「梯子借给张三」）会把「借」
@@ -1631,14 +1949,40 @@ class InventoryDatabase implements InventoryRepository {
           Borrower(name: validBorrower, createdAt: now, updatedAt: now).toMap(),
         );
       }
-      // 在库口径（PM 拍板①）：借出即扣减库存数。
-      final newStock = stock - quantity;
-      await txn.update(
-        tableItems,
-        <String, Object?>{columnQuantity: newStock, columnUpdatedAt: now},
-        where: '$columnId = ?',
+      // V3.11 按位置记数量：从指定位置扣（UI 多位置时弹窗问），
+      // 未指定则从主位置（活跃关联 id 最小）扣，源位不够要提示。
+      final links = await txn.query(
+        tableItemLocations,
+        columns: <String>[columnId, columnLocationId, columnLocationQuantity],
+        where: '$columnItemId = ? AND $columnIsDeleted = 0',
         whereArgs: <Object?>[itemId],
+        orderBy: '$columnId ASC',
       );
+      if (links.isEmpty) {
+        throw ArgumentError.value(
+          storeItem, 'itemName', '「$storeItem」还没登记放在哪儿，先说一句放哪再借');
+      }
+      final sourceLink = fromLocationId == null
+          ? links.first
+          : links.firstWhere(
+              (l) => l[columnLocationId] as int == fromLocationId,
+              orElse: () => links.first,
+            );
+      final sourceId = sourceLink[columnLocationId] as int;
+      final sourceQty =
+          (sourceLink[columnLocationQuantity] as num?)?.toInt() ?? 0;
+      if (sourceQty < quantity) {
+        final sourceName = await _locationName(txn, sourceId) ?? '这个位置';
+        throw ArgumentError.value(
+          quantity,
+          'quantity',
+          '$sourceName只有 $sourceQty 个「$storeItem」，不够借 $quantity 个。'
+          '换个位置借，或先补货。',
+        );
+      }
+      await _writeLocationQty(
+          txn, itemId, sourceId, sourceQty - quantity, now);
+      await _syncItemTotal(txn, itemId, now: now);
       final loan = Loan(
         itemId: itemId,
         updatedAt: now,
@@ -1665,7 +2009,8 @@ class InventoryDatabase implements InventoryRepository {
   /// 归还：[quantity] 为空 = 全部归还；给定值 = 部分归还（累加 returnedQty，
   /// 标 isPartial）。数量非法或超借出量抛 ArgumentError。幂等：已还完再还无操作。
   @override
-  Future<void> returnLoan(int loanId, {int? quantity}) async {
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId}) async {
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
@@ -1711,18 +2056,29 @@ class InventoryDatabase implements InventoryRepository {
         limit: 1,
       );
       if (itemRows.isNotEmpty) {
-        final itemRow = itemRows.first;
-        final itemId = itemRow[columnId] as int;
-        final curQty = (itemRow[columnQuantity] as num?)?.toInt() ?? 1;
-        await txn.update(
-          tableItems,
-          <String, Object?>{
-            columnQuantity: curQty + amount,
-            columnUpdatedAt: now,
-          },
-          where: '$columnId = ?',
+        final itemId = itemRows.first[columnId] as int;
+        // V3.11：归还加到指定位置（UI 弹窗问），未指定则加到主位置。
+        // 目标位置可能已被删除（物品进回收站/位置不存在）——此时无处加，
+        // 只更新 loans 即可，不报错（V3.9.2 口径）。
+        final links = await txn.query(
+          tableItemLocations,
+          columns: <String>[columnId, columnLocationId],
+          where: '$columnItemId = ? AND $columnIsDeleted = 0',
           whereArgs: <Object?>[itemId],
+          orderBy: '$columnId ASC',
         );
+        int targetId;
+        if (toLocationId != null &&
+            links.any((l) => l[columnLocationId] as int == toLocationId)) {
+          targetId = toLocationId;
+        } else if (links.isNotEmpty) {
+          targetId = links.first[columnLocationId] as int;
+        } else {
+          return; // 无活跃关联，无处加回。
+        }
+        final curQty = await _readLocationQty(txn, itemId, targetId);
+        await _writeLocationQty(txn, itemId, targetId, curQty + amount, now);
+        await _syncItemTotal(txn, itemId, now: now);
       }
     });
   }

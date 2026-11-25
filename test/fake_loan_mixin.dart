@@ -6,7 +6,7 @@ import 'package:home_inventory/home_inventory.dart';
 /// 无需各自重复样板；真实数据库行为由 inventory_database_test.dart 覆盖。
 mixin FakeLoanMixin {
   Future<Loan> lendItem(String itemName, String borrowerName,
-          {int quantity = 1, int? days}) async =>
+          {int quantity = 1, int? days, int? fromLocationId}) async =>
       Loan(
         itemId: 0,
         itemName: itemName,
@@ -16,7 +16,8 @@ mixin FakeLoanMixin {
         dueAt: 1 + (days ?? 3) * 86400000,
       );
 
-  Future<void> returnLoan(int loanId, {int? quantity}) async {}
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId}) async {}
 
   Future<void> updateLoanDue(int loanId, int days) async {}
 
@@ -47,6 +48,7 @@ mixin FakeLoanMixin {
 
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async =>
       const CalibrationReport(changedCount: 0);
 
@@ -54,4 +56,49 @@ mixin FakeLoanMixin {
   Future<int> setItemQuantity(String itemName, int quantity,
           {bool additive = false}) async =>
       0;
+
+  // ---------- V3.11 按位置记数量：测试桩默认无操作 ----------
+  Future<int> setLocationQuantity(
+    String itemName,
+    int locationId,
+    int quantity, {
+    bool additive = false,
+  }) async =>
+      0;
+
+  Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
+      {String? rawText}) async {
+    final found = await findByName(itemName);
+    final locs = await getAllLocations();
+    return MoveResult(
+      itemId: found?.item.id ?? 0,
+      locationId: toLocationId,
+      created: true,
+      previousLocations: locs.map((l) => l.name).toList(),
+      quantity: quantity0(found),
+    );
+  }
+
+  Future<MoveResult> moveItemPartial(
+    String itemName,
+    int fromLocationId,
+    int toLocationId, {
+    required int quantity,
+    String? rawText,
+  }) async {
+    final found = await findByName(itemName);
+    return MoveResult(
+      itemId: found?.item.id ?? 0,
+      locationId: toLocationId,
+      created: false,
+      previousLocations: const <String>[],
+      quantity: quantity0(found),
+    );
+  }
+
+  int quantity0(ItemWithLocations? found) => found?.item.quantity ?? 1;
+
+  Future<ItemWithLocations?> findByName(String name) async => null;
+
+  Future<List<Location>> getAllLocations() async => const <Location>[];
 }

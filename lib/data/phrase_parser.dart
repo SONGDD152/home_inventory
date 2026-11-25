@@ -16,10 +16,22 @@ class ParseUpsert extends ParseResult {
     required this.location,
     this.quantity = 1,
     this.additive = false,
+    this.isMove = false,
+    this.hasQuantity = false,
   });
 
   final String item;
   final String location;
+
+  /// V3.11（元宝批复第 1 条）：这句话的动词是不是「挪」。
+  /// 放置动词（放/搁/塞/摆/收/存/归）= 录入到某位置，只动目标位；
+  /// 「挪」= 挪位，整体挪或部分挪。UI 据此分流到不同数据层方法，
+  /// 不靠 quantity 是否为 null 判断。
+  final bool isMove;
+
+  /// V3.11：句子里是否**显式**说了数量（「把1个梯子挪到客厅」=true，
+  /// 「把梯子挪到客厅」=false）。带数量的挪位走部分挪、不带数的走整体挪。
+  final bool hasQuantity;
 
   /// V3.7：录入数量（"记：2个梯子放阳台" → 2），默认 1。
   final int quantity;
@@ -332,9 +344,11 @@ ParseUpsert? _parseRecord(String text) {
   // V3.10：前置数量（「3个梯子放阳台」）在**切动词之前**剥掉——
   // 否则「个」这类量词里的字可能干扰动词定位，且数量会丢失。
   var qty = 1;
+  var hasExplicitQty = false; // V3.11：句子里是否显式说了数量。
   final leadQty = _extractLeadingQuantity(core);
   if (leadQty != null && leadQty.rest.isNotEmpty) {
     qty = leadQty.value;
+    hasExplicitQty = true;
     core = leadQty.rest;
     if (core.isEmpty || !_isValidWordOrder(core)) return null;
   }
@@ -353,6 +367,10 @@ ParseUpsert? _parseRecord(String text) {
   // V3.10：支持「动词在前」的形式——「放2个梯子在阳台」「再放2个梯子」。
   // 形式为：动词[介词][数量][物品][介词][位置]。
   // 物品名在「物品+动词+位置」语序里位于动词之前；这里反之。
+  // V3.11：动词是不是「挪」——放置动词（放/搁/塞/…）= 录入；
+  // 「挪」= 挪位（整体/部分），UI 据此分流到不同数据层方法。
+  final isMoveVerb = core.substring(verbIndex, verbIndex + 1) == '挪';
+
   if (verbIndex == 0) {
     var body = core.substring(1).trim();
     // 剥动词后的助词「了」：「又放了3个梯子」→「3个梯子」。
@@ -362,9 +380,11 @@ ParseUpsert? _parseRecord(String text) {
     // 前置数量：「2个梯子」→ 数量 2、余下「梯子」。
     final q = _extractLeadingQuantity(body);
     var bodyQty = 1;
+    var bodyHasQty = false;
     var rest = body;
     if (q != null && q.rest.isNotEmpty) {
       bodyQty = q.value;
+      bodyHasQty = true;
       rest = q.rest;
     }
     // PM 真机打回（V3.10 复验）：语音常把数量说在物品后面——
@@ -374,6 +394,7 @@ ParseUpsert? _parseRecord(String text) {
     final trailing = _extractTrailingQuantity(rest);
     if (trailing != null && trailing.rest.isNotEmpty) {
       bodyQty = trailing.value;
+      bodyHasQty = true;
       rest = trailing.rest;
     }
     rest = rest.trim();
@@ -386,6 +407,8 @@ ParseUpsert? _parseRecord(String text) {
         item: inner.item,
         location: inner.location,
         quantity: bodyQty,
+        isMove: isMoveVerb || inner.isMove,
+        hasQuantity: bodyHasQty || inner.hasQuantity,
       );
     }
     // 「梯子在阳台」形式：按介词切。
@@ -399,12 +422,15 @@ ParseUpsert? _parseRecord(String text) {
         final tail = _extractTrailingQuantity(itemPart);
         if (tail != null && tail.rest.isNotEmpty) {
           bodyQty = tail.value;
+          bodyHasQty = true;
           itemPart = tail.rest;
         }
         return ParseUpsert(
           item: normalizeName(itemPart),
           location: normalizeName(locPart),
           quantity: bodyQty,
+          isMove: isMoveVerb,
+          hasQuantity: bodyHasQty,
         );
       }
     }
@@ -426,12 +452,15 @@ ParseUpsert? _parseRecord(String text) {
   final trailing = _extractTrailingQuantity(item);
   if (trailing != null && trailing.rest.isNotEmpty) {
     qty = trailing.value;
+    hasExplicitQty = true;
     item = trailing.rest;
   }
   return ParseUpsert(
     item: normalizeName(item),
     location: normalizeName(location),
     quantity: qty,
+    isMove: isMoveVerb,
+    hasQuantity: hasExplicitQty,
   );
 }
 
@@ -1267,7 +1296,9 @@ ParseResult parsePhrase(String input) {
           item: parsed.item,
           location: parsed.location,
           quantity: parsed.quantity,
-          additive: additive.isAdditive);
+          additive: additive.isAdditive,
+          isMove: parsed.isMove,
+          hasQuantity: parsed.hasQuantity);
     }
     return const ParseUnrecognized();
   }
@@ -1333,7 +1364,9 @@ ParseResult parsePhrase(String input) {
         item: record.item,
         location: record.location,
         quantity: record.quantity,
-        additive: additive.isAdditive);
+        additive: additive.isAdditive,
+        isMove: record.isMove,
+        hasQuantity: record.hasQuantity);
   }
 
   // V3.10：无位置的累加表述（「又多了2个梯子」）——不含放置动词，

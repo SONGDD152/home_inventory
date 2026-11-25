@@ -321,9 +321,9 @@ void main() {
     // 元宝审核补充①：数据层双保险——脏名落库前被剥，不新建物品。
     test('数据层兜底：脏名「梯子3个」落库归一为「梯子」，不建第二条', () async {
       final balconyId = await balcony();
-      await db.moveItem('梯子', balconyId, quantity: 1);
+      await db.upsertItemLocation('梯子', balconyId, quantity: 1);
       // 模拟解析器漏剥的脏名直达仓储层。
-      await db.moveItem('梯子3个', balconyId, quantity: 1, additive: true);
+      await db.upsertItemLocation('梯子3个', balconyId, quantity: 1, additive: true);
       final rows = await db.getAllItemsWithLocations();
       expect(rows, hasLength(1), reason: '脏名归一到同一物品，不会多一行');
       expect(rows.first.item.name, '梯子');
@@ -519,9 +519,12 @@ void main() {
       await tester.pumpAndSettle();
 
       // 账面 1 个、借出 1 个（李四）→ 用户清点「家里一共 3 个」。
-      expect(find.textContaining('在借 1 个'), findsOneWidget);
+      // V3.11：校准页多了一行实时合计，也带「在借 1 个」，断言锁定合计行本身。
+      final sumFinder = find.byKey(const Key('calibration_sum_1'));
+      expect(sumFinder, findsOneWidget);
+      expect(tester.widget<Text>(sumFinder).data, contains('在借 1 个'));
       await tester.enterText(
-        find.byKey(const Key('calibration_field_1')),
+        find.byKey(const Key('calibration_field_1_1')),
         '3',
       );
       await tester.tap(find.byKey(const Key('calibration_save')));
@@ -535,7 +538,7 @@ void main() {
       final repo = _CalibRepo();
       await tester.pumpWidget(MaterialApp(home: CalibrationPage(repository: repo)));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byKey(const Key('calibration_field_1')), '0');
+      await tester.enterText(find.byKey(const Key('calibration_field_1_1')), '0');
       await tester.tap(find.byKey(const Key('calibration_save')));
       await tester.pumpAndSettle();
       expect(repo.savedStock, isNull, reason: '账打架时不该写');
@@ -705,12 +708,20 @@ class _CalibRepo with FakeLoanMixin implements InventoryRepository {
   @override
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async {
-    writtenTotals.addAll(totals);
+    // V3.11：校准页按位置填数，假仓储同样把各位置加总成「家里一共几个」，
+    // 否则新页面传 locationTotals 过来会被旧假仓储静默丢掉。
+    final mappedTotals = <int, int>{
+      for (final e in locationTotals.entries)
+        e.key: e.value.values.fold<int>(0, (a, b) => a + b),
+    };
+    final effective = mappedTotals.isNotEmpty ? mappedTotals : totals;
+    writtenTotals.addAll(effective);
     const lent = 1;
     var changed = 0;
     final details = <String>[];
-    for (final e in totals.entries) {
+    for (final e in effective.entries) {
       if (e.value < lent) {
         details.add('梯子：清点 ${e.value} 个，比在借的 $lent 个还少，已跳过');
         continue;
@@ -875,6 +886,12 @@ class _FakeRepo with FakeLoanMixin implements InventoryRepository {
     );
   }
 
+  /// V3.11：UI 的无数量录入走整体挪，假仓储复用原 moveItem 落库语义。
+  @override
+  Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
+      {String? rawText}) =>
+      moveItem(itemName, toLocationId, rawText: rawText);
+
   @override
   Future<int> setItemQuantity(String itemName, int quantity,
       {bool additive = false}) async {
@@ -904,12 +921,13 @@ class _FakeRepo with FakeLoanMixin implements InventoryRepository {
   @override
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async =>
       const CalibrationReport(changedCount: 0);
 
   @override
   Future<Loan> lendItem(String itemName, String borrowerName,
-      {int quantity = 1, int? days}) async {
+      {int quantity = 1, int? days, int? fromLocationId}) async {
     final key = normalizeName(itemName);
     final stock = _items[key];
     if (stock == null) {
@@ -933,7 +951,8 @@ class _FakeRepo with FakeLoanMixin implements InventoryRepository {
   }
 
   @override
-  Future<void> returnLoan(int loanId, {int? quantity}) async {}
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId}) async {}
 
   @override
   Future<List<Loan>> getAllLoans() async => List<Loan>.unmodifiable(_loans);

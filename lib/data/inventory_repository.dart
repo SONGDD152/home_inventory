@@ -52,13 +52,30 @@ abstract class InventoryRepository {
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText, int? quantity, bool additive = false});
 
-  /// 挪位语义（V3.2，UI 主链路）：把物品记到新位置并软删其他位置关联，
-  /// 详见 [InventoryDatabase.moveItem]。
+  /// 整体挪（V3.2 旧语义的兼容名）：把物品记到新位置并软删其他位置关联，
+  /// 目标位置拿走全部数量、**总数不变**。不带数量的「挪到」走这里。
   ///
-  /// V3.10：新增 [quantity] 与 [additive]（覆盖 / 累加），语义同
-  /// [upsertItemLocation]。
+  /// V3.11 元宝批复第 1 条：挪位拆两个方法，禁止靠参数分流。
+  /// 带数量的「挪 N 个」必须显式走 [moveItemPartial]。
   Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText, int? quantity, bool additive = false});
+          {String? rawText}) =>
+      moveItemWhole(itemName, locationId, rawText: rawText);
+
+  /// V3.11：整体挪的语义化命名（与 [moveItem] 等价），UI 主链路用。
+  Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
+          {String? rawText}) =>
+      throw UnimplementedError('moveItemWhole 需由真实仓储实现');
+
+  /// V3.11：部分挪——从 [fromLocationId] 挪 [quantity] 个到 [toLocationId]，
+  /// 总数不变；源位库存不足抛 ArgumentError（元宝批复第 4 条）。
+  Future<MoveResult> moveItemPartial(
+    String itemName,
+    int fromLocationId,
+    int toLocationId, {
+    required int quantity,
+    String? rawText,
+  }) =>
+      throw UnimplementedError('moveItemPartial 需由真实仓储实现');
 
   Future<ItemWithLocations?> findByName(String name);
 
@@ -79,11 +96,13 @@ abstract class InventoryRepository {
   /// 以下六个方法提供安全默认实现（返回空/无操作），使测试假仓储无需逐个实现；
   /// 生产 [InventoryDatabase] 全部 override 为真实数据库行为。
   Future<Loan> lendItem(String itemName, String borrowerName,
-      {int quantity = 1, int? days}) =>
+          {int quantity = 1, int? days, int? fromLocationId}) =>
       throw UnimplementedError('lendItem 需由真实仓储实现');
 
   /// 归还：[quantity] 为空 = 全部；给定值 = 部分归还（累加 + 标 is_partial）。
-  Future<void> returnLoan(int loanId, {int? quantity}) async {}
+  /// [toLocationId] 为归还落点（UI 弹窗问），未指定加到主位置。
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId}) async {}
 
   /// 单笔改借期（天数从借出时刻起算）。
   Future<void> updateLoanDue(int loanId, int days) async {}
@@ -130,6 +149,7 @@ abstract class InventoryRepository {
   /// 传空 [totals] = 只体检、不写库。
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async =>
       const CalibrationReport(changedCount: 0);
 
@@ -140,5 +160,15 @@ abstract class InventoryRepository {
   /// 物品没记录过 → 抛 ArgumentError。返回改完后的在库数。
   Future<int> setItemQuantity(String itemName, int quantity,
           {bool additive = false}) async =>
+      0;
+
+  /// V3.11：只改**某个位置**的数量（元宝批复第 3 条：弹窗选「某位置 N 个」时走这里，
+  /// 不动用户没提的位置）。返回改完后的在库总数。
+  Future<int> setLocationQuantity(
+    String itemName,
+    int locationId,
+    int quantity, {
+    bool additive = false,
+  }) async =>
       0;
 }

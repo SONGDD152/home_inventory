@@ -303,6 +303,7 @@ class ItemLocation {
     required this.updatedAt,
     this.rawText,
     this.tags,
+    this.quantity = 1,
   });
 
   final int? id;
@@ -314,6 +315,10 @@ class ItemLocation {
   final String? rawText;
   final String? tags;
 
+  /// V3.11：这个物品**在这个位置**有几个（按位置记数量的地基）。
+  /// 旧库/旧备份无此列时按 1 读取（元宝迁移兼容硬约束）。
+  final int quantity;
+
   Map<String, Object?> toMap() => <String, Object?>{
         if (id != null) 'id': id,
         'item_id': itemId,
@@ -324,7 +329,16 @@ class ItemLocation {
         // null 时省略列：兼容尚未 ALTER 加列的 v3/v4 旧库直接插入。
         if (rawText != null) 'raw_text': rawText,
         if (tags != null) 'tags': tags,
+        // V3.11：按位置数量。始终写入；旧库迁移中途由调用方用 toMap 变体省略。
+        'quantity': quantity,
       };
+
+  /// 旧库迁移中途（quantity 列尚未 ALTER）用此变体省略该列。
+  Map<String, Object?> toMapWithoutQuantity() {
+    final map = toMap();
+    map.remove('quantity');
+    return map;
+  }
 
   factory ItemLocation.fromMap(Map<String, Object?> map) => ItemLocation(
         id: map['id'] as int?,
@@ -335,6 +349,8 @@ class ItemLocation {
         updatedAt: (map['updated_at'] as num).toInt(),
         rawText: map['raw_text'] as String?,
         tags: map['tags'] as String?,
+        // 旧备份/旧库无 quantity 列 → 补 1。
+        quantity: (map['quantity'] as num?)?.toInt() ?? 1,
       );
 }
 
@@ -349,6 +365,7 @@ class ItemWithLocations {
     required this.locations,
     this.rawTexts = const <String>[],
     this.tags = const <String>[],
+    this.locationQuantities = const <int, int>{},
   });
 
   final Item item;
@@ -359,6 +376,13 @@ class ItemWithLocations {
 
   /// 该物品全部关联行的标签（tags 非空去重）。
   final List<String> tags;
+
+  /// V3.11：位置 id → 该位置的数量。只在数据层聚合里填充；
+  /// 测试/假仓储可留空，UI 取不到时用 item.quantity 兜底。
+  final Map<int, int> locationQuantities;
+
+  /// 某位置的数量；取不到时返回 null（调用方决定兜底口径）。
+  int? quantityAt(int locationId) => locationQuantities[locationId];
 }
 
 /// 恢复回收站物品的结果（V3.9）。

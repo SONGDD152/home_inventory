@@ -212,6 +212,17 @@ class _ItemListPageState extends State<ItemListPage> {
     return name;
   }
 
+  /// V3.11：位置摘要带每个位置的数量——「阳台 2 个、客厅 1 个」。
+  /// 假仓储没填 locationQuantities 时退回只列位置名（保持旧测试兼容）。
+  String _locationSummary(ItemWithLocations row) {
+    final hasQty = row.locationQuantities.isNotEmpty;
+    return row.locations.map((loc) {
+      if (!hasQty) return loc.name;
+      final qty = (loc.id != null ? row.quantityAt(loc.id!) : null) ?? 0;
+      return '${loc.name} $qty 个';
+    }).join('、');
+  }
+
   // ---------- V3.6 回收站 / Excel 导出 ----------
 
   Future<void> _openTrash() async {
@@ -465,7 +476,7 @@ class _ItemListPageState extends State<ItemListPage> {
             subtitle: row.locations.isEmpty
                 ? const Text('（没有有效位置）')
                 : Text(
-                    row.locations.map((loc) => loc.name).join('、'),
+                    _locationSummary(row),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),

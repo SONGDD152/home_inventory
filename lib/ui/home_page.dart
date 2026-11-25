@@ -70,10 +70,10 @@ class _HomePageState extends State<HomePage> {
   static String _notFound(String item) => '暂未记录该物品：$item。';
   static String _recorded(String item, String location) =>
       '已记下：$item → $location';
-  static String _moved(String item, String location, String previous) =>
-      '已更新：$item → $location（原位置：$previous）';
   static String _alreadyRecorded(String item, String location) =>
       '「$item」已经在「$location」了。';
+  static String _moved(String item, String location, String previous) =>
+      '已更新：$item → $location（原位置：$previous）';
 
   @override
   void dispose() {
@@ -211,27 +211,40 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  /// 挪位语义（V3.2）：同一物品再记新位置 = 移动，旧位置软删。
-  ///
-  /// V3.10：贯通数量。
-  ///  * [quantity] = 本次说的数量（覆盖 or 累加，由 [additive] 决定）。
-  ///  * 无位置（累加语义「又多了2个梯子」）：**只改数量、不挪位**，
-  ///    沿用物品原有位置关联。
+  /// V3.11 按位置记数量：入口按「动词 + 有无数量 + 有无位置」显式分流，
+  /// 不靠 quantity 是否为 null 猜（元宝批复第 1 条）。
+  ///  * 无位置（「3个梯子」/「又多了2个梯子」）→ 只改数量，弹窗二选一/累加。
+  ///  * 「挪」动词 + 带数量（「把1个梯子挪到客厅」）→ 部分挪，源位−目标位+。
+  ///  * 「挪」动词 + 不带数量（「把梯子挪到客厅」）→ 整体挪（旧语义）。
+  ///  * 放置动词（「3个梯子放阳台」）→ 只覆盖/累加目标位置，其他位置不动。
   Future<void> _handleUpsert(ParseUpsert parsed, String rawText) async {
     final item = parsed.item;
     final location = parsed.location;
     final quantity = parsed.quantity;
     final additive = parsed.additive;
 
-    // V3.10：无位置的累加表述——东西已经在某处，只加数量，不挪位。
     if (!parsed.hasLocation) {
       await _handleQuantityOnly(item, quantity, additive);
       return;
     }
 
+    // 不带数量的放置/挪位（「梯子放阳台」「梯子挪到客厅」）= 整体挪，
+    // 沿用 V3 老语义与「已更新/已记下」文案，总数不变。
+    if (!parsed.hasQuantity) {
+      await _handleMove(parsed, rawText);
+      return;
+    }
+
+    if (parsed.isMove) {
+      // 带数量的「挪」= 部分挪。
+      await _handleMove(parsed, rawText);
+      return;
+    }
+
+    // 放置动词 + 带数量：只覆盖/累加目标位置，其他位置保持不动。
     final locationId = await widget.repository.addLocation(location);
     if (!mounted) return;
-    final result = await widget.repository.moveItem(
+    final result = await widget.repository.upsertItemLocation(
       item,
       locationId,
       rawText: rawText,
@@ -239,19 +252,17 @@ class _HomePageState extends State<HomePage> {
       additive: additive,
     );
     if (!mounted) return;
+    final info = await widget.repository.getQuantityInfo(item);
+    if (!mounted) return;
     final nameInDb = await _locationName(locationId);
     if (!mounted) return;
-    String notice;
-    if (result.previousLocations.isNotEmpty) {
-      notice = _moved(item, nameInDb, result.previousLocations.join('、'));
-    } else if (result.created) {
-      notice = _recorded(item, nameInDb);
+    String notice = result.created
+        ? _recorded(item, nameInDb)
+        : _alreadyRecorded(item, nameInDb);
+    if (additive) {
+      notice = '「$item」又添了 $quantity 个 · 家里现在 ${info.stock} 个';
     } else {
-      notice = _alreadyRecorded(item, nameInDb);
-    }
-    // V3.10：数量回显——说清现在家里有几个。
-    if (quantity > 1 || result.quantityChanged) {
-      notice = '$notice（现在 ${result.quantity} 个）';
+      notice = '$notice · 这里 $quantity 个 · 家里现在 ${info.stock} 个';
     }
     setState(() {
       _busy = false;
@@ -260,9 +271,126 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  /// V3.10：只改数量、不挪位（句子里只有数量，没有位置）。
+  /// V3.11：挪位分流——整体挪（无数量）走 moveItemWhole，
+  /// 部分挪（带数量）走 moveItemPartial。部分挪若物品在多个位置，
+  /// 弹窗问「从哪个位置挪」（元宝批复：没说位置就问，不静默猜）。
+  Future<void> _handleMove(ParseUpsert parsed, String rawText) async {
+    final item = parsed.item;
+    final toId = await widget.repository.addLocation(parsed.location);
+    if (!mounted) return;
+    final toName = await _locationName(toId);
+    if (!mounted) return;
+
+    if (!parsed.hasQuantity) {
+      final result = await widget.repository.moveItemWhole(item, toId, rawText: rawText);
+      if (!mounted) return;
+      // 放置动词（「放」）的整体挪沿用旧「已更新/已记下」文案（元宝要求
+      // 回显须明说整体挪；这里补一句总数不变）。「挪」动词用整体挪专用文案。
+      String notice;
+      if (result.previousLocations.isNotEmpty) {
+        notice = _moved(item, toName, result.previousLocations.join('、'));
+      } else if (result.created) {
+        notice = _recorded(item, toName);
+      } else {
+        notice = _alreadyRecorded(item, toName);
+      }
+      if (parsed.isMove) {
+        notice = '已整体把「$item」挪到 $toName（${result.quantity} 个，总数不变）';
+      } else if (result.previousLocations.isNotEmpty) {
+        // 真·换位置：明说整体挪（元宝要求），同时保留旧文案前缀。
+        notice = '$notice（整体挪，共 ${result.quantity} 个）';
+      }
+      // 首次录入（已记下）/ 幂等（已经在）：保持原文案，不打扰。
+      setState(() {
+        _busy = false;
+        _notice = notice;
+        _result = null;
+      });
+      return;
+    }
+
+    // 部分挪：确定源位置。
+    final found = await widget.repository.findByName(item);
+    if (!mounted) return;
+    if (found == null) {
+      setState(() {
+        _busy = false;
+        _notice = '还没记录过「$item」，先说一句「$item放阳台」再挪。';
+        _result = null;
+      });
+      return;
+    }
+    int? fromId;
+    if (found.locations.length > 1) {
+      fromId = await _pickLocation(
+        title: '「$item」在好几个地方',
+        subtitle: '要从哪个位置挪 ${parsed.quantity} 个到 $toName？',
+        locations: found.locations,
+        excludeLocationId: toId,
+        itemName: item,
+      );
+      if (!mounted) return;
+      if (fromId == null) {
+        setState(() {
+          _busy = false;
+          _notice = '已取消挪位。';
+          _result = null;
+        });
+        return;
+      }
+    } else if (found.locations.isNotEmpty) {
+      fromId = found.locations.first.id;
+    }
+    if (fromId == null) {
+      setState(() {
+        _busy = false;
+        _notice = '「$item」还没登记放在哪儿，先说一句放哪再挪。';
+        _result = null;
+      });
+      return;
+    }
+
+    try {
+      await widget.repository.moveItemPartial(
+        item, fromId, toId,
+        quantity: parsed.quantity,
+        rawText: rawText,
+      );
+      if (!mounted) return;
+      final fromName = found.locations
+          .where((l) => l.id == fromId)
+          .map((l) => l.name)
+          .firstOrNull ?? '原位置';
+      final info = await widget.repository.getQuantityInfo(item);
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = '已把 ${parsed.quantity} 个「$item」从 $fromName 挪到 $toName'
+            ' · 家里一共 ${info.stock} 个（没变）。';
+        _result = null;
+      });
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = e.message is String ? e.message : '没挪成，位置数量不够。';
+        _result = null;
+      });
+    }
+  }
+
+  /// V3.11：读某位置的数量（展示用）。
+  Future<int> _positionQty(String item, int locationId) async {
+    final found = await widget.repository.findByName(item);
+    return found?.quantityAt(locationId) ?? 0;
+  }
+
+  /// V3.11：只带数量、没说位置（「3个梯子」/「又多了2个梯子」）。
   ///
-  /// 物品必须已经存在——没记录过的东西不能凭空出现。
+  /// 元宝批复第 3 条：东西已在多个位置时**不静默猜**——
+  ///  * 覆盖（「3个梯子」）：弹窗二选一「家里一共 N 个」/「某个位置 N 个」；
+  ///  * 累加（「又多了2个」）：弹窗问加到哪个位置。
+  /// 单位置时直接改，不打扰。物品必须已存在。
   Future<void> _handleQuantityOnly(
       String item, int quantity, bool additive) async {
     final info = await widget.repository.getQuantityInfo(item);
@@ -277,7 +405,7 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    // 覆盖语义且不说「再/又」时，这是"纠正数量"。
+
     final newStock = additive ? info.stock + quantity : quantity;
     if (!additive && newStock == info.stock) {
       setState(() {
@@ -287,10 +415,57 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    // 只改数量、不动位置——不能走 moveItem（那是挪位语义，
-    // 会把物品的其他位置关联一并软删）。
+
+    // 单位置：直接改，不打扰用户。
+    if (exists.locations.length <= 1) {
+      await _applyQuantityOnly(item, quantity, additive, null);
+      return;
+    }
+
+    // 多位置：弹窗问目标（覆盖=二选一，累加=选位置）。
+    final choice = await _pickQuantityTarget(item, quantity, additive);
+    if (!mounted) return;
+    if (choice == null) {
+      setState(() {
+        _busy = false;
+        _notice = '已取消改数量。';
+        _result = null;
+      });
+      return;
+    }
+    // -1 = 用户选「改总数」→ locationId=null（落主位置）。
+    await _applyQuantityOnly(
+        item, quantity, additive, choice == -1 ? null : choice);
+  }
+
+  /// 真正执行只带数量的改动。[locationId] 为 null = 改总数（落主位置）。
+  Future<void> _applyQuantityOnly(
+    String item,
+    int quantity,
+    bool additive,
+    int? locationId,
+  ) async {
     try {
-      await widget.repository.setItemQuantity(item, newStock);
+      if (locationId != null) {
+        await widget.repository.setLocationQuantity(
+          item, locationId, quantity,
+          additive: additive,
+        );
+      } else {
+        final info = await widget.repository.getQuantityInfo(item);
+        final newStock = additive ? info.stock + quantity : quantity;
+        await widget.repository.setItemQuantity(item, newStock);
+      }
+      if (!mounted) return;
+      final info = await widget.repository.getQuantityInfo(item);
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _notice = additive
+            ? '「$item」又添了 $quantity 个，现在一共 ${info.stock} 个。'
+            : '「$item」数量改成 $quantity 个（现在一共 ${info.stock} 个）。';
+        _result = null;
+      });
     } on ArgumentError catch (e) {
       if (!mounted) return;
       setState(() {
@@ -298,16 +473,72 @@ class _HomePageState extends State<HomePage> {
         _notice = e.message is String ? e.message : '记数量失败了。';
         _result = null;
       });
-      return;
     }
-    if (!mounted) return;
-    setState(() {
-      _busy = false;
-      _notice = additive
-          ? '「$item」又添了 $quantity 个，现在是 ${info.stock + quantity} 个。'
-          : '「$item」数量改成 $quantity 个。';
-      _result = null;
-    });
+  }
+
+  /// 多位置时数量目标弹窗。返回 null=取消；正整数=改某位置（location id）；
+  /// -1=改总数（哨兵值，调用方转成 locationId=null 落主位置）。
+  Future<int?> _pickQuantityTarget(
+    String item,
+    int quantity,
+    bool additive,
+  ) async {
+    final found = await widget.repository.findByName(item);
+    if (!mounted) return null;
+    if (found == null) return null;
+    final locs = found.locations;
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('quantity_target_dialog'),
+        title: Text('「$item」分在好几个地方'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Text(
+                additive
+                    ? '「又多了 $quantity 个」——加到哪个位置？'
+                    : '「$quantity 个」是指——',
+                style: const TextStyle(fontSize: 13, color: Color(0xff607d8b)),
+              ),
+              const SizedBox(height: 6),
+              if (!additive)
+                ListTile(
+                  key: const Key('quantity_target_total'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.inventory_2_outlined),
+                  title: Text('家里一共 $quantity 个'),
+                  subtitle: const Text('只改总数，各位置怎么分不动'),
+                  onTap: () => Navigator.of(context).pop(-1),
+                ),
+              for (final loc in locs)
+                ListTile(
+                  key: Key('quantity_target_${loc.name}'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.place_outlined),
+                  title: Text(
+                    additive
+                        ? '${loc.name}（这里 +$quantity）'
+                        : '${loc.name} 放 $quantity 个',
+                  ),
+                  onTap: () => Navigator.of(context).pop(loc.id),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('quantity_target_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    // -1 = 改总数（调用方转 locationId=null）；正整数 = 某位置；null = 取消。
+    return picked;
   }
 
   /// V3.7 缺陷修复：语音借出落库。
@@ -318,11 +549,33 @@ class _HomePageState extends State<HomePage> {
   /// 拍板④：没记录过的东西不能直接借出，引导先录入。
   Future<void> _handleLend(ParseLend parsed) async {
     try {
+      // V3.11：物品在多个位置时，弹窗问「从哪个位置借」（元宝批复口径②）。
+      int? fromLocationId;
+      final found = await widget.repository.findByName(parsed.item);
+      if (!mounted) return;
+      if (found != null && found.locations.length > 1) {
+        fromLocationId = await _pickLocation(
+          title: '「${parsed.item}」在好几个地方',
+          subtitle: '从哪个位置借 ${parsed.quantity} 个给${parsed.borrower}？',
+          locations: found.locations,
+          itemName: parsed.item,
+        );
+        if (!mounted) return;
+        if (fromLocationId == null) {
+          setState(() {
+            _busy = false;
+            _notice = '已取消借出。';
+            _result = null;
+          });
+          return;
+        }
+      }
       final loan = await widget.repository.lendItem(
         parsed.item,
         parsed.borrower,
         quantity: parsed.quantity,
         days: parsed.days,
+        fromLocationId: fromLocationId,
       );
       if (!mounted) return;
       final days = parsed.days ?? InventoryDatabase.defaultLoanDays;
@@ -360,9 +613,14 @@ class _HomePageState extends State<HomePage> {
     final key = normalizeName(itemName);
     final hit = all.where((i) => i.item.name == key).firstOrNull;
     if (hit == null) return ' · 位置未记录';
-    final names = hit.locations.map((l) => l.name).toSet().toList()..sort();
-    if (names.isEmpty) return ' · 位置未记录';
-    return ' · 在${names.join('、')}';
+    if (hit.locations.isEmpty) return ' · 位置未记录';
+    // V3.11：位置带数量——「在阳台 2 个、客厅 1 个」。
+    final hasQty = hit.locationQuantities.isNotEmpty;
+    final parts = hit.locations.map((l) {
+      if (!hasQty) return l.name;
+      return '${l.name} ${(l.id != null ? hit.quantityAt(l.id!) : null) ?? 0} 个';
+    }).toList()..sort();
+    return ' · 在${parts.join('、')}';
   }
 
   /// V3.7 缺陷修复：语音归还落库。
@@ -430,40 +688,104 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 执行归还并回显（沿用元宝批复①③口径：反馈带借阅人 + 数量 + 剩余）。
+  ///
+  /// V3.11（PM 真机 bug①修复）：归还**不再调 moveItem**——那是整体挪位，
+  /// 会把物品其他位置软删（「梯子全部变客厅」）。改为先弹窗问落点，
+  /// 再把归还数量直接加到该位置；阳台原有的 2 个安然保留。
   Future<void> _doReturn(Loan hit, int? requestedQty) async {
-    await widget.repository.returnLoan(hit.id!, quantity: requestedQty);
-    if (!mounted) return;
     // 本次归还量：给定值=部分归还；未给=把该笔剩余一次还清。
     final qty = requestedQty ?? hit.quantity - hit.returnedQty;
-    // 该笔借出归还后的剩余（基于归还前快照计算，含 0=已还清）。
     final remaining = hit.quantity - hit.returnedQty - qty;
     final left = remaining < 0 ? 0 : remaining;
-    // V3.8：反馈带位置标签——PM 真机反馈「归还的物品没有位置标签」。
-    var where = await _itemLocationSuffix(hit.itemName);
-    if (!mounted) return;
-    // V3.10 复验打回（PM 2026-11-25）：归还不再默认放回借出时的位置，
-    // 弹窗让用户选已有位置或填新位置；点「先不改」才沿用原位置。
+
+    // 先问放回哪儿（V3.10.1 弹窗），拿到目标位置 id。
     final newLocation = await _askReturnLocation(hit.itemName);
     if (!mounted) return;
+    int? toLocationId;
     if (newLocation != null) {
-      final locationId = await widget.repository.addLocation(newLocation);
+      toLocationId = await widget.repository.addLocation(newLocation);
       if (!mounted) return;
-      await widget.repository.moveItem(hit.itemName, locationId);
-      if (!mounted) return;
-      where = ' · 在$newLocation';
     }
-    // V3.10：归还后家里有几个（账实对齐的直观体现）。
+    // 归还数量直接加到目标位置（未指定则加主位置），不软删其他位置。
+    await widget.repository.returnLoan(
+      hit.id!,
+      quantity: requestedQty,
+      toLocationId: toLocationId,
+    );
+    if (!mounted) return;
+
+    var where = await _itemLocationSuffix(hit.itemName);
+    if (!mounted) return;
+    if (newLocation != null) where = ' · 在$newLocation';
     final info = await widget.repository.getQuantityInfo(hit.itemName);
     if (!mounted) return;
     final stockText = '，家里现在 ${info.stock} 个';
     setState(() {
       _busy = false;
-      // 元宝批复补充①③：反馈必须带借阅人（FIFO 命中谁一目了然，
-      // 避免用户以为还的是李四、实际扣了张三账），且与借出文案对称。
       _notice = '已归还：${hit.itemName} → ${hit.borrowerName}'
           '（$qty 个 · 还剩 $left 个）$where$stockText';
       _result = null;
     });
+  }
+
+  /// V3.11 通用多位置选择器：物品在多个位置时弹窗问「哪个位置」。
+  /// 返回选中位置 id；null = 用户取消。每个位置显示当前数量。
+  /// [excludeLocationId] 用于排除目标位置（挪位时不该从目标位挪到自己）。
+  Future<int?> _pickLocation({
+    required String title,
+    required String subtitle,
+    required List<Location> locations,
+    int? excludeLocationId,
+    String? itemName,
+  }) async {
+    final candidates =
+        locations.where((l) => l.id != excludeLocationId).toList();
+    if (candidates.isEmpty) return null;
+    // 带上每处现有数量，用户才知道「从哪儿挪/借」够不够。
+    final qtyByLocation = <int, int>{};
+    if (itemName != null) {
+      for (final loc in candidates) {
+        if (loc.id == null) continue;
+        qtyByLocation[loc.id!] = await _positionQty(itemName, loc.id!);
+      }
+      if (!mounted) return null;
+    }
+    return showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('pick_location_dialog'),
+        title: Text(title),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Text(subtitle,
+                  style: const TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+              const SizedBox(height: 6),
+              for (final loc in candidates)
+                ListTile(
+                  key: Key('pick_location_${loc.name}'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.place_outlined),
+                  title: Text(loc.name),
+                  subtitle: itemName == null
+                      ? null
+                      : Text('这里有 ${qtyByLocation[loc.id] ?? 0} 个'),
+                  onTap: () => Navigator.of(context).pop(loc.id),
+                ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('pick_location_cancel'),
+            onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 归还后问「放回哪儿」：列已有位置供点选，也能填新位置。

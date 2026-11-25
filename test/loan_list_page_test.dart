@@ -31,7 +31,7 @@ class FakeLoanRepository extends FakeListRepository {
 
   @override
   Future<Loan> lendItem(String itemName, String borrowerName,
-          {int quantity = 1, int? days}) async =>
+          {int quantity = 1, int? days, int? fromLocationId}) async =>
       Loan(
         itemId: 1,
         itemName: itemName,

@@ -25,7 +25,7 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
 
   @override
   Future<Loan> lendItem(String itemName, String borrowerName,
-      {int quantity = 1, int? days}) async {
+      {int quantity = 1, int? days, int? fromLocationId}) async {
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final key = normalizeName(itemName);
     // V3.10：与生产一致——物品必须已存在（PM 拍板④），借出扣减在库数。
@@ -51,7 +51,22 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
             : '家里只有$stock个「$key」，可借$available个',
       );
     }
-    _setQuantity(itemId, stock - quantity);
+    // V3.11：从指定位置（未指定则从主位置）扣减，位置数量与总数同事务收口。
+    final fromId = fromLocationId ?? _mainLocationId(itemId);
+    final fromQty = _locationQty(itemId, fromId);
+    if (fromQty < quantity) {
+      final fromName = _locations
+          .where((l) => l.id == fromId)
+          .map((l) => l.name)
+          .firstOrNull ?? '这个位置';
+      throw ArgumentError.value(
+        quantity,
+        'quantity',
+        '$fromName只有 $fromQty 个，不够借 $quantity 个',
+      );
+    }
+    _writeLocationQty(itemId, fromId, fromQty - quantity);
+    _syncTotal(itemId);
     final loan = Loan(
       id: ++_loanId,
       itemId: itemId,
@@ -78,12 +93,111 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     );
   }
 
+  // ---------- V3.11 按位置记数量：内存仓储与生产同模型 ----------
+  // 数量记在关联行上，items.quantity 只是 SUM 缓存；任何写位置数量的操作
+  // 都必须经 _syncTotal 收口，否则 UI 测试会掩盖生产上的双写不一致。
+
+  /// 读某物品在某活跃位置的数量；没有关联返回 0。
+  int _locationQty(int itemId, int locationId) {
+    for (final l in _links) {
+      if (l.itemId == itemId && l.locationId == locationId && !l.isDeleted) {
+        return l.quantity;
+      }
+    }
+    return 0;
+  }
+
+  /// 写某物品在某位置的数量（关联不存在则新建）。
+  void _writeLocationQty(int itemId, int locationId, int qty) {
+    final idx = _links.indexWhere((l) =>
+        l.itemId == itemId && l.locationId == locationId && !l.isDeleted);
+    if (idx >= 0) {
+      final old = _links[idx];
+      _links[idx] = ItemLocation(
+        id: old.id,
+        itemId: old.itemId,
+        locationId: old.locationId,
+        isDeleted: false,
+        createdAt: old.createdAt,
+        updatedAt: old.updatedAt,
+        rawText: old.rawText,
+        tags: old.tags,
+        quantity: qty,
+      );
+      return;
+    }
+    _links.add(ItemLocation(
+      id: _links.length + 1,
+      itemId: itemId,
+      locationId: locationId,
+      createdAt: 1,
+      updatedAt: 1,
+      quantity: qty,
+    ));
+  }
+
+  /// 单一写入口：items.quantity = SUM(活跃关联数量)，同内存事务内完成。
+  int _syncTotal(int itemId) {
+    var total = 0;
+    for (final l in _links) {
+      if (l.itemId == itemId && !l.isDeleted) total += l.quantity;
+    }
+    final idx = _items.indexWhere((i) => i.id == itemId);
+    if (idx >= 0) {
+      final cur = _items[idx];
+      _items[idx] = Item(
+        id: cur.id,
+        name: cur.name,
+        quantity: total,
+        isDeleted: cur.isDeleted,
+        createdAt: cur.createdAt,
+        updatedAt: cur.updatedAt,
+        deletedAt: cur.deletedAt,
+      );
+    }
+    return total;
+  }
+
+  /// 主位置 = 活跃关联 id 最小者（与迁移口径一致）。
+  int _mainLocationId(int itemId) {
+    final active = _links
+        .where((l) => l.itemId == itemId && !l.isDeleted)
+        .toList()
+      ..sort((a, b) => a.id!.compareTo(b.id!));
+    return active.firstOrNull?.locationId ?? 0;
+  }
+
+  int _findOrCreateItem(String key) {
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit != null) return hit.id!;
+    final id = ++_itemId;
+    _items.add(Item(id: id, name: key, createdAt: 1, updatedAt: 1, quantity: 1));
+    return id;
+  }
+
+  /// 软删一条关联（保留数量留底，恢复时原样复活）。
+  void _softDeleteLink(ItemLocation l) {
+    final idx = _links.indexOf(l);
+    if (idx < 0) return;
+    _links[idx] = ItemLocation(
+      id: l.id,
+      itemId: l.itemId,
+      locationId: l.locationId,
+      isDeleted: true,
+      createdAt: l.createdAt,
+      updatedAt: l.updatedAt,
+      rawText: l.rawText,
+      tags: l.tags,
+      quantity: l.quantity,
+    );
+  }
+
   @override
   Future<List<Loan>> getAllLoans() async =>
       List<Loan>.unmodifiable(_loans.reversed);
 
   @override
-  Future<void> returnLoan(int loanId, {int? quantity}) async {
+  Future<void> returnLoan(int loanId, {int? quantity, int? toLocationId}) async {
     final idx = _loans.indexWhere((l) => l.id == loanId);
     if (idx < 0) return;
     final old = _loans[idx];
@@ -101,11 +215,17 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       returnedAt: total >= old.quantity ? 1 : null,
       isPartial: total > 0 && total < old.quantity,
     );
-    // V3.10：归还加回在库数（与借出严格对称）。
+    // V3.11：归还直接加到指定位置（未指定=主位置），不再由 UI 后续
+    // moveItem 把别的位置一起搬走——这正是 PM 真机现象①的根因。
     if (old.itemId != 0) {
-      final cur = _items.where((i) => i.id == old.itemId).firstOrNull;
-      if (cur != null) {
-        _setQuantity(old.itemId, cur.quantity + returned);
+      final toId = toLocationId ?? _mainLocationId(old.itemId);
+      if (toId != 0) {
+        _writeLocationQty(
+            old.itemId, toId, _locationQty(old.itemId, toId) + returned);
+        _syncTotal(old.itemId);
+      } else {
+        final cur = _items.where((i) => i.id == old.itemId).firstOrNull;
+        if (cur != null) _setQuantity(old.itemId, cur.quantity + returned);
       }
     }
   }
@@ -217,6 +337,7 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
           updatedAt: now,
           rawText: l.rawText,
           tags: l.tags,
+          quantity: l.quantity,
         );
       }
     }
@@ -253,27 +374,38 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
         (i) => i.id != id && i.name == item.name && !i.isDeleted);
     if (conflictIdx >= 0) {
       final live = _items[conflictIdx];
-      final total = live.quantity + item.quantity;
       _items[conflictIdx] = Item(
         id: live.id,
         name: live.name,
-        quantity: total,
+        quantity: live.quantity,
         isDeleted: false,
         createdAt: live.createdAt,
         updatedAt: now,
       );
-      // 位置关联并过去（目标已有同位置活跃行则丢弃重复行）。
-      for (var i = 0; i < _links.length; i++) {
-        final l = _links[i];
-        if (l.itemId != id) continue;
-        final dup = _links.any((x) =>
+      // V3.11：位置关联并过去；同位置已有活跃行时数量相加，不丢弃。
+      // 阳台2 + 阳台1 = 阳台3，客厅1 照旧保留——废弃再恢复要原样还原。
+      final moved = _links.where((l) => l.itemId == id).toList();
+      for (final l in moved) {
+        final dupIdx = _links.indexWhere((x) =>
             x.itemId == live.id && x.locationId == l.locationId && !x.isDeleted);
-        if (dup) {
-          _links.removeAt(i);
-          i--;
+        if (dupIdx >= 0) {
+          final dup = _links[dupIdx];
+          _links[dupIdx] = ItemLocation(
+            id: dup.id,
+            itemId: dup.itemId,
+            locationId: dup.locationId,
+            isDeleted: false,
+            createdAt: dup.createdAt,
+            updatedAt: now,
+            rawText: dup.rawText,
+            tags: dup.tags,
+            quantity: dup.quantity + l.quantity,
+          );
+          _links.remove(l);
           continue;
         }
-        _links[i] = ItemLocation(
+        final srcIdx = _links.indexOf(l);
+        _links[srcIdx] = ItemLocation(
           id: l.id,
           itemId: live.id!,
           locationId: l.locationId,
@@ -282,9 +414,11 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
           updatedAt: now,
           rawText: l.rawText,
           tags: l.tags,
+          quantity: l.quantity,
         );
       }
       _items.removeAt(idx);
+      final total = _syncTotal(live.id!);
       return RestoreOutcome(
         itemName: item.name,
         merged: true,
@@ -298,7 +432,8 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       createdAt: item.createdAt,
       updatedAt: now,
     );
-    // 软删关联行复活（内存版不做 updated_at 精确匹配，全量复活）。
+    // 软删关联行复活（内存版不做 updated_at 精确匹配，全量复活），
+    // 每位置数量原样带回，再统一收口总数。
     for (var i = 0; i < _links.length; i++) {
       final l = _links[i];
       if (l.itemId == id && l.isDeleted) {
@@ -311,9 +446,11 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
           updatedAt: now,
           rawText: l.rawText,
           tags: l.tags,
+          quantity: l.quantity,
         );
       }
     }
+    _syncTotal(id);
     return RestoreOutcome(itemName: item.name, merged: false);
   }
 
@@ -336,32 +473,27 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     final key = normalizeName(itemName);
     // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
     // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
-    var item = _items.where((i) => i.name == key && !i.isDeleted).toList();
-    final int itemId;
-    if (item.isEmpty) {
-      itemId = ++_itemId;
-      _items.add(Item(id: itemId, name: key, createdAt: 1, updatedAt: 1));
-    } else {
-      itemId = item.first.id!;
-    }
-    if (quantity != null) {
-      _applyQuantity(itemId, quantity, additive);
-    }
+    final itemId = _findOrCreateItem(key);
+    // V3.11：数量写在**位置关联**上，其他位置不动；items.quantity 只做
+    // SUM 缓存，由 _syncTotal 统一收口。
     final exists = _links.any(
-      (l) => l.itemId == itemId && l.locationId == locationId,
+      (l) =>
+          l.itemId == itemId && l.locationId == locationId && !l.isDeleted,
     );
     if (exists) {
+      if (quantity != null) {
+        final cur = _locationQty(itemId, locationId);
+        final next = additive ? cur + quantity : quantity;
+        if (next < 0) {
+          throw ArgumentError.value(next, 'quantity', '位置数量不能为负');
+        }
+        _writeLocationQty(itemId, locationId, next);
+      }
+      _syncTotal(itemId);
       return UpsertResult(itemId: itemId, locationId: locationId, created: false);
     }
-    _links.add(
-      ItemLocation(
-        id: _links.length + 1,
-        itemId: itemId,
-        locationId: locationId,
-        createdAt: 1,
-        updatedAt: 1,
-      ),
-    );
+    _writeLocationQty(itemId, locationId, quantity ?? 1);
+    _syncTotal(itemId);
     return UpsertResult(itemId: itemId, locationId: locationId, created: true);
   }
 
@@ -394,10 +526,45 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
         '还没记录过「$key」，先说一句「$key放阳台」再记数量',
       );
     }
-    _applyQuantity(hit.id!, quantity, additive);
-    return _items
-        .firstWhere((i) => i.id == hit.id)
-        .quantity;
+    final itemId = hit.id!;
+    final cur = hit.quantity;
+    final target = additive ? cur + quantity : quantity;
+    final delta = target - cur;
+    final mainId = _mainLocationId(itemId);
+    if (mainId != 0) {
+      final mainQty = _locationQty(itemId, mainId);
+      final nextQty = mainQty + delta;
+      if (nextQty < 0) {
+        throw ArgumentError.value(
+            quantity, 'quantity', '主位置数量不够减，请用「校准数量」逐位置清点');
+      }
+      _writeLocationQty(itemId, mainId, nextQty);
+    } else {
+      _applyQuantity(itemId, quantity, additive);
+    }
+    return _syncTotal(itemId);
+  }
+
+  /// V3.11：只改某个位置的数量（弹窗里选了「某位置 N 个」）。
+  @override
+  Future<int> setLocationQuantity(
+    String itemName,
+    int locationId,
+    int quantity, {
+    bool additive = false,
+  }) async {
+    final key = normalizeName(itemName);
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      throw ArgumentError.value(key, 'itemName', '还没记录过「$key」');
+    }
+    final cur = _locationQty(hit.id!, locationId);
+    final next = additive ? cur + quantity : quantity;
+    if (next < 0) {
+      throw ArgumentError.value(next, 'quantity', '位置数量不能为负');
+    }
+    _writeLocationQty(hit.id!, locationId, next);
+    return _syncTotal(hit.id!);
   }
 
   /// V3.10：该物品未归还的借出总数。
@@ -442,10 +609,31 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
   @override
   Future<CalibrationReport> calibrateQuantities({
     Map<int, int> totals = const <int, int>{},
+    Map<int, Map<int, int>> locationTotals = const <int, Map<int, int>>{},
   }) async {
     // 与生产一致：输入「家里一共几个」，写入在库数 = 总数 − 在借数。
     var changed = 0;
     final details = <String>[];
+    // V3.11：按位置分别清点——每个位置写自己的数量，统一 _syncTotal 收口。
+    for (final entry in locationTotals.entries) {
+      final itemId = entry.key;
+      final item = _items
+          .where((i) => i.id == itemId && !i.isDeleted)
+          .firstOrNull;
+      if (item == null) continue;
+      for (final pos in entry.value.entries) {
+        if (pos.value < 0) continue;
+        _writeLocationQty(itemId, pos.key, pos.value);
+      }
+      final stockCounted = entry.value.values.fold<int>(0, (a, b) => a + b);
+      final lent = _outstandingLent(itemId);
+      changed++;
+      details.add('${item.name}：加起来 $stockCounted 个 · 在借 $lent 个'
+          ' · 一共 ${stockCounted + lent} 个');
+    }
+    if (locationTotals.isNotEmpty) {
+      return CalibrationReport(changedCount: changed, details: details);
+    }
     for (var idx = 0; idx < _items.length; idx++) {
       final item = _items[idx];
       if (item.isDeleted) continue;
@@ -473,87 +661,125 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
     return CalibrationReport(changedCount: changed, details: details);
   }
 
+  /// V3.11：旧名只作整体挪兼容，不再接受 quantity/additive 分流。
   @override
   Future<MoveResult> moveItem(String itemName, int locationId,
-      {String? rawText, int? quantity, bool additive = false}) async {
+      {String? rawText}) => moveItemWhole(itemName, locationId, rawText: rawText);
+
+  /// 整体挪：旧位置软删留底，目标位置拿全部数量，总数不变。
+  /// 物品不存在则新建——「梯子放阳台」首次录入走的就是这条路。
+  @override
+  Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
+      {String? rawText}) async {
     final key = normalizeName(itemName);
-    // 与生产一致（_findOrCreateItem 只查 is_deleted=0）：同名软删行不阻止新建，
-    // 否则「删除后重建同名」在测试里会复活旧行，测不出 V3.9 的合并口径。
-    var item = _items.where((i) => i.name == key && !i.isDeleted).toList();
-    final int itemId;
-    if (item.isEmpty) {
-      itemId = ++_itemId;
-      _items.add(Item(id: itemId, name: key, createdAt: 1, updatedAt: 1));
-    } else {
-      itemId = item.first.id!;
+    final itemId = _findOrCreateItem(key);
+    final before = _readStock(itemId);
+    final previous = <String>[];
+    for (final l in _links
+        .where((l) =>
+            l.itemId == itemId && l.locationId != toLocationId && !l.isDeleted)
+        .toList()) {
+      final name = _locations
+          .where((loc) => loc.id == l.locationId && !loc.isDeleted)
+          .map((loc) => loc.name)
+          .firstOrNull;
+      if (name != null) previous.add(name);
+      _softDeleteLink(l);
     }
-    // V3.10：数量写入（覆盖 / 累加），语义与生产一致。
-    var quantityChanged = false;
-    var finalQuantity = 1;
-    if (quantity != null) {
-      final before = _readStock(itemId);
-      _applyQuantity(itemId, quantity, additive);
-      final after = _readStock(itemId);
-      finalQuantity = after;
-      quantityChanged = after != before;
-    } else {
-      finalQuantity = _readStock(itemId);
-    }
-    // 挪位前其他位置名（软删语义在真实库覆盖；内存仓储同步移除）。
-    final previous = _links
-        .where((l) => l.itemId == itemId && l.locationId != locationId)
-        .map((l) => _locations
-            .where((loc) => loc.id == l.locationId && !loc.isDeleted)
-            .map((loc) => loc.name)
-            .firstOrNull)
-        .whereType<String>()
-        .toList();
-    _links.removeWhere(
-        (l) => l.itemId == itemId && l.locationId != locationId);
-    final targetExists =
-        _links.any((l) => l.itemId == itemId && l.locationId == locationId);
-    if (!targetExists) {
-      _links.add(
-        ItemLocation(
-          id: _links.length + 1,
-          itemId: itemId,
-          locationId: locationId,
-          createdAt: 1,
-          updatedAt: 1,
-        ),
-      );
-    }
+    final targetExists = _links.any((l) =>
+        l.itemId == itemId && l.locationId == toLocationId && !l.isDeleted);
+    _writeLocationQty(itemId, toLocationId, before);
+    final total = _syncTotal(itemId);
     return MoveResult(
       itemId: itemId,
-      locationId: locationId,
+      locationId: toLocationId,
       created: !targetExists,
       previousLocations: previous,
-      quantity: finalQuantity,
-      quantityChanged: quantityChanged,
+      quantity: total,
+      quantityChanged: total != before,
     );
   }
 
-  /// V3.10：读某件物品的当前在库数（存量兜底口径）。
+  /// 部分挪：源位减、目标位加，总数不变；源位不足如实报错。
+  @override
+  Future<MoveResult> moveItemPartial(
+    String itemName,
+    int fromLocationId,
+    int toLocationId, {
+    required int quantity,
+    String? rawText,
+  }) async {
+    final key = normalizeName(itemName);
+    final hit = _items.where((i) => i.name == key && !i.isDeleted).firstOrNull;
+    if (hit == null) {
+      throw ArgumentError.value(key, 'itemName', '还没记录过「$key」');
+    }
+    if (quantity < 1) {
+      throw ArgumentError.value(quantity, 'quantity', '挪动数量至少为 1');
+    }
+    final itemId = hit.id!;
+    final fromQty = _locationQty(itemId, fromLocationId);
+    if (fromQty < quantity) {
+      final fromName = _locations
+          .where((l) => l.id == fromLocationId)
+          .map((l) => l.name)
+          .firstOrNull ?? '这个位置';
+      throw ArgumentError.value(
+        quantity,
+        'quantity',
+        '$fromName只有 $fromQty 个，不够挪 $quantity 个。'
+        '请说个更小的数，或先补货再挪。',
+      );
+    }
+    final before = _readStock(itemId);
+    _writeLocationQty(itemId, fromLocationId, fromQty - quantity);
+    _writeLocationQty(itemId, toLocationId,
+        _locationQty(itemId, toLocationId) + quantity);
+    final total = _syncTotal(itemId);
+    final fromName = _locations
+        .where((l) => l.id == fromLocationId)
+        .map((l) => l.name)
+        .firstOrNull ?? '原位置';
+    return MoveResult(
+      itemId: itemId,
+      locationId: toLocationId,
+      created: fromQty == quantity,
+      previousLocations: <String>[fromName],
+      quantity: total,
+      quantityChanged: total != before,
+    );
+  }
+
+  /// V3.11：读在库数——items.quantity 是 SUM 缓存，不再拿在借数兜底。
   int _readStock(int itemId) {
     final hit = _items.where((i) => i.id == itemId).firstOrNull;
-    if (hit == null) return 0;
-    final lent = _outstandingLent(itemId);
-    return hit.quantity > lent ? hit.quantity : lent;
+    return hit?.quantity ?? 0;
   }
+
+  /// 活跃位置数量表，供 UI 回显「阳台 2 个、客厅 1 个」。
+  Map<int, int> _locationQtyMap(int itemId) => <int, int>{
+        for (final l in _links)
+          if (l.itemId == itemId && !l.isDeleted) l.locationId: l.quantity,
+      };
 
   @override
   Future<ItemWithLocations?> findByName(String name) async {
     final key = normalizeName(name);
     final item = _items.where((i) => i.name == key).toList();
     if (item.isEmpty) return null;
+    // V3.11：软删关联是历史留底，不能出现在当前位置查询里。
     final locationIds = _links
-        .where((l) => l.itemId == item.first.id)
+        .where((l) => l.itemId == item.first.id && !l.isDeleted)
         .map((l) => l.locationId)
         .toList();
     final locations = _locations
         .where((l) => locationIds.contains(l.id))
         .toList(growable: false);
-    return ItemWithLocations(item: item.first, locations: locations);
+    return ItemWithLocations(
+      item: item.first,
+      locations: locations,
+      locationQuantities: _locationQtyMap(item.first.id!),
+    );
   }
 
   @override
@@ -574,6 +800,7 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
                       link.itemId == item.id &&
                       link.locationId == l.id))
               .toList(growable: false),
+          locationQuantities: _locationQtyMap(item.id!),
         ),
     ];
   }
@@ -770,8 +997,10 @@ void main() {
     await submit(tester, '梯子放阳台');
 
     await submit(tester, '梯子挪到客厅');
-    expect(find.textContaining('已更新：梯子 → 客厅（原位置：阳台）'),
-        findsOneWidget);
+    // V3.11（元宝批复④）：「挪」必须明说整体挪、数量不变，
+    // 不能让用户以为只挪了一个（旧「已更新」文案已废弃）。
+    expect(find.textContaining('已整体把「梯子」挪到'), findsOneWidget);
+    expect(find.textContaining('总数不变'), findsOneWidget);
 
     await submit(tester, '梯子在哪');
     expect(find.text('「梯子」在：客厅（共1处）。'), findsOneWidget);
@@ -1492,6 +1721,7 @@ void main() {
     await settle(tester);
     await submit(tester, '还了1个梯子给张三');
     await settle(tester);
+    await keepReturnLocation(tester);
 
     expect(find.byKey(const Key('return_picker_dialog')), findsNothing);
     final loans = await repo.getAllLoans();
@@ -2036,6 +2266,99 @@ void main() {
       expect(find.textContaining('已取消废弃'), findsOneWidget);
       final loans = await repo.getAllLoans();
       expect(loans.every((l) => !l.isReturned), isTrue, reason: '取消零副作用');
+    });
+  });
+
+  // ============ V3.11：多位置弹窗四条路径（元宝第 3、9 条）============
+  group('V3.11 多位置问位置', () {
+    Future<void> seedTwoLocations() async {
+      final balcony = await repo.addLocation('阳台');
+      final living = await repo.addLocation('客厅');
+      await repo.upsertItemLocation('梯子', balcony, quantity: 2);
+      await repo.upsertItemLocation('梯子', living, quantity: 1);
+    }
+
+    testWidgets('借出多位置：弹窗问从哪儿借，只扣被点名那处', (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '借给张三1个梯子');
+      expect(find.byKey(const Key('pick_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('pick_location_客厅')));
+      await settle(tester);
+
+      final loans = await repo.getAllLoans();
+      expect(loans, hasLength(1));
+      expect((await repo.getQuantityInfo('梯子')).stock, 2);
+      final found = await repo.findByName('梯子');
+      expect(found!.quantityAt(found.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!), 0, reason: '客厅那 1 个被借走');
+    });
+
+    testWidgets('无位置累加多位置：弹窗问加到哪儿，不静默归主位置', (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '又多了2个梯子');
+      // 无位置累加走「数量目标」弹窗（不是借出/挪位的来源位置弹窗）。
+      expect(find.byKey(const Key('quantity_target_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('quantity_target_客厅')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      final livingId = found!.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!;
+      expect(found.quantityAt(livingId), 3, reason: '客厅 1 + 2');
+      expect(found.item.quantity, 5);
+    });
+
+    testWidgets('带数量挪入多位置：弹窗问从哪儿挪，总数不变', (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+      await submit(tester, '把1个梯子挪到车库');
+      expect(find.byKey(const Key('pick_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('pick_location_阳台')));
+      await settle(tester);
+
+      final found = await repo.findByName('梯子');
+      expect(found!.locations.map((l) => l.name), containsAll(<String>[
+        '阳台', '客厅', '车库',
+      ]));
+      expect(found.item.quantity, 3, reason: '部分挪不改总数');
+      expect(found.quantityAt(found.locations
+          .firstWhere((l) => l.name == '阳台')
+          .id!), 1);
+    });
+
+    testWidgets('只带数量覆盖多位置：弹窗二选一，两种选择各走各的口径',
+        (tester) async {
+      await seedTwoLocations();
+      await pumpApp(tester);
+
+      // ① 选「家里一共 4 个」：只改总数，差额落主位置。
+      await submit(tester, '4个梯子');
+      expect(find.byKey(const Key('quantity_target_dialog')), findsOneWidget);
+      expect(find.byKey(const Key('quantity_target_total')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('quantity_target_total')));
+      await settle(tester);
+      var found = await repo.findByName('梯子');
+      expect(found!.item.quantity, 4);
+      expect(found.quantityAt(found.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!), 1, reason: '选总数不能偷改客厅');
+
+      // ② 选「客厅 5 个」：只改目标位置，其他位置不动。
+      await submit(tester, '5个梯子');
+      expect(find.byKey(const Key('quantity_target_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('quantity_target_客厅')));
+      await settle(tester);
+      found = await repo.findByName('梯子');
+      expect(found!.quantityAt(found.locations
+          .firstWhere((l) => l.name == '客厅')
+          .id!), 5);
+      expect(found.quantityAt(found.locations
+          .firstWhere((l) => l.name == '阳台')
+          .id!), 3, reason: '阳台保持上一步的结果');
     });
   });
 }

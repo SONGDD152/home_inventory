@@ -98,6 +98,60 @@ void main() {
       expect(r, isA<ParseReturn>());
       expect((r as ParseReturn).quantity, 1);
     });
+
+    // PM 2026-11-25 真机复验打回：数量说在物品后面，物品名不能被污染。
+    test('数量后置不污染物品名：「再放梯子3个在阳台」→ 梯子/3/累加', () {
+      final r = parsePhrase('再放梯子3个在阳台');
+      expect(r, isA<ParseUpsert>());
+      final u = r as ParseUpsert;
+      expect(u.item, '梯子');
+      expect(u.location, '阳台');
+      expect(u.quantity, 3);
+      expect(u.additive, isTrue);
+    });
+    test('数量后置中文数字：「放梯子三个到阳台」→ 梯子/3', () {
+      final u = parsePhrase('放梯子三个到阳台') as ParseUpsert;
+      expect(u.item, '梯子');
+      expect(u.quantity, 3);
+      expect(u.additive, isFalse);
+    });
+    test('数量后置动词在中：「梯子三个放阳台」→ 梯子/3', () {
+      final u = parsePhrase('梯子三个放阳台') as ParseUpsert;
+      expect(u.item, '梯子');
+      expect(u.quantity, 3);
+    });
+
+    // PM 2026-11-25 真机新增：查数量回三口径。
+    test('「梯子有几个」→ 数量查询（不被位置查询/录入抢答）', () {
+      expect(parsePhrase('梯子有几个'), isA<ParseQuantityQuery>());
+      expect((parsePhrase('梯子有几个') as ParseQuantityQuery).item, '梯子');
+    });
+    test('「梯子还有几个」含「还」字也不被归还抢答', () {
+      expect(parsePhrase('梯子还有几个'), isA<ParseQuantityQuery>());
+    });
+    test('查数量多说法：多少/一共几个/在借几个/有几个梯子/数量', () {
+      for (final phrase in <String>[
+        '梯子多少',
+        '梯子一共几个',
+        '梯子在借几个',
+        '有几个梯子',
+        '梯子数量',
+      ]) {
+        expect(parsePhrase(phrase), isA<ParseQuantityQuery>(),
+            reason: '$phrase 应识别为查数量');
+      }
+    });
+    test('查位置与归还/借出不受影响', () {
+      expect(parsePhrase('梯子在哪'), isA<ParseQuery>());
+      expect(parsePhrase('还了1个梯子'), isA<ParseReturn>());
+      expect(parsePhrase('借给张三1个梯子'), isA<ParseLend>());
+    });
+    test('带「查：」前缀的数量查询也回三口径（元宝补充②）', () {
+      final r = parsePhrase('查：梯子有几个');
+      expect(r, isA<ParseQuantityQuery>());
+      expect((r as ParseQuantityQuery).item, '梯子');
+      expect(parsePhrase('查：梯子在哪'), isA<ParseQuery>());
+    });
   });
 
   // ==================== 2. 数据层 ====================
@@ -251,6 +305,31 @@ void main() {
       expect(found.lent, one.lent);
     });
 
+    // PM 2026-11-25 真机新增 / 元宝审核补充③：挪位不重复建记录。
+    test('同一物品换位置：明细仍 1 条，当前位置是新的', () async {
+      final balconyId = await balcony();
+      final livingRoom = await db.addLocation('客厅');
+      await db.moveItem('梯子', balconyId);
+      await db.moveItem('梯子', livingRoom);
+      final rows = await db.getAllItemsWithLocations();
+      expect(rows, hasLength(1), reason: '同一物品换位置不建第二条记录');
+      expect(rows.first.item.name, '梯子');
+      expect(rows.first.locations.map((l) => l.name), <String>['客厅'],
+          reason: '当前位置只报新位置，旧关联软删留底');
+    });
+
+    // 元宝审核补充①：数据层双保险——脏名落库前被剥，不新建物品。
+    test('数据层兜底：脏名「梯子3个」落库归一为「梯子」，不建第二条', () async {
+      final balconyId = await balcony();
+      await db.moveItem('梯子', balconyId, quantity: 1);
+      // 模拟解析器漏剥的脏名直达仓储层。
+      await db.moveItem('梯子3个', balconyId, quantity: 1, additive: true);
+      final rows = await db.getAllItemsWithLocations();
+      expect(rows, hasLength(1), reason: '脏名归一到同一物品，不会多一行');
+      expect(rows.first.item.name, '梯子');
+      expect((await db.getQuantityInfo('梯子')).stock, 2);
+    });
+
     // -------- 校准工具（PM 拍板⑤） --------
 
     test('校准：按清点总数写回在库数 = 总数 − 在借数', () async {
@@ -353,6 +432,54 @@ void main() {
       await submit(tester, '借给张三5个梯子');
       expect(find.textContaining('家里只有2个'), findsOneWidget);
       expect(await repo.getAllLoans(), isEmpty, reason: '拦截时零写入');
+    });
+
+    // PM 2026-11-25 真机新增：查数量回三口径。
+    testWidgets('「梯子有几个」回在库/在借/一共', (tester) async {
+      await pumpApp(tester);
+      await submit(tester, '3个梯子放阳台');
+      await repo.lendItem('梯子', '张三', quantity: 1);
+      await submit(tester, '梯子有几个');
+      expect(find.textContaining('在库 2 个，在借 1 个，一共 3 个'), findsOneWidget);
+    });
+    testWidgets('没借出去时说一共，不说在借 0 个', (tester) async {
+      await pumpApp(tester);
+      await submit(tester, '2个梯子放阳台');
+      await submit(tester, '梯子有几个');
+      expect(find.textContaining('在库 2 个，没有借出去的，一共 2 个'), findsOneWidget);
+    });
+    testWidgets('没记录过的物品查数量 → 说没有记录，与没听懂分开', (tester) async {
+      await pumpApp(tester);
+      await submit(tester, '梯子有几个');
+      expect(find.textContaining('暂未记录该物品'), findsOneWidget);
+      expect(find.textContaining('没听懂'), findsNothing);
+    });
+
+    // PM 2026-11-25 真机打回：归还后弹窗问位置，不再默认原位置。
+    testWidgets('归还后弹「放哪儿」，选已有位置即挪过去', (tester) async {
+      final garage = await repo.addLocation('车库');
+      await repo.upsertItemLocation('梯子', garage);
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await submit(tester, '还了1个梯子');
+      expect(find.byKey(const Key('return_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('return_location_pick_车库')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
+      expect(find.textContaining('在车库'), findsOneWidget);
+    });
+    testWidgets('归还弹窗点「先不改」→ 沿用原位置', (tester) async {
+      final balcony = await repo.addLocation('阳台');
+      await repo.upsertItemLocation('梯子', balcony);
+      await repo.lendItem('梯子', '张三');
+      await pumpApp(tester);
+      await submit(tester, '还了1个梯子');
+      expect(find.byKey(const Key('return_location_dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('return_location_skip')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(find.textContaining('在阳台'), findsOneWidget);
     });
   });
 
@@ -672,7 +799,9 @@ class _FakeRepo with FakeLoanMixin implements InventoryRepository {
   Future<void> restoreBackup(Map<String, Object?> data) async {}
 
   @override
-  Future<List<Location>> getAllLocations() async => const <Location>[];
+  Future<List<Location>> getAllLocations() async => _locNames.entries
+      .map((e) => Location(id: e.key, name: e.value, createdAt: 1, updatedAt: 1))
+      .toList();
 
   @override
   Future<List<ItemWithLocations>> getAllItemsWithLocations() async {

@@ -100,7 +100,10 @@ class _HomePageState extends State<HomePage> {
 
     setState(() => _busy = true);
     try {
-      if (parsed is ParseQuery) {
+      if (parsed is ParseQuantityQuery) {
+        // PM 2026-11-25 真机新增：「梯子有几个」回在库/在借/一共。
+        await _handleQuantityQuery(parsed.item);
+      } else if (parsed is ParseQuery) {
         await _handleQuery(parsed.item);
       } else if (parsed is ParseUpsert) {
         await _handleUpsert(parsed, rawText);
@@ -178,6 +181,33 @@ class _HomePageState extends State<HomePage> {
       _busy = false;
       _result = found;
       _notice = found == null ? _notFound(item) : null;
+    });
+  }
+
+  /// V3.10（PM 2026-11-25 真机新增）：查数量——「梯子有几个」。
+  ///
+  /// 回三口径：在库几个、在借几个、一共几个。与「梯子在哪」（查位置）
+  /// 分开，后者仍回位置列表。没记录过则明确说没有记录，与没听懂分开。
+  Future<void> _handleQuantityQuery(String item) async {
+    final info = await widget.repository.getQuantityInfo(item);
+    if (!mounted) return;
+    final found = await widget.repository.findByName(item);
+    if (!mounted) return;
+    if (found == null || (info.stock == 0 && info.lent == 0)) {
+      setState(() {
+        _busy = false;
+        _notice = _notFound(item);
+        _result = null;
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      // 在借 0 时不说"在借 0 个"，避免啰嗦；一共 = 在库 + 在借。
+      _notice = info.lent > 0
+          ? '$item：在库 ${info.stock} 个，在借 ${info.lent} 个，一共 ${info.total} 个。'
+          : '$item：在库 ${info.stock} 个，没有借出去的，一共 ${info.total} 个。';
+      _result = null;
     });
   }
 
@@ -409,8 +439,19 @@ class _HomePageState extends State<HomePage> {
     final remaining = hit.quantity - hit.returnedQty - qty;
     final left = remaining < 0 ? 0 : remaining;
     // V3.8：反馈带位置标签——PM 真机反馈「归还的物品没有位置标签」。
-    final where = await _itemLocationSuffix(hit.itemName);
+    var where = await _itemLocationSuffix(hit.itemName);
     if (!mounted) return;
+    // V3.10 复验打回（PM 2026-11-25）：归还不再默认放回借出时的位置，
+    // 弹窗让用户选已有位置或填新位置；点「先不改」才沿用原位置。
+    final newLocation = await _askReturnLocation(hit.itemName);
+    if (!mounted) return;
+    if (newLocation != null) {
+      final locationId = await widget.repository.addLocation(newLocation);
+      if (!mounted) return;
+      await widget.repository.moveItem(hit.itemName, locationId);
+      if (!mounted) return;
+      where = ' · 在$newLocation';
+    }
     // V3.10：归还后家里有几个（账实对齐的直观体现）。
     final info = await widget.repository.getQuantityInfo(hit.itemName);
     if (!mounted) return;
@@ -423,6 +464,75 @@ class _HomePageState extends State<HomePage> {
           '（$qty 个 · 还剩 $left 个）$where$stockText';
       _result = null;
     });
+  }
+
+  /// 归还后问「放回哪儿」：列已有位置供点选，也能填新位置。
+  ///
+  /// 返回 null = 用户点「先不改」，沿用原位置；否则返回要挪到的位置名。
+  Future<String?> _askReturnLocation(String item) async {
+    final locations = await widget.repository.getAllLocations();
+    if (!mounted) return null;
+    final names = <String>{
+      for (final loc in locations)
+        if (!loc.isDeleted && loc.name.isNotEmpty) loc.name,
+    }.toList()..sort();
+    final newLocationController = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: const Key('return_location_dialog'),
+          title: Text('$item 还回来了，放哪儿？'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                const Text('选个已有位置，或在下面填个新位置。',
+                    style: TextStyle(fontSize: 13, color: Color(0xff607d8b))),
+                const SizedBox(height: 6),
+                for (final name in names)
+                  ListTile(
+                    key: Key('return_location_pick_$name'),
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.place_outlined),
+                    title: Text(name),
+                    onTap: () => Navigator.of(context).pop(name),
+                  ),
+                const SizedBox(height: 6),
+                TextField(
+                  key: const Key('return_location_field'),
+                  controller: newLocationController,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    labelText: '新位置',
+                    hintText: '比如：厨房吊柜',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              key: const Key('return_location_skip'),
+              onPressed: () => Navigator.of(context).pop(null),
+              child: const Text('先不改'),
+            ),
+            FilledButton(
+              key: const Key('return_location_save'),
+              onPressed: () {
+                final typed = newLocationController.text.trim();
+                if (typed.isNotEmpty) Navigator.of(context).pop(typed);
+              },
+              child: const Text('放到这里'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      newLocationController.dispose();
+    }
   }
 
   /// 归还归属候选框：同一物品有多笔未还清时，让用户点是谁还的。
@@ -1268,7 +1378,7 @@ class _HomePageState extends State<HomePage> {
                 key: const Key('drawer_calibrate'),
                 leading: const Icon(Icons.tune),
                 title: const Text('校准数量'),
-                subtitle: const Text('照实物清点，把数量改准'),
+                subtitle: const Text('数一数家里有几个，把数量改准'),
                 onTap: () {
                   Navigator.of(context).pop();
                   _openCalibration();

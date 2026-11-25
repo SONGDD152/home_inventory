@@ -47,11 +47,31 @@ String stripLoanSuffix(String name) {
   return value;
 }
 
-/// 物品名的「词根」：归一化后剥掉尾部借出动词。
+/// V3.10 复验打回（PM 2026-11-25）：剥掉物品名尾部残留的数量。
+///
+/// 解析器已能剥「再放梯子3个在阳台」的后置数量，但语音识别语序千变万化，
+/// 万一漏剥，「梯子3个」就会建成一件新物品（明细莫名多一行）——与
+/// V3.9.1「梯子借」同源。数据层再兜一道：落库前剥掉尾部「数字/中文数字+量词」。
+/// 只剥词尾，「5号电池」「2梯子」这类真名不含量词、不受影响。
+final RegExp _trailingQuantityPattern =
+    RegExp(r'(\d+|[一两二三四五六七八九十百]+)\s*[个本把件只张]$');
+
+String stripTrailingQuantity(String name) {
+  final value = name.trim();
+  final match = _trailingQuantityPattern.firstMatch(value);
+  if (match == null) return value;
+  // 量词必需才剥：「5号电池」里「5」后面是「号」，不误伤。
+  final head = value.substring(0, match.start).trim();
+  if (head.isEmpty) return value; // 「3个」本身就是名字 → 不剥，避免空名。
+  return head;
+}
+
+/// 物品名的「词根」：归一化后剥掉尾部借出动词与残留数量。
 ///
 /// 「梯子」与「梯子借」的词根都是「梯子」——它们本该是同一件东西，
 /// 只是历史上被脏数据拆成了两条记录。
-String itemNameRoot(String name) => stripLoanSuffix(normalizeName(name));
+String itemNameRoot(String name) =>
+    stripTrailingQuantity(stripLoanSuffix(normalizeName(name)));
 
 /// 物品名宽松相等：精确相等，或词根相等。
 ///

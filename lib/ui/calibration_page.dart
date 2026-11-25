@@ -173,8 +173,13 @@ class _CalibrationPageState extends State<CalibrationPage> {
                     const Padding(
                       padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
                       child: Text(
-                        '照着实物清点，填「家里一共几个」。\n'
-                        '借出去的会从在库里扣掉，填完点保存。',
+                        '这页是干嘛的：老版本记的数量不准，照家里实物数一遍，'
+                        '把数量改对。\n'
+                        '怎么填：下面每件东西都有个输入框，就填「你家里一共有几个」'
+                        '（包括借出去没还的）。\n'
+                        '举个例子：梯子一共 3 个、其中 1 个借给张三没还，就填 3；'
+                        'App 会自动算成在库 2 个。\n'
+                        '填完点最底下的「保存校准」。只数得清的填，数不清的别乱填。',
                         style: TextStyle(fontSize: 13, height: 1.5),
                       ),
                     ),

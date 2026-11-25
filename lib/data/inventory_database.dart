@@ -431,7 +431,11 @@ class InventoryDatabase implements InventoryRepository {
   /// 校验并归一化名称：走共用 [normalizeName] 单一入口（trim + 全角转半角 + 大小写不敏感），
   /// 再做非空、长度校验。存库路径与去重比较都用本方法的返回值，保证同源。
   String _normalizeName(String value, String field) {
-    final normalized = normalizeName(value);
+    var normalized = normalizeName(value);
+    // V3.10 复验打回（元宝补充①）：数据层双保险——解析器若漏剥后置数量
+    // （语音语序变异），落库前再剥一次，防止「梯子3个」这种脏名入库。
+    // 只处理物品名；位置名（如「3单元」）不能被剥。
+    if (field == '物品名称') normalized = stripTrailingQuantity(normalized);
     if (normalized.isEmpty) {
       throw ArgumentError.value(value, field, '$field 不能为空');
     }

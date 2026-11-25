@@ -47,6 +47,16 @@ class ParseQuery extends ParseResult {
   final String item;
 }
 
+/// 查数量意图（PM 2026-11-25 真机新增）：「梯子有几个」→ 回在库/在借/一共。
+///
+/// 与 [ParseQuery]（查位置）分开：查数量走 getQuantityInfo 回三口径，
+/// 查位置走 findByName 回位置列表。
+class ParseQuantityQuery extends ParseResult {
+  const ParseQuantityQuery({required this.item});
+
+  final String item;
+}
+
 /// 借出意图（V3.7）：物品 + 借阅人 + 数量 + 借期天数。
 class ParseLend extends ParseResult {
   const ParseLend({
@@ -357,6 +367,15 @@ ParseUpsert? _parseRecord(String text) {
       bodyQty = q.value;
       rest = q.rest;
     }
+    // PM 真机打回（V3.10 复验）：语音常把数量说在物品后面——
+    // 「再放梯子3个在阳台」「放梯子三个到阳台」。这里物品名尾部会残留
+    // 数量，若不剥掉会建成「梯子3个」这种新物品（明细莫名其妙多一行）。
+    // 与 V3.9.1「梯子借」、本版 Bug②「5号电池」同源——物品名不许带数量。
+    final trailing = _extractTrailingQuantity(rest);
+    if (trailing != null && trailing.rest.isNotEmpty) {
+      bodyQty = trailing.value;
+      rest = trailing.rest;
+    }
     rest = rest.trim();
     if (rest.isEmpty) return null;
     // 余下部分可能是「梯子在阳台」（物品+介词+位置）或
@@ -372,9 +391,16 @@ ParseUpsert? _parseRecord(String text) {
     // 「梯子在阳台」形式：按介词切。
     final locMatch = RegExp(r'^(.+?)(?:在|到|往|向)(.+)$').firstMatch(rest);
     if (locMatch != null) {
-      final itemPart = locMatch.group(1)!.trim();
+      var itemPart = locMatch.group(1)!.trim();
       final locPart = locMatch.group(2)!.trim();
       if (itemPart.isNotEmpty && locPart.isNotEmpty) {
+        // 「再放梯子3个在阳台」：数量夹在物品与介词之间，
+        // 切完位置后物品名是「梯子3个」——必须把尾部数量剥出来。
+        final tail = _extractTrailingQuantity(itemPart);
+        if (tail != null && tail.rest.isNotEmpty) {
+          bodyQty = tail.value;
+          itemPart = tail.rest;
+        }
         return ParseUpsert(
           item: normalizeName(itemPart),
           location: normalizeName(locPart),
@@ -386,7 +412,7 @@ ParseUpsert? _parseRecord(String text) {
     return null;
   }
 
-  final item = core.substring(0, verbIndex).trim();
+  var item = core.substring(0, verbIndex).trim();
   var location = core.substring(verbIndex + 1).trim();
   if (_isPreposition(location)) {
     location = location.substring(1).trim();
@@ -394,11 +420,69 @@ ParseUpsert? _parseRecord(String text) {
   if (item.isEmpty || location.isEmpty || _isPreposition(location)) {
     return null;
   }
+  // PM 真机打回（V3.10 复验）：数量说在物品后面——「梯子3个放阳台」。
+  // 不剥会建成「梯子3个」新物品，明细多出一行。数量后置是常见口语，
+  // 用与借出侧同源的 _extractTrailingQuantity（支持中文数字）。
+  final trailing = _extractTrailingQuantity(item);
+  if (trailing != null && trailing.rest.isNotEmpty) {
+    qty = trailing.value;
+    item = trailing.rest;
+  }
   return ParseUpsert(
     item: normalizeName(item),
     location: normalizeName(location),
     quantity: qty,
   );
+}
+
+/// 解析「查数量」句式（PM 2026-11-25 真机新增）：
+///  * 后缀式：梯子有几个 / 梯子多少 / 梯子还有几个 / 梯子在借几个 / 梯子一共几个
+///  * 前缀式：有几个梯子 / 多少梯子
+///  * 「数量」式：梯子数量
+///
+/// 必须与位置查询 [ParseQuery] 分开，且守卫排在归还之前——
+/// 「梯子还有几个」含「还」字，若不先拦会被归还分支抢答（同 V3.9
+/// 「借期」含「借」被借出抢答的教训）。
+ParseQuantityQuery? _parseQuantityQuery(String text) {
+  // 后缀：数量疑问词结尾。长词优先，先「一共几个」再「还有几个」。
+  const suffixes = <String>[
+    '一共几个', '总共有几个', '总共几个', '共有几个',
+    '还有几个', '还剩几个', '在借几个', '借出几个',
+    '有几个', '多少', '几件', '几本',
+  ];
+  for (final suffix in suffixes) {
+    if (!text.endsWith(suffix)) continue;
+    var head = text.substring(0, text.length - suffix.length).trim();
+    // 「梯子还有几个」→ head=梯子；「梯子在借几个」→ head=梯子。
+    // 但「一共/还有/在借」这类前缀词若粘在物品上要剥掉（防御）。
+    const leadWords = <String>['一共', '总共', '还有', '还剩', '在借', '借出'];
+    for (final w in leadWords) {
+      if (head.endsWith(w)) {
+        head = head.substring(0, head.length - w.length).trim();
+        break;
+      }
+    }
+    if (head.isNotEmpty) return ParseQuantityQuery(item: normalizeName(head));
+  }
+  // 前缀式：有几个梯子 / 多少梯子。
+  const prefixes = <String>['有几个', '多少', '总共有'];
+  for (final prefix in prefixes) {
+    if (text.startsWith(prefix)) {
+      final item = text.substring(prefix.length).trim();
+      if (item.isNotEmpty) {
+        return ParseQuantityQuery(item: normalizeName(item));
+      }
+    }
+  }
+  // 「梯子数量」「梯子几件」这类显式名词后缀。
+  const nounSuffixes = <String>['数量', '个数'];
+  for (final suffix in nounSuffixes) {
+    if (text.endsWith(suffix) && text.length > suffix.length) {
+      return ParseQuantityQuery(
+          item: normalizeName(text.substring(0, text.length - suffix.length)));
+    }
+  }
+  return null;
 }
 
 /// 解析查询句式（V3 扩展：后缀在哪/哪里、前缀找/有没有、显式「查：」）。
@@ -1191,6 +1275,10 @@ ParseResult parsePhrase(String input) {
     final rest =
         text.substring(_queryPrefixMark.length).trim();
     if (rest.isEmpty) return const ParseUnrecognized();
+    // V3.10（元宝审核补充②）：「查：梯子有几个」走数量查询，
+    // 与「查：梯子在哪」（位置查询）分流，别留半截功能。
+    final qty = _parseQuantityQuery(rest);
+    if (qty != null) return qty;
     return ParseQuery(item: normalizeName(_stripTrailingParticle(rest)));
   }
 
@@ -1202,7 +1290,12 @@ ParseResult parsePhrase(String input) {
   }
 
   // ===== V3.9 语音化第一批：守卫优先级 =====
-  // 改借期 → 废弃 → 恢复 → 借出 → 归还 → 查询 → 录入 → 未识别
+  // 查数量 → 改借期 → 废弃 → 恢复 → 借出 → 归还 → 查询 → 录入 → 未识别
+  //
+  // 查数量排最前：「梯子还有几个」含「还」会被归还抢答，
+  // 「梯子借出几个」含「借」会被借出抢答——先拦下来再说。
+  final qtyQuery = _parseQuantityQuery(text);
+  if (qtyQuery != null) return qtyQuery;
   //
   // 为什么改借期排最前：「梯子借期改成5天」含「借」，若先跑借出分支，
   // 会被切成 borrower=梯子 / item=期改成5天 的乱账。

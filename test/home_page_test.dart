@@ -647,6 +647,14 @@ void main() {
     await settle(tester);
   }
 
+  /// V3.10 复验修复：归还后弹「放回哪儿」，测试统一点「先不改」沿用原位置。
+  Future<void> keepReturnLocation(WidgetTester tester) async {
+    final dialog = find.byKey(const Key('return_location_dialog'));
+    if (dialog.evaluate().isEmpty) return;
+    await tester.tap(find.byKey(const Key('return_location_skip')));
+    await settle(tester);
+  }
+
   testWidgets('V3.3：右上角列表图标不复存在，明细页经抽屉可达', (tester) async {
     await pumpApp(tester);
     await settle(tester);
@@ -1391,6 +1399,7 @@ void main() {
     await settle(tester);
     await submit(tester, '还了1个梯子');
     await settle(tester);
+    await keepReturnLocation(tester);
 
     final loans = await repo.getAllLoans();
     expect(loans, hasLength(1));
@@ -1437,6 +1446,7 @@ void main() {
     // 点「张三」→ 扣张三那笔。
     await tester.tap(find.byKey(const Key('return_pick_张三_1')));
     await settle(tester);
+    await keepReturnLocation(tester);
 
     final loans = await repo.getAllLoans();
     final zhang = loans.firstWhere((l) => l.borrowerName == '张三');
@@ -1458,6 +1468,7 @@ void main() {
     await settle(tester);
     await submit(tester, '张三还了1个梯子');
     await settle(tester);
+    await keepReturnLocation(tester);
 
     expect(find.byKey(const Key('return_picker_dialog')), findsNothing,
         reason: '句中已指名，不需要问');
@@ -1525,6 +1536,7 @@ void main() {
 
     await submit(tester, '张三还了1个梯子');
     await settle(tester);
+    await keepReturnLocation(tester);
     expect(find.textContaining('已归还：梯子 → 张三'), findsOneWidget);
     expect(find.textContaining('在阳台'), findsOneWidget);
   });

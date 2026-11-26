@@ -252,6 +252,18 @@ versionCode 连续递增铁律不变，**恒为 24、不得跳号**。
 - **元宝 I③ 口径细化**：概览持 `OverviewReader`（只读账，**一字不改**）+ `TodoStateWriter`（只写 `todo_states`）。
   `TodoStateWriter` 入参只有 entryId 字符串 → **拿不到任何仓储句柄** → 「概览改不了账」在**编译期**依然成立。
 
+> ⚠️ **元宝 2026-11-26 开工令已把字段口径改细**：上条的 `entry_id/state/note` 改为
+> **`id` / `source_type` / `source_id` / `status` / `done_at` / `defer_count` / `handle_note` /
+> `created_at` / `updated_at`**（PM 已确认 `source_type` 枚举 = `schedule_reminder` / `loan_due`，
+> 后续加新催办源只加枚举值、不加表不加列）。**以开工令口径为准。**
+> **buddy 多加了第 10 列 `next_due_at`**（延期后的下一次提示时间）——
+> 这是**对元宝字段清单的唯一一处增补**，理由：元宝 B4 要求「到期当天未处理 → 自动延期 →
+> 到期当天再次提示」，而「再次提示的时间点」在 9 个字段里无处可存：
+> ① 推 `reminders.due_at` = 概览越界写日程表（破 PM 拍板的写边界）；
+> ② 用 `defer_count` 反推 = 「按次累计」退化成「按天累计」（与 B4 直接冲突）。
+> **已在批次 1 简报第一节显式请元宝追认**，追认前不进批次 2 的依赖项。
+
+
 
 ### docx 真机复验（【F③】【G#1】【J】）
 - 程序化验证已推到 4 层：ZIP CRC 全过 → 6 部件齐全 + XML 全良构 → **macOS `textutil`（Apple 文档引擎）读出全文**

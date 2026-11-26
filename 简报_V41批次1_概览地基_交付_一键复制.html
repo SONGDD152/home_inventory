@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>简报 · V4.1 批次 1 交付（概览地基）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.78; color: #1f2933; background: #f5f7fa;
+    margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 20px;
+  }
+  h1 { font-size: 23px; margin: 0 0 6px; }
+  .sub { color: #6b7280; font-size: 14px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 28px 0 12px; padding-left: 11px; border-left: 4px solid #3b82f6; }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #374151; }
+  .copybar { margin: 0 0 18px; }
+  button.copy {
+    background: #2563eb; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button.copy:hover { background: #1d4ed8; }
+  .toast { display: none; margin-left: 12px; color: #059669; font-size: 13px; font-weight: 600; }
+  .toast.on { display: inline-block; }
+  .meta { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .warn { background: #fff7ed; border-left: 4px solid #f97316; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .ok { background: #ecfdf5; border-left: 4px solid #10b981; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .bad { background: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .self { background: #faf5ff; border-left: 4px solid #a855f7; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid #e5e7eb; padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; }
+  code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.6; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .tag { display: inline-block; background: #eef2ff; color: #3730a3; border-radius: 5px; padding: 1px 8px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .tag.green { background: #d1fae5; color: #065f46; }
+  .tag.red { background: #fee2e2; color: #991b1b; }
+  .tag.amber { background: #fef3c7; color: #92400e; }
+  .tag.gray { background: #e5e7eb; color: #374151; }
+  .chk { list-style: none; padding-left: 4px; }
+  .chk li { border-bottom: 1px dashed #e2e8f0; padding: 9px 0 9px 2px; }
+  .chk li:last-child { border-bottom: none; }
+  footer { text-align: center; color: #94a3b8; font-size: 12.5px; padding: 12px 0 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <h1>简报 · V4.1 批次 1 交付（概览地基）</h1>
+  <p class="sub">发件：开发（buddy）→ 技术审核（元宝）／抄送 PM　|　日期：2026-11-26　|　<b>批次 1 完成，即时报，不攒到最后</b></p>
+
+  <div class="copybar">
+    <button class="copy" onclick="copyAll()">📋 复制全文</button>
+    <span class="toast" id="toast">已复制到剪贴板</span>
+  </div>
+
+  <div class="meta">
+    <b>本件</b>：元宝开工令的<b>批次 1（概览地基）</b>交付报告。
+    代码已提交推送（<code>3e805c7</code>，已 <code>ls-remote</code> 核实），<b>测试 503/503 全绿</b>。
+    <b>批次 2 尚未开工</b>——本件含一处<b>必须请元宝追认的字段增补</b>（第一节），追认后即进批次 2。
+  </div>
+
+  <h2>〇、一句话</h2>
+  <p><code>todo_states</code> 第 9 张表已落地、<code>TodoStateWriter</code> 已接上、概览页已改双签容器、
+  催办区已改单条独立成行的提示流且可勾可撤、E1 覆盖 bug 已修。
+  <b>元宝裁定的 9 个字段一个不少、一个不改名</b>；我<b>多加了 1 列</b>
+  <code>next_due_at</code>，理由在第一节，<b>请追认</b>。</p>
+
+  <h2>一、★ 请元宝追认：对字段清单的<b>唯一一处增补</b>（<code>next_due_at</code>）</h2>
+
+  <div class="warn">
+    <b>元宝裁定的 9 个字段我全部照办</b>：
+    <code>id</code> / <code>source_type</code> / <code>source_id</code> / <code>status</code> /
+    <code>done_at</code> / <code>defer_count</code> / <code>handle_note</code> /
+    <code>created_at</code> / <code>updated_at</code>——字段名、类型、默认值全部照原样，无改名、无改型。
+    <br><br>
+    <b>我多加了第 10 列 <code>next_due_at INTEGER</code>（可空）</b>。
+  </div>
+
+  <h3>为什么必须加这一列（不是可有可无的锦上添花）</h3>
+
+  <p>元宝 B4 的原话是：「<b>到期当天未处理 → 自动延期 → 到期当天再次提示 → 每次延期计数+1，显示「已延期 N 次」，计数跨天累加不重置（按「次」累计，非按天）</b>」。</p>
+
+  <p>要让这条成立，必须存得下「<b>下一次提示的时间点</b>」。而 9 个字段里<b>没有任何一个能装它</b>：</p>
+
+  <table>
+    <tr><th>候选方案</th><th>后果</th><th>判定</th></tr>
+    <tr>
+      <td>① 推 <code>reminders.due_at</code>（改日程表）</td>
+      <td>概览 / 日报页就<b>越界写日程表</b>了——破了 PM 拍板的「概览只写待办状态、不碰其他表」边界，也破了元宝自己批的「概览只读代码层落实」</td>
+      <td><span class="tag red">否决</span></td>
+    </tr>
+    <tr>
+      <td>② 用 <code>defer_count</code> 反推天数（有效到期日 = 原到期 + N 天）</td>
+      <td>「按次累计」直接退化成「按天累计」。一条过期 5 天的提醒，一次打开就显示「已延期 5 次」，而用户实际只被提示过 1 次——<b>与 B4「按次累计，非按天」直接冲突</b></td>
+      <td><span class="tag red">否决</span></td>
+    </tr>
+    <tr>
+      <td>③ 单独存「下一次提示时间」</td>
+      <td>延期次数与提示次数解耦：<b>手动延期</b>一天点 3 次 = 3 次（按次）；<b>自动延期</b>每天最多 +1 次（防止过期 5 天一天涨 5 次，计数失真）</td>
+      <td><span class="tag green">采用</span></td>
+    </tr>
+  </table>
+
+  <div class="ok">
+    <b>所以 <code>next_due_at</code> 是延期机制的必要存储位，不是「新催办源」的表结构扩展</b>——
+    它不违反元宝「后续加新源只加枚举值、不加表不加列」那条约束（那条约束针对的是<b>新增催办源</b>，不是延期机制本身）。
+    <br><br>
+    <b>若元宝仍要严格 9 列</b>，退路是：把 <code>next_due_at</code> 砍掉，改用方案 ①（推 <code>reminders.due_at</code>），
+    代价是<b>概览越界写日程表</b>，与刚拍板的边界冲突——我不建议，请元宝二选一。
+  </div>
+
+  <h3>实际建表 SQL（已落地）</h3>
+  <pre><code>CREATE TABLE IF NOT EXISTS todo_states (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_type   TEXT    NOT NULL,             -- schedule_reminder | loan_due
+  source_id     INTEGER NOT NULL,             -- reminders.id | loans.id
+  status        TEXT    NOT NULL DEFAULT 'pending',  -- pending | done | deferred
+  done_at       INTEGER,
+  defer_count   INTEGER NOT NULL DEFAULT 0,   -- 按「次」累计，跨天不重置
+  handle_note   TEXT,                         -- 处理备注 / 延期原因
+  next_due_at   INTEGER,                      -- ← 延期后的下一次提示时间（增补列）
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_todo_states_source
+  ON todo_states(source_type, source_id);     -- 一个源条目只允许一条状态记录
+CREATE INDEX IF NOT EXISTS idx_todo_states_status     ON todo_states(status);
+CREATE INDEX IF NOT EXISTS idx_todo_states_next_due  ON todo_states(next_due_at);</code></pre>
+
+  <h2>二、批次 1 交付清单（逐条对照元宝开工令）</h2>
+
+  <table>
+    <tr><th>元宝开工令 · 批次 1</th><th>状态</th><th>落点</th></tr>
+    <tr>
+      <td>新增第 9 张表 <code>todo_states</code>，reminders 表一列不动</td>
+      <td><b>完成</b></td>
+      <td><code>lib/data/inventory_database.dart</code>：<code>_createTodoStateTable()</code>；<code>currentSchemaVersion</code> 11→12</td>
+    </tr>
+    <tr>
+      <td>所有催办条目统一走 <code>todo_states</code>，不再各自存状态</td>
+      <td><b>完成</b></td>
+      <td>完成态 / 延期次数 / 备注<b>全部</b>落 <code>todo_states</code>；reminders 表的 <code>status/done_at</code> 原样保留但 V4.1 的催办流<b>不再读它做判定</b></td>
+    </tr>
+    <tr>
+      <td>催办区 = ReminderSource 提供条目 + todo_states 提供状态，两表 JOIN 读取</td>
+      <td><b>完成（应用层 JOIN）</b></td>
+      <td>条目走 <code>ReminderSource.loadEntries()</code>，状态走 <code>TodoStateWriter.loadStates()</code>，按业务键 <code>'{source_type}_{source_id}'</code> 配对。<b>为什么不做 SQL JOIN</b>：条目跨两张业务表（reminders + loans 派生），SQL 层 JOIN 要 UNION 两张表且会把状态表与 schema 硬绑；应用层 JOIN 更贴合「概览只认 ReminderSource 一个接口」的架构，且状态表极小</td>
+    </tr>
+    <tr>
+      <td><code>source_type</code> 枚举 = <code>schedule_reminder</code> / <code>loan_due</code></td>
+      <td><b>完成</b></td>
+      <td><code>lib/data/todo_state.dart</code> 的 <code>TodoSourceType</code>；<code>all</code> 恰好两个值，<code>isValid()</code> 守卫；<b>后续加新源只加枚举值，不加表不加列</b></td>
+    </tr>
+    <tr>
+      <td>ReminderSource 补域标识</td>
+      <td><b>完成</b></td>
+      <td><code>id='loan_due_{域}'</code>、<code>displayName='生活区·仓储借出到期'</code>；<b>域必填不设默认值</b>，编译器强制每个调用点显式声明</td>
+    </tr>
+    <tr>
+      <td>Map key 改 <code>source.id</code>（E1 修复）</td>
+      <td><b>完成</b></td>
+      <td><code>lib/ui/overview_page.dart</code>：<code>entries[source.id]</code>，不再用 <code>displayName</code></td>
+    </tr>
+    <tr>
+      <td>概览页改双签容器（日报签 / 日程签，默认日报签）</td>
+      <td><b>完成</b></td>
+      <td><code>TabBar</code>（key <code>overview_tabs</code>），签位 key <code>overview_tab_report</code> / <code>overview_tab_schedule</code></td>
+    </tr>
+    <tr>
+      <td>概览内容改「单条独立成行」的流式布局</td>
+      <td><b>完成</b></td>
+      <td>每个条目一个 <code>ListTile</code>，不再堆块</td>
+    </tr>
+    <tr>
+      <td>条目行补全「借出日期 / 预期天数 / 剩余或逾期天数」</td>
+      <td><b>完成</b></td>
+      <td><code>OverviewEntry</code> 加 <code>startedAt / expectedDays / dayDelta</code>；副标题形如「借出 2026-11-20 · 预期 3 天 · 已逾期 2 天」</td>
+    </tr>
+    <tr>
+      <td>新增 <code>TodoStateWriter</code> 受控写通道</td>
+      <td><b>完成</b></td>
+      <td><code>lib/domain/todo_state_writer.dart</code>：<code>readState / loadStates / markDone / defer / setNote / syncOverdue</code>，入参只有 <code>sourceType</code>+<code>sourceId</code></td>
+    </tr>
+  </table>
+
+  <h2>三、E1 真 bug 的修复与实证</h2>
+
+  <div class="bad">
+    <b>V4.0 的 E1 是覆盖 + 重复的双 bug</b>：生活区与工作区的源共用 <code>id='loan_due'</code> 与
+    <code>displayName='借出到期'</code>，而概览拿 <code>displayName</code> 当 Map key →
+    <b>工作区把生活区的借出到期条目整个覆盖吞掉</b>，且标题还渲染两次。
+  </div>
+
+  <p>本次修法<b>两道，缺一不可</b>（只改名是糊弄）：</p>
+  <ol>
+    <li><b>Map 的 key 从 <code>displayName</code> 换成 <code>source.id</code></b>——唯一标识做 key，展示名只管展示；</li>
+    <li><b>源的 id / displayName 本身带域</b>——<code>id='loan_due_life'</code> / <code>'loan_due_work'</code>。</li>
+  </ol>
+
+  <p>还有一处<b>元宝清单外但必须做</b>的：<b>条目 id 也要带域</b>（<code>loan_{域}_{id}</code>）。</p>
+  <div class="meta">
+    原因：条目 id 会当 widget key 用（<code>overview_entry_{id}</code>）。生活区和工作区各有自己的
+    <code>loan_1</code> 时，key 会撞——Flutter 里撞 key 会出断言错误或定位到多个 widget。
+    条目 id 带域后彻底隔离。状态配对另走 <code>stateKey = '{source_type}_{source_id}'</code>，
+    <b>两套键各司其职</b>：widget key 负责渲染唯一，业务键负责状态配对。
+  </div>
+
+  <div class="ok">
+    <b>实证（专项测试锁死）</b>：两域各有一笔借出时，
+    <code>lifeSource.id != workSource.id</code>、<code>displayName</code> 各含「生活区」「工作区」、
+    <b>两边的条目都能取到</b>（V4.0 时生活区的会被吞掉）、条目 id 互不相同。
+  </div>
+
+  <h2>四、写边界：为什么「概览改不了账」在<b>编译期</b>成立</h2>
+
+  <p>元宝 I③ 是这批改动的地基，所以单独说清楚：</p>
+
+  <table>
+    <tr><th>接口</th><th>能读</th><th>能写</th><th>入参</th></tr>
+    <tr>
+      <td><code>OverviewReader</code>（<b>一字未改</b>）</td>
+      <td>物品 / 在库 / 在借 / 废弃 / 总拥有 / 守恒账平</td>
+      <td><b>无任何写方法</b></td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td><code>TodoStateWriter</code>（新建）</td>
+      <td>待办条目状态</td>
+      <td><b>只写 <code>todo_states</code> 表</b></td>
+      <td><code>sourceType</code>(String) + <code>sourceId</code>(int) + 枚举/布尔</td>
+    </tr>
+  </table>
+
+  <div class="ok">
+    <b>关键</b>：<code>TodoStateWriter</code> 的签名里<b>没有任何仓储类型</b>——
+    没有 <code>InventoryRepository</code>、没有 <code>InventoryDatabase</code>、没有 <code>ReminderRepository</code>、
+    也没有 <code>Item</code>/<code>Loan</code>/<code>Reminder</code>。
+    概览页只持有这个接口，就<b>编译期拿不到</b>账的写能力——不是靠「UI 没放按钮」这种自觉。
+    <br><br>
+    <b>三条回归锁（专项测试）</b>：
+    ① 源码级断言：待办写口签名不含任何仓储类型（将来谁塞一个进去，测试立刻红）；
+    ② 源码级断言：概览页文件不含任何仓储类型；
+    ③ 行为级断言：打勾后<b>物品清单与在库数量一行不动</b>，变的只有待办状态。
+  </div>
+
+  <div class="warn">
+    <b>一处我自己踩到并纠正的坑</b>：我第一版写的只读边界断言是
+    <code>expect(writer is InventoryRepository, isFalse)</code>——<b>这条是错的</b>：
+    同一个 <code>InventoryDatabase</code> 对象本来就同时实现了仓储与待办写口，
+    那是<b>实现类</b>的事实，跟<b>接口</b>的边界无关。已改成上面三条正确口径。
+    <b>教训</b>：要证明的是「接口的边界」，不是「对象的类型」。
+  </div>
+
+  <h2>五、元宝三条验收观察项，在 v12 口径下的状态</h2>
+
+  <table>
+    <tr><th>观察项</th><th>本批次状态</th></tr>
+    <tr>
+      <td>① 切库超时用户可见</td>
+      <td><b>未动</b>。计数仍在概览页卡片（key <code>overview_switch_timeout</code>）展示，只读无清零；正常路径不累加的专项断言照旧在</td>
+    </tr>
+    <tr>
+      <td>② 工作库八表与 v11 逐表核对</td>
+      <td><b>已升级为「九表与 v12 逐表逐列核对」</b>，且不是只改数字：专项测试现在<b>逐表逐列</b>比对两库的<b>列名 / 类型 / 非空约束 / 默认值</b>全等，9 张表一张不落。<b>不让这条观察项悄悄失效</b></td>
+    </tr>
+    <tr>
+      <td>③ 概览只读代码层落实</td>
+      <td><b>口径细化为「只读账 + 只写待办」</b>，见第四节。概览页现在持有两个接口，账那侧一字未改</td>
+    </tr>
+  </table>
+
+  <h2>六、本批次没做、留给后续批次的（自曝，不静默）</h2>
+
+  <table>
+    <tr><th>项</th><th>归属</th><th>说明</th></tr>
+    <tr>
+      <td>「延期」按钮与「备注」编辑入口</td>
+      <td>批次 2</td>
+      <td>本批次<b>只读展示</b>延期次数与备注（从 todo_states 读出来显示），<b>能勾能撤</b>；手动延期与备注编辑的<b>交互</b>放在批次 2（元宝 B2/B3）</td>
+    </tr>
+    <tr>
+      <td>催办区的「系统类 / 日程类」图标区分</td>
+      <td><b>本批次已做</b></td>
+      <td>借出到期用箱子图标、日程用便签图标，元宝 B5 的区分要求已落地</td>
+    </tr>
+    <tr>
+      <td>日报签的三态完整样式（已延期态的独立视觉）</td>
+      <td>批次 2</td>
+      <td>本批次已完成态有划线 + 灰化（E5 明确要求的）；「已延期」的独立视觉样式放批次 2</td>
+    </tr>
+    <tr>
+      <td>日程签的月历 / 时间轴 / 创建编辑 / 重复规则</td>
+      <td>批次 3</td>
+      <td>本批次日程签是<b>跨域列表简版</b>（能看两域、能勾选、状态与日报签同源），月历与编辑放批次 3</td>
+    </tr>
+    <tr>
+      <td>生活区底栏 5→4、旧测试 2 条改写</td>
+      <td>批次 4</td>
+      <td>本批次<b>没动底栏</b>，所以旧测试一条不用改 —— 461 条旧测试本批次<b>一条未删、一条未改、全绿</b></td>
+    </tr>
+    <tr>
+      <td>日报入口（孤儿页修复）</td>
+      <td>批次 2</td>
+      <td>批次 1 的双签容器已就位，但日报签目前是<b>催办流</b>，还不是完整的日报签</td>
+    </tr>
+  </table>
+
+  <h2>七、测试与提交凭据</h2>
+
+  <table>
+    <tr><th>项</th><th>值</th></tr>
+    <tr><td>全量测试</td><td><b>503/503 全绿</b>（461 旧一条未删 + 23 条 V4.0 专项 + <b>19 条 V4.1 新增专项</b>）</td></tr>
+    <tr><td>本批次新增专项</td><td><code>test/v41_todo_state_test.dart</code> —— 19 条，覆盖九表逐表逐列、v11→v12 迁移幂等、状态 CRUD、按次累计、自动延期每日一次、幂等、E1 回归、E5 字段、两表 JOIN、枚举锁定、只读边界三条、备份带状态</td></tr>
+    <tr><td>静态分析</td><td><code>flutter analyze</code> 无 error（仅 4 条历史遗留的 <code>material.dart</code> deprecated info，与本批次无关）</td></tr>
+    <tr><td>版本号</td><td><b>4.1.0+25</b>（versionCode 24→25 <b>连续不跳号</b>；台账下一号仍为 25，本次已占用）</td></tr>
+    <tr><td>提交</td><td><code>3e805c7</code>，已推 main 并 <code>ls-remote</code> 核实</td></tr>
+    <tr><td>出包</td><td><b>本批次不出包</b>（按元宝批次顺序，批次 5 收尾才出包定版）</td></tr>
+  </table>
+
+  <h2>八、请元宝裁示（本批次唯一待确认项）</h2>
+
+  <div class="meta">
+    <ol>
+      <li><b>追认 <code>next_due_at</code> 这一列</b>（第一节）。追认 → 我按现状进批次 2；
+        不追认 → 我改用「推 <code>reminders.due_at</code>」的退路，但那样概览会越界写日程表，我会在提交里显式标注该边界破口。</li>
+      <li><b>「两表 JOIN」用应用层配对（我做的方式）还是 SQL 层 JOIN</b>——我建议应用层（理由见第二节），
+        但这是对元宝「两表 JOIN 读取」表述的实现选择，请确认是否接受。</li>
+      <li><b>批次 2 是否即刻开工</b>（日报签完整交互：三态 + 备注 + 延期按钮 + 导出格式重做 + 补日报入口）。</li>
+    </ol>
+  </div>
+
+  <h2>九、当前现场（供对照）</h2>
+  <ul>
+    <li>V4.0.0+24 仍在架可用（sha256 <code>afe4a664…82a1</code>，签名 <code>c1647f33…</code>），<b>用户零影响</b>。</li>
+    <li>本批次<b>只动生活区工作副本</b>，<code>git status</code> 干净；台账与本简报随批次 5 一并提交。</li>
+    <li>元宝开工令的检查清单逐条对账：① 表结构已锁（9 字段 + 1 增补，待追认）② 枚举已锁 ③ 接口签名已锁
+      ④ 旧测试改写清单<b>属批次 4，本批次不动</b>⑤ 版本号已占 25 ⑥ 九表口径已升级。</li>
+  </ul>
+
+  <footer>开发 buddy · 2026-11-26 · V4.1 批次 1 交付 · 批次 2 待元宝追认后开工</footer>
+</div>
+</div>
+
+<textarea id="src" style="position:fixed;left:-9999px;top:0;opacity:0"></textarea>
+<script>
+  function copyAll() {
+    var t = document.getElementById('src');
+    t.value = document.querySelector('.wrap').innerText;
+    var done = function () {
+      var s = document.getElementById('toast');
+      s.classList.add('on');
+      setTimeout(function () { s.classList.remove('on'); }, 1800);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t.value).then(done, function () { legacy(); });
+    } else { legacy(); }
+  }
+  function legacy() {
+    var t = document.getElementById('src');
+    t.value = document.querySelector('.wrap').innerText;
+    t.focus();
+    t.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    var s = document.getElementById('toast');
+    s.classList.add('on');
+    setTimeout(function () { s.classList.remove('on'); }, 1800);
+  }
+</script>
+</body>
+</html>

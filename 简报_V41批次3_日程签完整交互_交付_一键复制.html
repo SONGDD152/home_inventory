@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>简报 · V4.1 批次 3 交付（日程签完整交互 + 两条追认裁定修正）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.78; color: #1f2933; background: #f5f7fa;
+    margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 20px;
+  }
+  h1 { font-size: 23px; margin: 0 0 6px; }
+  .sub { color: #6b7280; font-size: 14px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 28px 0 12px; padding-left: 11px; border-left: 4px solid #3b82f6; }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #374151; }
+  h4 { font-size: 14px; margin: 14px 0 6px; color: #4b5563; }
+  .copybar { margin: 0 0 18px; }
+  button.copy {
+    background: #2563eb; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button.copy:hover { background: #1d4ed8; }
+  .toast { display: none; margin-left: 12px; color: #059669; font-size: 13px; font-weight: 600; }
+  .toast.on { display: inline-block; }
+  .meta { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .warn { background: #fff7ed; border-left: 4px solid #f97316; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .ok { background: #ecfdf5; border-left: 4px solid #10b981; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .bad { background: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .self { background: #faf5ff; border-left: 4px solid #a855f7; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid #e5e7eb; padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; }
+  code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; line-height: 1.6; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .tag { display: inline-block; background: #eef2ff; color: #3730a3; border-radius: 5px; padding: 1px 8px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .tag.green { background: #d1fae5; color: #065f46; }
+  .tag.red { background: #fee2e2; color: #991b1b; }
+  .tag.amber { background: #fef3c7; color: #92400e; }
+  .tag.gray { background: #e5e7eb; color: #374151; }
+  .chk { list-style: none; padding-left: 4px; }
+  .chk li { border-bottom: 1px dashed #e2e8f0; padding: 9px 0 9px 2px; }
+  .chk li:last-child { border-bottom: none; }
+  footer { text-align: center; color: #94a3b8; font-size: 12.5px; padding: 12px 0 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <h1>简报 · V4.1 批次 3 交付（日程签完整交互 + 两条追认裁定修正）</h1>
+  <p class="sub">开发 buddy → 技术审核 元宝 / 抄送 PM ｜ 日期 2026-11-26 ｜ 对应《简报 · V4.1 批次 2 交付审核批复》</p>
+
+  <div class="copybar">
+    <button class="copy" onclick="copyAll()">📋 复制全文</button>
+    <span class="toast" id="toast">已复制 ✓</span>
+  </div>
+
+  <div class="meta">
+    <b>一句话</b>：批次 2 的四条追认裁定全部落地（其中①按 PM 最终裁定取 2 天提前量、④改成「只往后推不许回拉」），批次 3 主体（日程签完整交互）同步交付。<b>568/568 全绿</b>（461 旧测试一条未删 + 107 新增专项），<code>flutter analyze</code> 0 error / 0 warning。代码已推送 <code>7e038bb</code>。
+  </div>
+
+  <div class="ok">
+    <b>本批没有出包</b>（按批次 5 出包，versionCode 25 已占用未出包）。
+  </div>
+</div>
+
+<div class="card">
+  <h2>一、批次 2 四条追认裁定 —— 逐条对照</h2>
+  <p>元宝原文：「① 系统类（借出到期）优先级 → 高（2），提前 3 天进催办区。批准。② 提前量用 priority 推导（高3/中1/低0天），不新增列 → 批准。③ 日程签勾选保留，只去延期/备注 → 批准。④ 延期绝对日期写入 → 改为『只往后推不许回拉』。若选的日期早于当前 next_due_at，忽略并提示。此条需你改一下代码，改动量小，不重新出包。」</p>
+
+  <table>
+    <tr><th style="width:52px">#</th><th style="width:190px">裁定</th><th>落地方式</th><th style="width:150px">怎么验的</th></tr>
+    <tr>
+      <td><b>①</b></td>
+      <td>系统类优先级 = 高（2）</td>
+      <td><code>LoanDueReminderSource</code> 传 <code>priority: ReminderPriority.high</code>（批次 2 已做，本批复核通过）。</td>
+      <td>专项断言 <code>entry.priority == high</code></td>
+    </tr>
+    <tr>
+      <td><b>①</b></td>
+      <td><b>系统类提前 2 天</b><br><span class="tag amber">PM 最终裁定</span></td>
+      <td><b>新增 <code>leadDaysOverride</code> 字段</b>（<code>OverviewEntry</code>），系统类源显式传 <code>2</code>。<br><b>关键：<code>priority</code> 推导表一个字没动</b>——日程类高优先级仍是提前 3 天（裁定②不许改）。详见第二节。</td>
+      <td>专项断言 <code>entry.leadDays == 2</code> 且 <code>leadDaysOf(high) == 3</code></td>
+    </tr>
+    <tr>
+      <td><b>②</b></td>
+      <td>提前量由 priority 推导（高3/中1/低0）<br>不新增列</td>
+      <td><code>ReminderPriority.leadDaysOf()</code> <b>原样保留</b>（高3/中1/低0）。<br><b>schema 未变</b>：仍是 v13，仍是 9 张表，<code>todo_states</code> 10 列一字未动。</td>
+      <td>专项断言 + <code>currentSchemaVersion == 13</code></td>
+    </tr>
+    <tr>
+      <td><b>③</b></td>
+      <td>日程签勾选保留，只去延期/备注</td>
+      <td>日程签**独立组件化**（<code>lib/ui/schedule_tab_view.dart</code>），从设计上就没有延期/备注按钮——不是「藏起来」，是**根本没有**。<br>勾选保留，写 <code>todo_states</code>（元宝 B8 双向同步的落点）。</td>
+      <td>源码级断言：日程签组件不含 <code>overview_defer_</code> / <code>overview_note_</code>，含 <code>markDone</code></td>
+    </tr>
+    <tr>
+      <td><b>④</b></td>
+      <td>延期只往后推，不许回拉</td>
+      <td><b>校验放数据层</b>（<code>InventoryDatabase.defer</code>）：选了早于基准的日子 → 抛 <code>ArgumentError</code>，状态行一字不动（连 <code>defer_count</code> 都不加）。<br>UI 侧同步：日期选择器 <code>firstDate</code> 挡住更早的日子；「延到明天」在会回拉时禁用并写明原因。</td>
+      <td>专项 4 条（见第四节）</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>二、裁定①与裁定②在系统类上会打架 —— 我怎么解的</h2>
+
+  <div class="warn">
+    <b>这是本批唯一的口径冲突，元宝值得看一眼。</b><br>
+    裁定①说系统类优先级 = <b>高</b>；裁定②说提前量由 priority 推导，<b>高 = 提前 3 天</b>；
+    而 PM 最终裁定说系统类提前量取 <b>2 天</b>，不取 buddy 原定的 3 天。<br>
+    三者放一起，「系统类提前几天」直接算不出来。
+  </div>
+
+  <h3>两条路，我选了第二条</h3>
+  <table>
+    <tr><th style="width:220px">方案</th><th>做法</th><th style="width:210px">为什么不选</th></tr>
+    <tr>
+      <td><b>甲（否决）</b><br>改 priority 推导表</td>
+      <td>把 <code>leadDaysOf(high)</code> 从 3 改成 2</td>
+      <td><b>连带把日程类的高优先级也从 3 天改成 2 天</b>——裁定②批的是「高3/中1/低0」，一并改掉就是<b>越权改裁定</b>。</td>
+    </tr>
+    <tr>
+      <td><b>乙（本批采用）</b><br>显式提前量覆盖</td>
+      <td><code>OverviewEntry</code> 加 <code>leadDaysOverride</code>（可空）。<code>leadDays</code> getter = <code>override ?? leadDaysOf(priority)</code>。系统类源传 2，日程类不传 → 走推导。</td>
+      <td><b>优先级（排序用）与提前量（进区用）解耦</b>，两条裁定各自成立，互不牵连。<b>不新增数据库列</b>（裁定②明写「不新增列」）。</td>
+    </tr>
+  </table>
+
+  <div class="ok">
+    <b>净效果</b>：系统类 = 优先级「高」+ 提前 2 天；日程类高优先级 = 提前 3 天；中 1 天；低 0 天。<b>裁定②的推导表原封未动。</b>
+  </div>
+
+  <div class="self">
+    <b>留痕</b>：<code>ReminderPriority.leadDaysOf()</code> 的注释里写明了「高 = 3 天」这条仍属裁定②范围，系统类的 2 天是 PM 最终裁定的<b>显式覆盖</b>——将来谁看到「高优先级却只提前 2 天」，能查到这是有意的，不是漏改。
+  </div>
+</div>
+
+<div class="card">
+  <h2>三、批次 3 主体：日程签完整交互 —— 逐项</h2>
+  <p>元宝开工令（回执第九节）批次 3 对应元宝条目 C1–C5 / B8。以下<b>每项各一张表：做了什么 / 怎么验的 / 已知限制</b>。</p>
+
+  <h3>① 月历缩略（可折叠）+ 时间轴列表 <span class="tag green">已落地</span></h3>
+  <table>
+    <tr><th style="width:96px">项</th><th>内容</th></tr>
+    <tr><td><b>做了什么</b></td><td>新建 <code>lib/ui/schedule_tab_view.dart</code>：顶部一张可折叠的月历卡（点标题展开/收起，默认收起——概览页空间宝贵），有日程的日期打蓝点，可点某天筛选时间轴；下方是按到期日分组的时间轴列表（无期限的排最后）。</td></tr>
+    <tr><td><b>怎么验的</b></td><td>专项 widget 测试：月历卡存在 → 默认收起（找不到日期格）→ 点标题 → 日期格出现 → 时间轴上能看到那条日程。</td></tr>
+    <tr><td><b>已知限制</b></td><td>月历是<b>本月视图</b>（可翻上/下月），不是无限滚动日历；点某天是<b>筛选</b>当前时间轴，不会跳到独立页面。重复规则（每天/每周）在时间轴上<b>只显示标记</b>，<b>不展开成多条实例</b>——真正的重复实例生成需要「完成后自动滚出下一条」的机制，本批没做（见第六节待裁示）。</td></tr>
+  </table>
+
+  <h3>② 跨域展示（生活 + 工作）带域标识 <span class="tag green">已落地</span></h3>
+  <table>
+    <tr><th style="width:96px">项</th><th>内容</th></tr>
+    <tr><td><b>做了什么</b></td><td>两域的日程排在同一条时间轴上，每条带<b>域标签</b>（生活区=青色「生活」、工作区=靛蓝「工作」）。<br><b>两个源都注册</b>（批次 2 只注册了生活域的日程源）——工作域那一组必须存在，否则用户看不到「工作区也在这本日程表里，只是暂时没开放」。</td></tr>
+    <tr><td><b>怎么验的</b></td><td>专项测试：两库各建一条日程 → 时间轴上两条都在 → 各自带域标签；<code>displayName</code> / <code>id</code> 两域不同（不撞车）。</td></tr>
+    <tr><td><b>已知限制</b></td><td>工作域本轮<b>能力开关关闭</b>（<code>domainCapabilities</code> 里 work 域没有 <code>reminders</code> 能力），所以工作域的 <code>reminders</code> 表<b>建齐但永远为空</b>——能看、能区分，但没有可看的内容。<b>本批不给工作域写口</b>（不给「新建/编辑/删除」按钮），符合 PM「工作域提醒不新建」的拍板。</td></tr>
+  </table>
+
+  <h3>③ 创建 / 编辑 / 重复规则 <span class="tag green">已落地</span></h3>
+  <table>
+    <tr><th style="width:96px">项</th><th>内容</th></tr>
+    <tr><td><b>做了什么</b></td><td>日程签有「新建提醒」按钮 + 每条有编辑/删除。新增<b>窄写口</b> <code>lib/domain/reminder_editor.dart</code>（<code>ReminderEditor</code>），只写 <code>reminders</code> 表，<b>不含日报读写</b>。<br>新增 <code>lib/domain/repeat_rule.dart</code>（<code>RepeatRule</code>）：不重复/每天/每周/每月/每年，取值与文案<b>定死一份</b>，UI 与数据层共用。<br>新增 <code>lib/ui/reminder_edit_dialog.dart</code>：<b>共用</b>的提醒编辑弹窗（生活区旧日程页也改用它，避免两处弹窗漂移）。</td></tr>
+    <tr><td><b>怎么验的</b></td><td>专项测试：新建（标题/备注/日期/重复/优先级全落库）→ 编辑（改标题改优先级，<b>没传的字段不被清掉</b>）→ 显式清空重复规则 → 删除（软删）。<br><code>ReminderEditor</code> 源码级断言<b>不含</b> <code>saveDailyReport</code> / <code>getDailyReport</code> / <code>getReminders</code>。</td></tr>
+    <tr><td><b>已知限制</b></td><td><b>重复规则目前只存不展开</b>——设了「每周」，到期后<b>不会自动滚出下一条</b>。要做这件事得先定「完成后自动生成下一实例还是改 due_at」的语义（见第六节待裁示）。<br><code>ReminderRepository.updateReminder</code>（V4.0 接口）<b>不支持</b>改 <code>repeat_rule</code>，所以编辑路径改走 <code>ReminderEditor.editReminder</code>——<b>没改既有接口签名</b>（改了会波及所有实现者 → 破旧测试红线）。</td></tr>
+  </table>
+
+  <h3>④ 工作域能力开关保留 <span class="tag green">已落地</span></h3>
+  <table>
+    <tr><th style="width:96px">项</th><th>内容</th></tr>
+    <tr><td><b>做了什么</b></td><td>工作域 <code>reminders</code> 表<b>建齐</b>（两库结构齐平，9 张表逐表齐平不变），但<b>能力开关关闭</b> → 日程签<b>不给</b>工作域写口 → 工作域条目<b>只读展示</b>、没有增删改按钮。<br>「新建」按钮只列<b>开放提醒的域</b>——不给一个点了就报错的入口。</td></tr>
+    <tr><td><b>怎么验的</b></td><td>专项断言：<code>domainSupports(life, reminders) == true</code>、<code>domainSupports(work, reminders) == false</code>；写口集合由 <code>_editableScheduleDomains()</code> 按能力开关算出。</td></tr>
+    <tr><td><b>已知限制</b></td><td>工作域提醒要开放的话，是<b>改 <code>domainCapabilities</code> 一行</b>的事（表已经建齐），但本批<b>不动</b>——PM 拍板的是「工作域提醒不新建」。</td></tr>
+  </table>
+
+  <h3>⑤ 日程签 ↔ 日报签 勾选双向同步 <span class="tag green">已落地</span></h3>
+  <table>
+    <tr><th style="width:96px">项</th><th>内容</th></tr>
+    <tr><td><b>做了什么</b></td><td>两个签共用同一份 <code>todo_states</code>：日程签勾选写 <code>todo_states</code>，日报签的催办区从同一处读状态 → 任一边勾选，另一边刷新后立刻同步（元宝 B8）。<br>状态配对键<b>带域前缀</b>（批次 2 修的跨域撞车问题，方案签继续沿用）。</td></tr>
+    <tr><td><b>怎么验的</b></td><td>专项 widget 测试：日程签勾选 → <code>todo_states</code> 里确实写进去了（<code>isDone == true</code>）→ 切回日报签，同一条目的复选框显示已勾选。</td></tr>
+    <tr><td><b>已知限制</b></td><td>同步是<b>刷新时</b>同步（切签/下拉刷新即对齐），不是实时推送；两个签不会同时挂在屏幕上，实际感知不到延迟。</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>四、裁定④（只往后推不许回拉）—— 单独摊开讲</h2>
+
+  <h3>判据：基准 = next_due_at ?? 源条目原到期日 ?? 现在</h3>
+  <pre><code>// lib/data/inventory_database.dart · InventoryDatabase.defer
+final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??
+    await _sourceDueAt(db, sourceType, sourceId) ??
+    now;
+if (dueOn.millisecondsSinceEpoch &lt; anchor) {
+  throw ArgumentError.value(
+    dueOn, 'dueOn', '延期只能往后推，不能早于当前提示日期');
+}</code></pre>
+
+  <table>
+    <tr><th style="width:230px">场景</th><th>结果</th><th style="width:130px">怎么验的</th></tr>
+    <tr><td>选了<b>早于</b>当前提示日</td><td><b>被拒</b>，抛 <code>ArgumentError</code>；<b>状态行一个字不动</b>（连 <code>defer_count</code> 都不加——这次延期压根没发生）</td><td>专项断言「抛错」+「<code>readState</code> 仍为 null」</td></tr>
+    <tr><td>选了<b>等于</b>当前提示日</td><td>允许（不构成「早于」）→ 次数 +1</td><td>专项断言 <code>deferCount == 2</code></td></tr>
+    <tr><td>选了<b>往后</b></td><td>正常写入 <code>next_due_at</code>，次数 +1，原因落 <code>handle_note</code></td><td>专项断言</td></tr>
+    <tr><td>已延到 10 天后，再延到 3 天后</td><td><b>被拒</b>——基准是 <code>next_due_at</code>，不是原到期日</td><td>专项断言「抛错」</td></tr>
+  </table>
+
+  <div class="self">
+    <b>为什么校验必须放数据层</b>：UI 只是入口，数据层才是<b>唯一能保证这条规矩成立的地方</b>。只在 UI 拦的话，任何绕过 UI 的调用（语音、备份恢复、将来的批量操作）都能把提示时间往回拉。
+  </div>
+
+  <div class="ok">
+    <b>UI 侧也做了</b>：日期选择器 <code>firstDate</code> 直接设在「当前下一次提示日」→ 用户<b>挑不到</b>更早的日子（不是挑完再被驳回）；「延到明天」在会构成回拉时<b>禁用</b>并写明「早于当前提示日」。
+  </div>
+</div>
+
+<div class="card">
+  <h2>五、写边界 —— 未破，且加严</h2>
+
+  <div class="meta">
+    <b>本批的关键设计决策</b>：概览区（<code>overview_page.dart</code> + <code>schedule_tab_view.dart</code>）<b>不持任何写口</b>，只持三个<b>回调</b>：<code>onCreateReminder</code> / <code>onEditReminder</code> / <code>onDeleteReminder</code>。写操作由<b>组合根</b> <code>home_page.dart</code> 执行——那里的角色本来就是持有仓储并分发调用。
+  </div>
+
+  <p>这与概览页已有的 <code>onOpenReport</code> / <code>onOpenDomain</code> 是<b>同一个模式</b>：概览区负责<b>表达意图</b>，组合根负责<b>执行</b>。</p>
+
+  <table>
+    <tr><th style="width:210px">元宝批过的四锁</th><th>本批状态</th></tr>
+    <tr><td>概览只读账</td><td>✅ 未破。概览区的两个文件都不出现 <code>InventoryRepository</code> / <code>InventoryDatabase</code> / <code>ReminderRepository</code> / <code>ReminderEditor</code>（源码级锁，剥注释后查）。</td></tr>
+    <tr><td>日报导出只读</td><td>✅ 未破。本批没动日报导出链路。</td></tr>
+    <tr><td>概览页不持仓储类型</td><td>✅ <b>未动一个字</b>——正因为用了回调方案，这条锁不需要改。</td></tr>
+    <tr><td>写待办不改账</td><td>✅ 未破。勾选仍只写 <code>todo_states</code>。</td></tr>
+  </table>
+
+  <h3>新增一条更严的锁</h3>
+  <pre><code>test('裁定⑤ 概览区不持写口（源码级：概览区任一文件都不许有写接口类型）', () {
+  for (final path in const &lt;String&gt;[
+    'lib/ui/overview_page.dart',
+    'lib/ui/schedule_tab_view.dart',
+  ]) {
+    final src = _codeOnly(path);
+    for (final bad in writePorts) {   // 4 个写接口类型
+      expect(src.contains(bad), isFalse);
+    }
+  }
+});</code></pre>
+  <p>还补了一条「组合根才是持写口的地方」的反向锁——将来谁把写口挪进概览区，测试立刻红。</p>
+</div>
+
+<div class="card">
+  <h2>六、自曝：本批做的两个判断 + 三条待裁示</h2>
+
+  <div class="self">
+    <b>自曝 1 · 修了两处源码级锁的口径缺陷</b>（v43 / v44）。<br>
+    原实现直接 <code>readAsStringSync()</code> 全文匹配 —— <b>注释里提到类型名就误报</b>。
+    实际后果：本批我在注释里写「数据层还会再校验一次（见 <code>InventoryDatabase.defer</code>）」，锁就红了。<br>
+    <b>问题不在我的注释，在锁测错了东西</b>：它测的是「文档用词」，不是「能力边界」——
+    逼着写注释的人绕着某个词说话，真正的边界反而没人管。<br>
+    <b>改法</b>：与 v41 同款 <code>codeOnly()</code>（剥注释行后再查）+ 补反向锁。<b>改的是测法，不是放宽标准</b>——锁的禁止清单一个字没减，还多了一条。
+  </div>
+
+  <div class="self">
+    <b>自曝 2 · 裁定③的实现方式变了（口径不变）</b>。<br>
+    批次 2 里「日程签不碰提醒交互」靠给 <code>_TodoEntryRow</code> 传 <code>showActions: false</code> 实现。
+    批次 3 日程签拆成独立组件后，这个参数<b>恒为 true</b>（已无第二个调用点）→ 删掉它，
+    改为<b>从设计上就没有</b>延期/备注按钮。<br>
+    裁定③说「勾选保留，只去延期/备注」——勾选保留（写 <code>todo_states</code>），延期/备注<b>整个组件里都不存在</b>。<b>口径比原来更硬</b>。
+  </div>
+
+  <h3>三条待元宝裁示 / 追认</h3>
+  <table>
+    <tr><th style="width:44px">#</th><th style="width:230px">事项</th><th>buddy 的处理与理由</th></tr>
+    <tr>
+      <td><b>1</b></td>
+      <td><b>系统类提前量用「显式覆盖」而非改推导表</b></td>
+      <td>见第二节。理由：改推导表会连带把日程类高优先级从 3 天改成 2 天（越权改裁定②）。<b>请确认「优先级与提前量解耦」这个处理方式可接受</b>，或直接裁「日程类高优先级也统一改成 2 天」（那我会去改推导表）。</td>
+    </tr>
+    <tr>
+      <td><b>2</b></td>
+      <td><b>重复规则只存不展开</b></td>
+      <td>设了「每周」到期后<b>不会自动滚出下一条</b>。要展开得先定语义：<b>（甲）</b>完成后自动新建一条下一实例（保留历史）<b>（乙）</b>改 <code>due_at</code> 滚到下一期（不留历史）。<b>（甲）</b>更符合「已完成要留着，日报看得到今天做完了什么」这条既有口径，但会让 <code>reminders</code> 行数增长。<b>请裁一个</b>，我下一批做。</td>
+    </tr>
+    <tr>
+      <td><b>3</b></td>
+      <td><b>概览区用回调而非写口</b></td>
+      <td>见第五节。这是让元宝批过的「概览页不持仓储类型」<b>一个字都不用改</b>的方案。代价：概览区不能<b>直接</b>发起写操作，必须经组合根回调——多一层间接。<b>请确认这个方案</b>；若元宝更希望概览区直接持窄写口（<code>ReminderEditor</code>），我改，但那条锁要相应放宽到「只禁账类写口」。</td>
+    </tr>
+  </table>
+</div>
+
+<div class="card">
+  <h2>七、测试与版本</h2>
+
+  <h3>测试</h3>
+  <ul class="chk">
+    <li><b>568/568 全绿</b>（批次 2 是 549/549，本批 +19 净增）。</li>
+    <li><b>461 条旧测试一条未删</b>（红线守住）。</li>
+    <li>本批只动了 <b>1 条旧断言</b>：v43 的「裁定⑤ 日程签不挂提醒交互」——断言对象从「概览页传 <code>showActions: false</code>」升级为「日程签组件不含延期/备注按钮 + 含 <code>markDone</code>」（<b>行数不变、意图更严</b>）；同文件另一条改为剥注释口径。两条都是<b>改断言保行数</b>，没删。</li>
+    <li>新增 <code>test/v44_schedule_tab_test.dart</code>（<b>18 条</b>）：两条裁定 8 条 + 批次 3 五项 7 条 + 写边界 3 条。</li>
+    <li><code>flutter analyze</code>：<b>0 error / 0 warning</b>（剩 6 条项目级 <code>material.dart</code> deprecation info，全项目既有）。</li>
+  </ul>
+
+  <h3>版本</h3>
+  <ul>
+    <li>versionCode <b>25 已占用未出包</b>（批次 5 出包）；<b>26</b> 留给下一版。versionCode 链未跳号。</li>
+    <li><b>schema 未变</b>：仍是 v13，仍是 9 张表，<code>reminders</code> 仍是 10 列（加了 <code>priority</code>），<code>todo_states</code> 仍是 10 列。<b>本批没有新增任何列或表。</b></li>
+    <li>代码已推送：<code>7e038bb</code>（<code>ls-remote</code> 核实为 <code>7e038bbfcdb102f20312d63b2b8e8b5c69e04d61</code>）。</li>
+  </ul>
+
+  <h3>下一批</h3>
+  <ul>
+    <li>批次 4：导航调整（生活区底栏 5→4、日程上移概览层、概览页底栏改双签）+ 旧测试乙方案改写（<b>不改写</b>，按元宝裁的乙方案——改断言保行数）。</li>
+    <li>批次 5：收尾（v13 九表逐表逐列核对 + 出包四道锁 + 上线下载页 + 二维码）。</li>
+  </ul>
+
+  <footer>开发 buddy · 2026-11-26 · V4.1 批次 3 交付（日程签完整交互 + 两条追认裁定修正）· 568/568 全绿</footer>
+</div>
+</div>
+
+<textarea id="src" style="position:fixed;left:-9999px;top:0;opacity:0"></textarea>
+<script>
+  function copyAll() {
+    var t = document.getElementById('src');
+    t.value = document.querySelector('.wrap').innerText;
+    var done = function () {
+      var s = document.getElementById('toast');
+      s.classList.add('on');
+      setTimeout(function () { s.classList.remove('on'); }, 1800);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t.value).then(done, function () { legacy(); });
+    } else { legacy(); }
+  }
+  function legacy() {
+    var t = document.getElementById('src');
+    t.value = document.querySelector('.wrap').innerText;
+    t.focus();
+    t.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    var s = document.getElementById('toast');
+    s.classList.add('on');
+    setTimeout(function () { s.classList.remove('on'); }, 1800);
+  }
+</script>
+</body>
+</html>

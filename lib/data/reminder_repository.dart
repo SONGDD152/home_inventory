@@ -29,6 +29,15 @@ abstract class ReminderRepository {
       {String? title, String? detail, DateTime? dueAt, int? priority});
 
   /// 标记完成 / 取消完成（两态，不硬删——已完成也要留着，日报要看）。
+  ///
+  /// ## V4.1 批次 4：完成带重复规则的日程会**自动新建下一实例**
+  ///
+  /// 元宝裁定②（选甲）：完成后自动新建下一实例、**保留历史**。
+  /// 实现落在数据层（`_expandRepeatingReminder`），所以**无论完成动作
+  /// 从哪个入口来**（本方法 / `TodoStateWriter.markDone`），
+  /// 下一实例都只建一次（幂等查重）。
+  ///
+  /// 撤销完成**不回收**已建的下一实例（排期不回滚）。
   Future<void> setReminderDone(int id, {bool done = true});
 
   /// 软删提醒（进回收站）。

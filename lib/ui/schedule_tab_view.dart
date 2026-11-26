@@ -97,6 +97,24 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   /// 选中的日期（null = 不筛选，显示全部）。
   DateTime? _selectedDay;
 
+  /// 是否隐藏已完成条目（V4.1 批次 4 · 裁定②甲方案的配套）。
+  ///
+  /// **默认 false**（不隐藏）——批次 3 已交付的既有行为一个字没改，
+  /// 用户想清爽时一键收起。
+  bool _hideDone = false;
+
+  /// 该条目的完成态（**`todo_states` 优先**——与日报签同源）。
+  ///
+  /// 状态行不存在时才回落到条目自带的 `done`
+  /// （`reminders.status`；注意勾选流程维护的是 `todo_states`，
+  /// 那一列目前不由勾选写）。
+  bool _isDone(ScheduleTabEntry entry) {
+    final state = widget.statesByKey[
+        TodoAgenda.stateKeyOf(entry.domain, TodoState.entryKeyOf(
+            TodoSourceType.scheduleReminder, entry.reminderId))];
+    return state?.isDone ?? entry.done;
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -106,6 +124,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
         _buildCalendarCard(),
         const SizedBox(height: 12),
         _buildAddButton(),
+        _buildDoneToggle(),
         const SizedBox(height: 8),
         ..._buildTimeline(),
       ],
@@ -245,6 +264,37 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     );
   }
 
+  // ─────────────────────── 历史折叠开关（批次 4）───────────────────────
+
+  /// 「隐藏已完成」开关。
+  ///
+  /// ## 为什么需要它（V4.1 批次 4 · 裁定②甲方案的配套）
+  ///
+  /// 甲方案（完成后自动新建下一实例、**保留历史**）会让 `reminders` 表
+  /// 里**同时存在**当前实例与历史实例。一个「每天」的日程做一周，
+  /// 时间轴上就有 7 条已完成的历史实例 + 1 条当前实例——
+  /// 全铺开就没法看日程了。
+  ///
+  /// 所以给一个开关让用户自己收起。**默认不隐藏**（批次 3 的既有行为
+  /// 一个字没改），想清爽时一键收起；历史**不会丢**，日报里照样看得到。
+  Widget _buildDoneToggle() {
+    if (widget.entries.isEmpty) return const SizedBox.shrink();
+    final doneCount = widget.entries.where(_isDone).length;
+    if (doneCount == 0) return const SizedBox.shrink();
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        key: const Key('schedule_toggle_done'),
+        onPressed: () => setState(() => _hideDone = !_hideDone),
+        icon: Icon(
+          _hideDone ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+          size: 18,
+        ),
+        label: Text(_hideDone ? '显示已完成（$doneCount）' : '隐藏已完成（$doneCount）'),
+      ),
+    );
+  }
+
   // ─────────────────────── 新建 ───────────────────────
 
   /// 新建按钮。
@@ -298,6 +348,8 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     // 按到期日分组（无期限的排最后）。
     final groups = <String, List<ScheduleTabEntry>>{};
     for (final entry in widget.entries) {
+      // 「隐藏已完成」开关生效处（历史实例可折叠）。
+      if (_hideDone && _isDone(entry)) continue;
       if (_selectedDay != null) {
         if (entry.dueAt == null) continue;
         final d = _dayOf(entry.dueAt!);
@@ -348,7 +400,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     final state = widget.statesByKey[
         TodoAgenda.stateKeyOf(entry.domain, TodoState.entryKeyOf(
             TodoSourceType.scheduleReminder, entry.reminderId))];
-    final done = state?.isDone ?? entry.done;
+    final done = _isDone(entry);
     final deferred = !done && (state?.deferCount ?? 0) > 0;
     final editable = widget.editableDomains.contains(entry.domain);
 

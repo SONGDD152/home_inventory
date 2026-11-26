@@ -40,6 +40,21 @@ abstract interface class TodoStateWriter implements TodoStateReader {
   ///
   /// 撤销时清掉 `doneAt`，状态回到 pending；延期次数与备注**不清零**
   /// （那是历史，不是完成态）。
+  ///
+  /// ## V4.1 批次 4：完成**日程类**条目会联动新建下一实例（元宝裁定② · 甲方案）
+  ///
+  /// 重复规则的语义选**甲**：完成后自动新建下一实例、**保留历史**
+  /// （旧实例留在 `reminders` 表里，日报看得到「今天做完了什么」）。
+  ///
+  /// **展开逻辑挂在数据层**（`InventoryDatabase` 内部），不挂 UI 层——
+  /// 因为概览的「日报签」与「日程签」两处勾选**都走本方法**，
+  /// 挂数据层两签天然同源；挂 UI 层要改两处、必然漂移。
+  ///
+  /// 展开只写 `reminders` 表（**日程系统自己的表**），
+  /// 仓储账（items / loans / locations）**一个字不动**——
+  /// 「概览改不了账」这条地基不受影响。
+  ///
+  /// 撤销完成**不回收**已建的下一实例（排期不回滚）。
   Future<void> markDone(String sourceType, int sourceId, {bool done = true});
 
   /// 延期：延期次数 **+1**（按「次」累计，跨天不重置），

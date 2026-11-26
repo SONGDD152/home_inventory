@@ -217,15 +217,6 @@ class _OverviewPageState extends State<OverviewPage>
   Widget build(BuildContext context) {
     return Column(
       children: <Widget>[
-        // 双签：左【日报】右【日程】，默认选中日报签（PM 拍板）。
-        TabBar(
-          key: const Key('overview_tabs'),
-          controller: _tabController,
-          tabs: const <Widget>[
-            Tab(key: Key('overview_tab_report'), text: '日报'),
-            Tab(key: Key('overview_tab_schedule'), text: '日程'),
-          ],
-        ),
         Expanded(
           child: TabBarView(
             controller: _tabController,
@@ -235,7 +226,60 @@ class _OverviewPageState extends State<OverviewPage>
             ],
           ),
         ),
+        // V4.1 批次 4：双签移到**页面底部**（PM 拍板「概览页底栏改双簽」）。
+        _buildBottomTabs(),
       ],
+    );
+  }
+
+  /// V4.1 批次 4：概览页底部的双签（日报 / 日程）。
+  ///
+  /// ## 为什么签条在概览页内部，而不在 HomePage 的 Scaffold 底栏槽
+  ///
+  /// HomePage 的 `Scaffold.bottomNavigationBar` 是给「域内一级模块」用的
+  /// （生活区四模块 / 工作区一模块），概览分区时它是空的。
+  /// 若把双签提到那个槽位，概览页的 [TabBarView] 就得由外部驱动
+  /// → 要改 [OverviewPage] 的公开构造 → 批次 2/3 已交付的
+  /// v43/v44 专项（107 条）里直接 `OverviewPage(...)` 的构造方式全部要改。
+  ///
+  /// 所以双签留在概览页内部、但**位置改到页面底部**：
+  /// - 观感上就是「页面底部一排签」，与生活区底栏同一层；
+  /// - [TabBar] 的 key（`overview_tab_report` / `overview_tab_schedule`）
+  ///   一字不变 → 已交付专项测试的点击路径不受影响；
+  /// - 底部安全区由 [SafeArea] 处理，不依赖外层 Scaffold。
+  ///
+  /// 指示线手绘成**顶部**横线：TabBar 默认把指示线画在 tab 下边缘，
+  /// 移到页面底部后那条线会贴着屏幕底边，不像「选中标记」，
+  /// 反而像误画的边框。
+  Widget _buildBottomTabs() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      child: SafeArea(
+        top: false,
+        child: TabBar(
+          key: const Key('overview_tabs'),
+          controller: _tabController,
+          indicator: BoxDecoration(
+            border: Border(top: BorderSide(color: scheme.primary, width: 3)),
+          ),
+          indicatorSize: TabBarIndicatorSize.tab,
+          labelColor: scheme.primary,
+          unselectedLabelColor: scheme.onSurfaceVariant,
+          tabs: const <Widget>[
+            Tab(
+              key: Key('overview_tab_report'),
+              icon: Icon(Icons.description_outlined),
+              text: '日报',
+            ),
+            Tab(
+              key: Key('overview_tab_schedule'),
+              icon: Icon(Icons.event_note_outlined),
+              text: '日程',
+            ),
+          ],
+        ),
+      ),
     );
   }
 

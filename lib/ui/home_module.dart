@@ -10,17 +10,20 @@ enum ModuleKind {
   /// 仓储主体（物品/位置/借出/回收站那套账）。
   storage,
 
-  /// 日程主体（提醒列表 + 日报）。
-  schedule,
-
   /// 建设中占位（点进去只有一句"建设中"，不做假功能）。
   building,
 }
 
 /// V4.0：域内一级模块（底栏一项）。
 ///
-/// 模块是**按域注册**的：生活区固定五项（PM 拍板，后三项是建设中占位、
+/// 模块是**按域注册**的：生活区固定四项（PM 拍板，后三项是建设中占位、
 /// **不隐藏**）；工作区按需长出（本轮只有工作仓储）。
+///
+/// V4.1 批次 4：生活区由五项减为四项——**「日程」被删掉**。
+/// 日程不是消失，是**上移到概览层**（概览页双签的「日程」签，
+/// 跨域展示 + 可创建/编辑/删除）——见 [ScheduleTabView]。
+/// 底栏那一项曾经指向的 `SchedulePage` 已随之删除（无入口即孤儿页，
+/// 与 V4.0 日报孤儿页同一类问题）。
 class DomainModule {
   const DomainModule({
     required this.id,
@@ -47,8 +50,10 @@ class DomainModule {
 
 /// V4.0：某域的模块注册表。
 ///
-/// 生活区：仓储 / 日程 / 知识库 / 餐饮 / 衣橱 —— **五项固定全显示**，
+/// 生活区：仓储 / 知识库 / 餐饮 / 衣橱 —— **四项固定全显示**，
 /// 后三项点进去是建设中占位（PM 拍板：「未建的不出现」只适用于工作区）。
+///
+/// V4.1 批次 4：**「日程」项已删**——日程上移概览层，不再占生活区底栏。
 ///
 /// 工作区：按需长出 —— 本轮只显示工作仓储；将来加模块自动出现在底栏。
 List<DomainModule> modulesOf(InventoryDomain domain) {
@@ -60,12 +65,6 @@ List<DomainModule> modulesOf(InventoryDomain domain) {
           label: '仓储',
           icon: Icons.inventory_2,
           kind: ModuleKind.storage,
-        ),
-        DomainModule(
-          id: 'schedule',
-          label: '日程',
-          icon: Icons.event_note,
-          kind: ModuleKind.schedule,
         ),
         DomainModule(
           id: 'knowledge',

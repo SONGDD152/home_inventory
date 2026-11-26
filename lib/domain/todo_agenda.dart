@@ -24,6 +24,19 @@ import 'reminder_source.dart';
 ///  2. **延期后的下一次提示日 ≤ 该日末**——手动延到今天的条目；
 ///  3. **处理时间落在该日**——今天勾掉的条目（无论原到期日在哪）。
 ///
+/// ## V4.1 批次 4：第 ⓪ 条（排除历史已完成）
+///
+/// 元宝裁定②选**甲**（完成后自动新建下一实例、**保留历史**）后，
+/// `reminders` 表里会**同时存在**当前实例与历史实例。
+/// 历史实例的原到期日在过去 → 上面第 ① 条会把它判成「逾期」→
+/// 它会**天天挂在催办区里**。
+///
+/// 所以加了一条前置排除：**已完成、且处理时间不在这一天的 → 不进该日催办区**。
+/// 已处理过的事不该继续占催办位；但「今天做完了什么」仍然看得到
+/// （处理时间落在当天 → 进第 ③ 条）。
+///
+/// 这条改在**唯一实现**里，界面与导出**同源**自动生效。
+///
 /// 第 1 条是元宝 B4「到期当天未处理 → 自动延期 → **到期当天再次提示**」
 /// 的直接落地：自动延期把 `next_due_at` 推到明天，但**原到期日不变**，
 /// 所以条目不会因为被延期就从催办区消失——它一直留着，
@@ -70,16 +83,28 @@ class TodoAgenda {
   }) {
     final endOfDay = DateTime(date.year, date.month, date.day, 23, 59, 59)
         .millisecondsSinceEpoch;
+    final dayStart =
+        DateTime(date.year, date.month, date.day).millisecondsSinceEpoch;
+    // ⓪ **已完成、且不是在这一天处理的 → 不进该日催办区**。
+    //
+    // ## 为什么要有这一条（V4.1 批次 4 · 元宝裁定②甲方案的配套）
+    //
+    // 甲方案完成后**保留历史实例**（旧实例留在 `reminders` 表里）。
+    // 历史实例的原到期日在**过去** → 下面第 ① 条会把它判成「逾期」→
+    // 于是它**天天挂在催办区里**，越积越多。
+    //
+    // 那是「未完成条目的留置规则」被套到了「已完成的历史」上——
+    // 得在这里挡掉：已处理过的事不该继续占催办位。
+    //
+    // **处理时间落在当天的仍然进**（日报要看「今天做完了什么」，
+    // 见下面第 ③ 条）。
+    if (doneAt != null && doneAt < dayStart) return false;
     // ① 原到期日 ≤ 该日末（到期当天 / 已逾期）。
     if (sourceDueAt != null && sourceDueAt <= endOfDay) return true;
     // ② 延期后的下一次提示日 ≤ 该日末。
     if (nextDueAt != null && nextDueAt <= endOfDay) return true;
     // ③ 处理时间落在该日（今天勾掉的条目）。
-    if (doneAt != null) {
-      final dayStart =
-          DateTime(date.year, date.month, date.day).millisecondsSinceEpoch;
-      if (doneAt >= dayStart && doneAt <= endOfDay) return true;
-    }
+    if (doneAt != null && doneAt >= dayStart && doneAt <= endOfDay) return true;
     // ④ **提前进区**（元宝裁定②）：到期日还在未来，但已进「提前量」窗口
     //    → 进催办区，不卡到期时刻。
     //

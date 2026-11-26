@@ -5,6 +5,7 @@ import 'package:sqflite/sqflite.dart';
 import 'domain.dart';
 import '../domain/domain_instance.dart';
 import '../domain/reminder_editor.dart';
+import '../domain/repeat_rule.dart';
 import '../domain/todo_state_writer.dart';
 import 'item.dart';
 import 'inventory_repository.dart';
@@ -3260,6 +3261,15 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
       where: '$columnId = ? AND $columnIsDeleted = 0',
       whereArgs: <Object?>[id],
     );
+    // V4.1 批次 4（元宝裁定② · 甲方案）：这里也展开下一实例。
+    //
+    // 理由：「完成一条带重复规则的日程 → 产生下一期」是**数据层不变量**，
+    // 不能取决于调用方走的是哪个入口（`markDone` 走 `todo_states`，
+    // `setReminderDone` 走 `reminders.status`）。
+    // 两条路径都展开，展开逻辑只有一份（幂等查重保证不会建出两条）。
+    if (done) {
+      await _expandRepeatingReminder(db, id);
+    }
   }
 
   @override
@@ -3467,20 +3477,97 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         columnCreatedAt: now,
         columnUpdatedAt: now,
       });
-      return;
+    } else {
+      // 撤销时清 done_at，但**保留** defer_count 与 handle_note——
+      // 那两条是历史，不是完成态。
+      await db.update(
+        tableTodoStates,
+        <String, Object?>{
+          columnStatus: done ? TodoStatus.done : TodoStatus.pending,
+          columnDoneAt: done ? now : null,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[existing[columnId]],
+      );
     }
-    // 撤销时清 done_at，但**保留** defer_count 与 handle_note——
-    // 那两条是历史，不是完成态。
-    await db.update(
-      tableTodoStates,
-      <String, Object?>{
-        columnStatus: done ? TodoStatus.done : TodoStatus.pending,
-        columnDoneAt: done ? now : null,
-        columnUpdatedAt: now,
-      },
-      where: '$columnId = ?',
-      whereArgs: <Object?>[existing[columnId]],
+    // V4.1 批次 4（元宝裁定② · **甲方案**：完成后自动新建下一实例，保留历史）。
+    //
+    // 只在「**完成**日程类条目」时展开；撤销完成**不回收**下一实例
+    // （排期不回滚——用户已经看到过这一期）。
+    if (done && sourceType == TodoSourceType.scheduleReminder) {
+      await _expandRepeatingReminder(db, sourceId);
+    }
+  }
+
+  /// V4.1 批次 4（元宝裁定② · 甲方案）：完成一条带重复规则的日程后，
+  /// 自动新建**下一实例**；旧实例**保留为历史**（日报看得到「今天做完了什么」）。
+  ///
+  /// ## 为什么挂在数据层而不是 UI 层
+  ///
+  /// 概览的「日报签」与「日程签」两处勾选**都走 `TodoStateWriter.markDone`**
+  /// ——展开逻辑挂在数据层，两签天然同源；挂 UI 层要改两处、必然漂移
+  /// （违反元宝「口径唯一实现」铁律）。
+  ///
+  /// ## 幂等
+  ///
+  /// 同一条提醒重复完成、或「完成 → 撤销 → 再完成」，都**只建一次**下一实例——
+  /// 靠「同标题 + 同周期 + 同到期日 + 未软删 + 待办」查重。
+  ///
+  /// ## 写边界
+  ///
+  /// **只写 `reminders` 表**（日程系统自己的表），
+  /// 仓储账（items / loans / locations）**一个字不动**——
+  /// 「概览改不了账」这条地基不受影响。
+  Future<void> _expandRepeatingReminder(Database db, int reminderId) async {
+    final rows = await db.query(
+      tableReminders,
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[reminderId],
+      limit: 1,
     );
+    if (rows.isEmpty) return;
+    final source = Reminder.fromMap(rows.first);
+    final rule = RepeatRule.normalize(source.repeatRule);
+    // 不重复 = 没有下一期。
+    if (rule == null) return;
+    // 无期限提醒没有「下一期」的基准。
+    final dueAt = source.dueAt;
+    if (dueAt == null) return;
+    final next = RepeatRule.advance(
+        DateTime.fromMillisecondsSinceEpoch(dueAt), rule);
+    if (next == null) return;
+    final nextDueAt = next.millisecondsSinceEpoch;
+    // 幂等查重：同标题 + 同周期 + 同到期日 + 未软删 → 已有就不重复建。
+    //
+    // **不查 `status`**：完成态的权威源是 `todo_states`，
+    // `reminders.status` 这一列目前不由勾选流程维护（勾选写 todo_states），
+    // 拿它当查重条件会漏判。
+    final dup = await db.query(
+      tableReminders,
+      where: '$columnTitle = ? AND $columnRepeatRule = ? AND '
+          '$columnReminderDueAt = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[
+        source.title,
+        rule,
+        nextDueAt,
+      ],
+      limit: 1,
+    );
+    if (dup.isNotEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.insert(tableReminders, <String, Object?>{
+      columnTitle: source.title,
+      if (source.detail != null) columnDetail: source.detail,
+      columnReminderDueAt: nextDueAt,
+      columnStatus: reminderStatusPending,
+      columnRepeatRule: rule,
+      // 优先级 / 重复规则 / 标题 / 备注全部继承——下一期是同一件事。
+      columnPriority: source.priority,
+      columnIsDeleted: 0,
+      columnCreatedAt: now,
+      columnUpdatedAt: now,
+    });
   }
 
   @override

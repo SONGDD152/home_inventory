@@ -25,7 +25,6 @@ import 'location_list_page.dart';
 import 'loan_list_page.dart';
 import 'overview_page.dart';
 import 'reminder_edit_dialog.dart';
-import 'schedule_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
@@ -2171,7 +2170,7 @@ class _HomePageState extends State<HomePage> {
   /// V4.0：底栏渲染。
   ///
   /// * 概览页：**没有底栏**（PM 拍板「概览底部不摆」）。
-  /// * 生活区：五项固定（[BottomNavigationBar]，旧版结构不变）。
+  /// * 生活区：四项固定（[BottomNavigationBar]，旧版结构不变）。
   /// * 工作区：按需长出——本轮只有一项，而 Flutter 的 [BottomNavigationBar]
   ///   硬性要求**至少两项**，所以单模块域改用一条按钮底栏
   ///   （不假装有两个 tab，也不空着）。
@@ -2179,13 +2178,44 @@ class _HomePageState extends State<HomePage> {
     if (_section == _TopSection.overview) return null;
     if (modules.length < 2) {
       final module = modules.first;
+      final scheme = Theme.of(context).colorScheme;
+      // V4.1 批次 4：单模块域的底栏做成「**整条可点的一条**」。
+      //
+      // 之前是一个靠左的 [TextButton.icon]，点按区小、位置偏、
+      // 看上去像「一个孤零零的按钮」而不是底栏。现在：
+      // 整条底栏都是点按区，图标 + 文字居中，配主题色
+      // —— 观感与生活区那条多模组底栏（[BottomNavigationBar]）一致。
       return BottomAppBar(
         key: const Key('home_bottom_nav_single'),
-        child: TextButton.icon(
-          key: Key('home_bottom_nav_item_${module.id}'),
-          onPressed: () => _selectModule(0),
-          icon: Icon(module.icon),
-          label: Text(module.label),
+        color: scheme.primaryContainer,
+        elevation: 3,
+        padding: EdgeInsets.zero,
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: InkWell(
+              key: Key('home_bottom_nav_item_${module.id}'),
+              onTap: () => _selectModule(0),
+              child: Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(module.icon, size: 20, color: scheme.onPrimaryContainer),
+                    const SizedBox(width: 8),
+                    Text(
+                      module.label,
+                      style: TextStyle(
+                        color: scheme.onPrimaryContainer,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       );
     }
@@ -2303,12 +2333,6 @@ class _HomePageState extends State<HomePage> {
       switch (_currentModule.kind) {
         case ModuleKind.storage:
           return _storageBody();
-        case ModuleKind.schedule:
-          final repo = _execRepo;
-          return SchedulePage(
-            domain: _domain,
-            reminders: repo is ReminderRepository ? repo as ReminderRepository : null,
-          );
         case ModuleKind.building:
           return BuildingPlaceholderPage(label: _currentModule.label);
       }

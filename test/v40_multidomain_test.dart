@@ -459,13 +459,13 @@ void main() {
     expect(find.text('生活'), findsOneWidget);
     expect(find.text('工作'), findsOneWidget);
 
-    // 生活区底栏五项固定全显示。
+    // 生活区底栏四项固定全显示（V4.1 批次 4：日程上移概览层，5 → 4）。
     final nav = tester.widget<BottomNavigationBar>(
       find.byKey(const Key('home_bottom_nav')),
     );
-    expect(nav.items.length, 5);
+    expect(nav.items.length, 4);
     expect(nav.items[0].label, '仓储');
-    expect(nav.items[4].label, '衣橱');
+    expect(nav.items[3].label, '衣橱');
 
     // 切到工作区：底栏按需长出（本轮只有工作仓储）。
     // Flutter 的 BottomNavigationBar 要求至少两项 → 单模块域用单按钮底栏。

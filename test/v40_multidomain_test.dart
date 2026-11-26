@@ -90,7 +90,7 @@ void main() {
     expect(work.domain.fileName, 'work_inventory.db');
   });
 
-  test('V4.0 工作库首建：八表齐全（与生活库 v11 结构一致）', () async {
+  test('V4.1 工作库首建：九表齐全（与生活库 v12 结构一致）', () async {
     final work = newDb(name: 'work.db');
     await work.open();
     final db = await work.open();
@@ -107,10 +107,12 @@ void main() {
       'loans',
       'reminders',
       'daily_reports',
+      // V4.1：第 9 张表——催办条目状态的唯一权威源。
+      'todo_states',
     ]) {
       expect(names.contains(expected), isTrue, reason: '工作库应含表 $expected');
     }
-    expect(names.length, 8, reason: 'v11 共 8 张表');
+    expect(names.length, 9, reason: 'v12 共 9 张表');
   });
 
   test('V4.0 迁移：生活库 v10→v11 数据零丢失、幂等', () async {
@@ -321,7 +323,7 @@ void main() {
     final life = newDb(name: 'life.db');
     await seed(life, '梯子', 1);
     await life.lendItem('梯子', '张三', quantity: 1);
-    final source = LoanDueReminderSource(life);
+    final source = LoanDueReminderSource(life, InventoryDomain.life);
     final entries = await source.loadEntries();
     expect(entries.length, 1);
     expect(entries.first.title, contains('梯子'));

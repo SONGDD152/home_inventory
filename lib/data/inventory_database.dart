@@ -4,11 +4,13 @@ import 'package:sqflite/sqflite.dart';
 
 import 'domain.dart';
 import '../domain/domain_instance.dart';
+import '../domain/todo_state_writer.dart';
 import 'item.dart';
 import 'inventory_repository.dart';
 import 'normalize.dart';
 import 'reminder.dart';
 import 'reminder_repository.dart';
+import 'todo_state.dart';
 
 /// 家庭仓储数据访问层（三张表：物品 / 位置 / 关联）。
 ///
@@ -20,13 +22,17 @@ import 'reminder_repository.dart';
 /// [databasePath]（测试指向临时文件库，验证重开仍有数据）。
 ///
 /// 这里不解析自然语言；「梯子在哪」的拆分由上层完成，本层只接收精确字段值。
-class InventoryDatabase
-    implements InventoryRepository, ReminderRepository, DomainInstance {
-  /// V4.0：当前库文件的 schema 版本。
+class InventoryDatabase implements InventoryRepository, ReminderRepository,
+    TodoStateWriter, DomainInstance {
+  /// V4.1：当前库文件的 schema 版本。
   ///
-  /// v10 = V3.13（仓储六表）；**v11 = V4.0（加 reminders / daily_reports 两表）**。
-  /// 两域各自独立升级到 v11：生活库走 v10→v11 迁移，工作库新建直接建到 v11。
-  static const int currentSchemaVersion = 11;
+  /// v10 = V3.13（仓储六表）；v11 = V4.0（加 reminders / daily_reports 两表）；
+  /// **v12 = V4.1（加 todo_states 第 9 表）**。
+  /// 两域各自独立升级到 v12：生活库走 v10→v11→v12 迁移，工作库新建直接建到 v12。
+  ///
+  /// v12 迁移只做 `CREATE TABLE IF NOT EXISTS`——**不动任何旧表旧列**，
+  /// 所以旧备份兼容零风险、老代码读路径不变、迁移幂等天然满足。
+  static const int currentSchemaVersion = 12;
 
   /// 生产构造：不暴露任何测试钩子，生产入口 main.dart 用此构造。
   ///
@@ -84,6 +90,13 @@ class InventoryDatabase
   static const String tableReminders = 'reminders';
   static const String tableDailyReports = 'daily_reports';
 
+  /// V4.1：催办条目状态表（第 9 张）。
+  ///
+  /// **所有催办条目状态的唯一权威源**——日程类（reminders）与系统类
+  /// （借出到期，loans 派生）共用同一套完成/延期状态机。
+  /// reminders 表与 loans 表**只读不写状态**。
+  static const String tableTodoStates = 'todo_states';
+
   static const String columnId = 'id';
   static const String columnName = 'name';
   static const String columnItemId = 'item_id';
@@ -126,6 +139,14 @@ class InventoryDatabase
   static const String columnContentMd = 'content_md';
   static const String columnGeneratedAt = 'generated_at';
   static const String columnSourceSnapshot = 'source_snapshot';
+
+  // ── V4.1：todo_states 表列常量 ──
+  // 说明：columnSourceType 复用上方已有的 'source_type'（item_discards 在用，
+  // 同名不同表，sqflite 允许）；这里只补 todo_states 独有的几列。
+  static const String columnSourceId = 'source_id';
+  static const String columnDeferCount = 'defer_count';
+  static const String columnHandleNote = 'handle_note';
+  static const String columnNextDueAt = 'next_due_at';
 
   /// 提醒状态：待办 / 已完成（两态，不硬删——已完成也要留着，日报要看）。
   static const String reminderStatusPending = 'pending';
@@ -315,6 +336,7 @@ class InventoryDatabase
     await _createBorrowTables(db);
     await _createDiscardTables(db);
     await _createReminderTables(db);
+    await _createTodoStateTable(db);
     await _createIndexes(db);
   }
 
@@ -358,6 +380,60 @@ class InventoryDatabase
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_reminders_due '
       'ON $tableReminders($columnDueAt)',
+    );
+  }
+
+  /// V4.1：催办条目状态表（`todo_states`）——**第 9 张表**。
+  ///
+  /// 字段口径（元宝 2026-11-26 裁定）：
+  /// - `id`：自增主键；
+  /// - `source_type`：`schedule_reminder`（日程类）/ `loan_due`（借出到期类）；
+  /// - `source_id`：原表主键（`reminders.id` / `loans.id`）；
+  /// - `status`：`pending` / `done` / `deferred`；
+  /// - `done_at`：处理时间；
+  /// - `defer_count`：延期次数，**按「次」累计，跨天不重置**；
+  /// - `handle_note`：处理备注 / 延期原因；
+  /// - `next_due_at`：延期后的下一次提示时间。
+  ///
+  /// **关于 `next_due_at`（对元宝字段清单的唯一一处增补）**：
+  /// 元宝 B4 要求「到期当天未处理 → 自动延期 → 到期当天再次提示」。
+  /// 「再次提示」的时间点必须有地方存，否则只有两条路——
+  /// ① 去推 `reminders.due_at`：那等于让概览越界写日程表，
+  ///    破了 PM 拍板的「概览只写待办状态」边界；
+  /// ② 用 `defer_count` 反推天数：那「按次累计」就退化成「按天累计」，
+  ///    与 B4「按次累计，非按天」**直接冲突**。
+  /// 所以它是延期机制的必要存储位，**不是**「新催办源」的表结构扩展，
+  /// 不违反「后续加新源只加枚举值、不加表不加列」。
+  ///
+  /// 迁移只用 `CREATE TABLE IF NOT EXISTS`——**不动任何旧表旧列**，
+  /// 幂等天然满足（连跑两次结果一致），旧备份兼容零风险。
+  Future<void> _createTodoStateTable(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableTodoStates (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnSourceType TEXT NOT NULL,
+        $columnSourceId INTEGER NOT NULL,
+        $columnStatus TEXT NOT NULL DEFAULT '${TodoStatus.pending}',
+        $columnDoneAt INTEGER,
+        $columnDeferCount INTEGER NOT NULL DEFAULT 0,
+        $columnHandleNote TEXT,
+        $columnNextDueAt INTEGER,
+        $columnCreatedAt INTEGER NOT NULL,
+        $columnUpdatedAt INTEGER NOT NULL
+      )
+    ''');
+    // 一个源条目只允许有一条状态记录。
+    await db.execute(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_todo_states_source '
+      'ON $tableTodoStates($columnSourceType, $columnSourceId)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_todo_states_status '
+      'ON $tableTodoStates($columnStatus)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_todo_states_next_due '
+      'ON $tableTodoStates($columnNextDueAt)',
     );
   }
 
@@ -639,6 +715,17 @@ class InventoryDatabase
     // 老库没有日程概念 → **不需要任何数据搬迁**，新表建出来是空的。
     if (oldVersion < 11 && newVersion >= 11) {
       await _createReminderTables(db);
+    }
+
+    // v11 → v12：V4.1 催办状态——新建 todo_states 第 9 张表。
+    //
+    // 关键性质：**只 CREATE，不 ALTER**——旧表旧列一个字都不动。
+    // 所以（a）迁移幂等天然满足（连跑两次结果一致）；
+    //     （b）旧备份文件（v11 结构）恢复进 v12 库后读路径不变；
+    //     （c）回滚到 v11 只需把版本号改回去，v11 不认识这张表但也不碰它。
+    // 元宝验收口径同步升级：「工作库八表与 v11 逐表核对」→ **「九表与 v12 逐表核对」**。
+    if (oldVersion < 12 && newVersion >= 12) {
+      await _createTodoStateTable(db);
     }
   }
 
@@ -2418,6 +2505,10 @@ class InventoryDatabase
       tableReminders: await db.query(tableReminders, orderBy: '$columnId ASC'),
       tableDailyReports:
           await db.query(tableDailyReports, orderBy: '$columnId ASC'),
+      // V4.1：催办状态一并导出——否则恢复后「已完成/已延期/延期 N 次/备注」全丢，
+      // 日报签与日程签会回到"什么都没处理过"的状态。
+      tableTodoStates:
+          await db.query(tableTodoStates, orderBy: '$columnId ASC'),
     };
   }
 
@@ -2485,11 +2576,22 @@ class InventoryDatabase
     final reportMaps = data.containsKey(tableDailyReports)
         ? _rowsOf(data, tableDailyReports)
         : <Map<String, Object?>>[];
+    // V4.1：催办状态一并恢复（v11 及更早的备份没有这张表 → 按空表处理，
+    // 语义天然对齐：老版本本来就没有「催办条目状态」这个概念）。
+    final todoStateMaps = data.containsKey(tableTodoStates)
+        ? _rowsOf(data, tableTodoStates)
+        : <Map<String, Object?>>[];
 
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
       // 清空顺序：先子表后主表，避免外键/索引干扰。
+      // V4.1：todo_states 表是 v12 才加的，老库（未升级）可能还不存在
+      // → 操作前先守卫，不能让「no such table」打挂整个恢复流程。
+      final hasTodoStates = await _tableExists(txn, tableTodoStates);
+      if (hasTodoStates) {
+        await txn.delete(tableTodoStates);
+      }
       await txn.delete(tableDailyReports);
       await txn.delete(tableReminders);
       await txn.delete(tableItemDiscards);
@@ -2521,6 +2623,11 @@ class InventoryDatabase
       }
       for (final row in reportMaps) {
         await txn.insert(tableDailyReports, DailyReport.fromMap(row).toMap());
+      }
+      if (hasTodoStates) {
+        for (final row in todoStateMaps) {
+          await txn.insert(tableTodoStates, TodoState.fromMap(row).toMap());
+        }
       }
       // V3.11（元宝批复第 8 条）：恢复收口统一走 _syncItemTotal，
       // 禁止另写一套重算逻辑（两套迟早漂移）。
@@ -3186,5 +3293,226 @@ class InventoryDatabase
       columnGeneratedAt: now,
       if (sourceSnapshot != null) columnSourceSnapshot: sourceSnapshot,
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // V4.1：TodoStateWriter 实现（只写待办条目状态，不碰任何账目）
+  // ─────────────────────────────────────────────────────────────
+
+  /// 自然日对齐：把毫秒时间戳折算到当天 00:00。
+  ///
+  /// 「过期」判定必须按**日期**比，不能按时刻比——
+  /// 若按时刻比，「今天 10:00 到期」在今天 20:00 就会被判为过期，
+  /// 而元宝 B4 的语义是「**到期当天**未处理才自动延期」，
+  /// 当天没过期就不该推进。
+  static int _dateOnly(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    return DateTime(d.year, d.month, d.day).millisecondsSinceEpoch;
+  }
+
+  /// 取催办源条目的原始到期时间；源条目不存在 / 已删 / 已还清 → null。
+  Future<int?> _sourceDueAt(
+      DatabaseExecutor db, String sourceType, int sourceId) async {
+    if (sourceType == TodoSourceType.scheduleReminder) {
+      final rows = await db.query(
+        tableReminders,
+        columns: <String>[columnReminderDueAt],
+        where: '$columnId = ? AND $columnIsDeleted = 0',
+        whereArgs: <Object?>[sourceId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return (rows.first[columnReminderDueAt] as num?)?.toInt();
+    }
+    if (sourceType == TodoSourceType.loanDue) {
+      final rows = await db.query(
+        tableLoans,
+        columns: <String>[columnDueAt],
+        where: '$columnId = ? AND $columnIsDeleted = 0 '
+            'AND $columnReturnedQty < $columnQuantity',
+        whereArgs: <Object?>[sourceId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return (rows.first[columnDueAt] as num?)?.toInt();
+    }
+    return null;
+  }
+
+  /// 读某条催办条目的状态行（null = 还没有状态记录）。
+  Future<Map<String, Object?>?> _readTodoStateRow(DatabaseExecutor db,
+      String sourceType, int sourceId) async {
+    final rows = await db.query(
+      tableTodoStates,
+      where: '$columnSourceType = ? AND $columnSourceId = ?',
+      whereArgs: <Object?>[sourceType, sourceId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first;
+  }
+
+  @override
+  Future<TodoState?> readState(String sourceType, int sourceId) async {
+    final db = await open();
+    final row = await _readTodoStateRow(db, sourceType, sourceId);
+    if (row == null) return null;
+    return TodoState.fromMap(row);
+  }
+
+  @override
+  Future<List<TodoState>> loadStates() async {
+    final db = await open();
+    final rows = await db.query(tableTodoStates, orderBy: '$columnId ASC');
+    return rows.map(TodoState.fromMap).toList();
+  }
+
+  @override
+  Future<void> markDone(String sourceType, int sourceId,
+      {bool done = true}) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final existing = await _readTodoStateRow(db, sourceType, sourceId);
+    if (existing == null) {
+      await db.insert(tableTodoStates, <String, Object?>{
+        columnSourceType: sourceType,
+        columnSourceId: sourceId,
+        columnStatus: done ? TodoStatus.done : TodoStatus.pending,
+        columnDoneAt: done ? now : null,
+        columnDeferCount: 0,
+        columnCreatedAt: now,
+        columnUpdatedAt: now,
+      });
+      return;
+    }
+    // 撤销时清 done_at，但**保留** defer_count 与 handle_note——
+    // 那两条是历史，不是完成态。
+    await db.update(
+      tableTodoStates,
+      <String, Object?>{
+        columnStatus: done ? TodoStatus.done : TodoStatus.pending,
+        columnDoneAt: done ? now : null,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[existing[columnId]],
+    );
+  }
+
+  @override
+  Future<void> defer(String sourceType, int sourceId,
+      {String? reason, int days = 1}) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final existing = await _readTodoStateRow(db, sourceType, sourceId);
+    // 基准：已有 next_due_at 就从它往后推，否则从源条目的原到期日往后推。
+    final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??
+        await _sourceDueAt(db, sourceType, sourceId) ??
+        now;
+    final newNext = DateTime.fromMillisecondsSinceEpoch(anchor)
+        .add(Duration(days: days))
+        .millisecondsSinceEpoch;
+    final count = ((existing?[columnDeferCount] as num?)?.toInt() ?? 0) + 1;
+    if (existing == null) {
+      await db.insert(tableTodoStates, <String, Object?>{
+        columnSourceType: sourceType,
+        columnSourceId: sourceId,
+        columnStatus: TodoStatus.deferred,
+        columnDeferCount: count,
+        columnHandleNote: reason,
+        columnNextDueAt: newNext,
+        columnCreatedAt: now,
+        columnUpdatedAt: now,
+      });
+      return;
+    }
+    await db.update(
+      tableTodoStates,
+      <String, Object?>{
+        columnStatus: TodoStatus.deferred,
+        columnDeferCount: count,
+        if (reason != null) columnHandleNote: reason,
+        columnNextDueAt: newNext,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[existing[columnId]],
+    );
+  }
+
+  @override
+  Future<void> setNote(String sourceType, int sourceId, String note) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final existing = await _readTodoStateRow(db, sourceType, sourceId);
+    if (existing == null) {
+      await db.insert(tableTodoStates, <String, Object?>{
+        columnSourceType: sourceType,
+        columnSourceId: sourceId,
+        columnStatus: TodoStatus.pending,
+        columnDeferCount: 0,
+        columnHandleNote: note,
+        columnCreatedAt: now,
+        columnUpdatedAt: now,
+      });
+      return;
+    }
+    await db.update(
+      tableTodoStates,
+      <String, Object?>{
+        columnHandleNote: note,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ?',
+      whereArgs: <Object?>[existing[columnId]],
+    );
+  }
+
+  @override
+  Future<int> syncOverdue(DateTime now) async {
+    _guardWrite();
+    final db = await open();
+    final nowMs = now.millisecondsSinceEpoch;
+    final todayMs = _dateOnly(nowMs);
+    final tomorrowMs = todayMs + const Duration(days: 1).inMilliseconds;
+    // 只处理「未完成」的条目：done 的不再提醒；deferred 的还要继续自动推进
+    // （否则「到期当天再次提示」就断了）。
+    final rows = await db.query(
+      tableTodoStates,
+      where: '$columnStatus != ?',
+      whereArgs: <Object?>[TodoStatus.done],
+    );
+    var moved = 0;
+    for (final row in rows) {
+      final sourceType = row[columnSourceType] as String? ?? '';
+      final sourceId = (row[columnSourceId] as num?)?.toInt() ?? 0;
+      final nextDue = (row[columnNextDueAt] as num?)?.toInt();
+      final baseDue = nextDue ?? await _sourceDueAt(db, sourceType, sourceId);
+      if (baseDue == null) continue; // 源条目已不存在 / 已还清 / 已删
+      // 过期判定按**日期**：到期日严格早于今天才算「到期当天未处理」。
+      if (_dateOnly(baseDue) >= todayMs) continue;
+      // 推进到 max(原到期 + 1 天, 明天) → **每天最多自动 +1 次**。
+      final pushed = DateTime.fromMillisecondsSinceEpoch(baseDue)
+          .add(const Duration(days: 1))
+          .millisecondsSinceEpoch;
+      final newNext = pushed < tomorrowMs ? tomorrowMs : pushed;
+      await db.update(
+        tableTodoStates,
+        <String, Object?>{
+          columnStatus: TodoStatus.deferred,
+          columnDeferCount:
+              ((row[columnDeferCount] as num?)?.toInt() ?? 0) + 1,
+          columnNextDueAt: newNext,
+          columnUpdatedAt: nowMs,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[row[columnId]],
+      );
+      moved++;
+    }
+    return moved;
   }
 }

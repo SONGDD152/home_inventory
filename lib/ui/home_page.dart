@@ -13,6 +13,7 @@ import '../domain/domain_hub.dart';
 import '../domain/overview_reader.dart';
 import '../domain/reminder_source.dart';
 import '../domain/reminder_sources.dart';
+import '../domain/todo_state_writer.dart';
 import 'backup_page.dart';
 import 'calibration_page.dart';
 import 'home_module.dart';
@@ -2269,7 +2270,12 @@ class _HomePageState extends State<HomePage> {
             work: widget.hub!.work.repository,
           ),
           sources: _reminderSources(),
+          // V4.1：概览**只写待办状态**（不碰账）——TodoStateWriter 的入参
+          // 只有 sourceType + sourceId，拿不到任何仓储句柄，
+          // 「概览改不了账」在编译期成立。
+          todoWriter: _todoWriter(),
           switchTimeoutCount: widget.hub!.switchTimeoutCount,
+          onOpenDomain: _openDomainSection,
         );
       }
       switch (_currentModule.kind) {
@@ -2289,20 +2295,45 @@ class _HomePageState extends State<HomePage> {
     return _storageBody();
   }
 
+  /// V4.1：待办状态写入口（只写 `todo_states`，不碰账）。
+  ///
+  /// 取当前域的仓储实例——它是 `InventoryDatabase` 时才具备待办写能力；
+  /// 拿不到就退化为只读展示（页面不崩，只是不能打勾）。
+  TodoStateWriter? _todoWriter() {
+    final repo = _execRepo;
+    if (repo is TodoStateWriter) return repo as TodoStateWriter;
+    return null;
+  }
+
+  /// 「去某域建首个位置」——空态引导用（切到目标域的仓储页）。
+  ///
+  /// 复用 [_switchSection] 而不是自己 setState：切域必须走 **DomainHub 的
+  /// 切库守卫**（写闸门 → 等在飞查询收尾 → 换指针 → 解闸），
+  /// 绕开它会留下「UI 显示工作区、数据还指着生活库」的不一致。
+  Future<void> _openDomainSection(InventoryDomain domain) async {
+    await _switchSection(
+      domain == InventoryDomain.life ? _TopSection.life : _TopSection.work,
+    );
+  }
+
   /// V4.0：提醒源注册表（统一 [ReminderSource] 接口，概览代码不因新增源而改）。
+  ///
+  /// V4.1：**域必填**——两个源必须显式声明自己属于哪本账，
+  /// 否则生活区与工作区的源共用同一个 id / displayName，
+  /// 概览拿它当 Map key 时会互相覆盖（V4.0 的 E1 bug）。
   List<ReminderSource> _reminderSources() {
     final hub = widget.hub;
     if (hub == null) return const <ReminderSource>[];
     final lifeRepo = hub.life.repository;
     final workRepo = hub.work.repository;
     final sources = <ReminderSource>[
-      LoanDueReminderSource(lifeRepo),
-      LoanDueReminderSource(workRepo),
+      LoanDueReminderSource(lifeRepo, InventoryDomain.life),
+      LoanDueReminderSource(workRepo, InventoryDomain.work),
     ];
     if (lifeRepo is ReminderRepository) {
       // await 会重置类型提升 → 这里先取一份具体类型再注册。
       final reminders = lifeRepo as ReminderRepository;
-      sources.add(ScheduleReminderSource(reminders));
+      sources.add(ScheduleReminderSource(reminders, InventoryDomain.life));
     }
     return sources;
   }

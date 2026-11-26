@@ -1,4 +1,19 @@
+import 'domain.dart';
 import 'normalize.dart';
+
+/// V4.0：新增提醒（「提醒我明天交周报」「提醒：买牛奶」）。
+///
+/// 与仓储意图完全分开：提醒属于生活域的日程系统，
+/// 不进 items / loans 那套账。
+class ParseReminderAdd extends ParseResult {
+  const ParseReminderAdd({required this.title, this.dueAt});
+
+  /// 提醒标题（已剥掉日期词）。
+  final String title;
+
+  /// 到期日期（本地日期的当天 9:00；没识别出日期则 null = 无期限）。
+  final DateTime? dueAt;
+}
 
 /// 句式解析结果（密封类型）。
 ///
@@ -1323,6 +1338,80 @@ ParseDueChange? _parseDueChange(String text) {
   );
 }
 
+/// V4.0：新增提醒句式（「提醒我明天交周报」「提醒：买牛奶」）。
+///
+/// 守卫位置：排在**录入之前**——「提醒我在阳台放梯子」里的「放」
+/// 不能把提醒句吃掉；但不排最前，「查数量」优先级更高
+/// （「今天还有几个要提醒的」这类句子先被数量守卫拦下）。
+///
+/// 提醒句含「提醒」，不会被借出/归还/废弃/借期这些守卫抢答。
+ParseReminderAdd? _parseReminderAdd(String text) {
+  String? rest;
+  for (final marker in const <String>['提醒我', '提醒:', '记得']) {
+    if (!text.startsWith(marker)) continue;
+    rest = text.substring(marker.length).trim();
+    break;
+  }
+  if (rest == null || rest.isEmpty) return null;
+
+  final due = _extractReminderDue(rest);
+  final title = _stripReminderDateWords(rest).trim();
+  if (title.isEmpty) return null;
+  return ParseReminderAdd(title: title, dueAt: due);
+}
+
+/// 从提醒句里抽出日期词（今天 / 明天 / 后天 / 周X），返回到期时间。
+DateTime? _extractReminderDue(String text) {
+  final now = DateTime.now();
+  final base = DateTime(now.year, now.month, now.day);
+  const offsets = <String, int>{
+    '今天': 0,
+    '今日': 0,
+    '明天': 1,
+    '明日': 1,
+    '后天': 2,
+    '大后天': 3,
+  };
+  for (final entry in offsets.entries) {
+    if (text.contains(entry.key)) {
+      final day = base.add(Duration(days: entry.value));
+      return DateTime(day.year, day.month, day.day, 9);
+    }
+  }
+  const weekdays = <String, int>{
+    '周一': 1,
+    '周二': 2,
+    '周三': 3,
+    '周四': 4,
+    '周五': 5,
+    '周六': 6,
+    '周日': 7,
+    '周天': 7,
+  };
+  for (final entry in weekdays.entries) {
+    if (!text.contains(entry.key)) continue;
+    var target = entry.value;
+    final today = base.weekday;
+    if (target <= today) target += 7;
+    final day = base.add(Duration(days: target - today));
+    return DateTime(day.year, day.month, day.day, 9);
+  }
+  return null;
+}
+
+/// 从标题里剥掉日期词（「明天交周报」→「交周报」）。
+String _stripReminderDateWords(String text) {
+  var result = text;
+  const words = <String>[
+    '今天', '今日', '明天', '明日', '后天', '大后天',
+    '周一', '周二', '周三', '周四', '周五', '周六', '周日', '周天',
+  ];
+  for (final word in words) {
+    result = result.replaceAll(word, '');
+  }
+  return result.replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
 /// 把一句中文口语解析成结构化意图。
 ///
 /// 纯函数：只接收一个 String，只调用 [normalizeName]，不碰仓储、数据库、UI。
@@ -1336,7 +1425,91 @@ ParseDueChange? _parseDueChange(String text) {
 /// 所有 V1/V2 语序防线（语气词只剥一层、倒装只剥一层、动词数恰好 1、
 /// 介词吞并防污染）保持不变。
 ParseResult parsePhrase(String input) {
-  var text = normalizeName(input);
+  return _parseNormalized(normalizeName(input));
+}
+
+/// V4.0：语音解析 + **域路由**入口。
+///
+/// 与 [parsePhrase] 的唯一区别：多带一个目标域。
+///  * [targetDomain] 为 null → 落**当前域**（界面当前所在的账）。
+///  * [targetDomain] 非 null → 落**那一本账**，但**界面不切域**
+///    （语音是操作指令，不是导航指令——说「工作区放梯子在书房」，
+///      梯子进工作库，界面还停在生活区）。
+///
+/// 旧的 [parsePhrase] 签名与行为**一字未改**——既有解析器测试原样通过。
+ParseEnvelope parsePhraseEnvelope(String input) {
+  final text = normalizeName(input);
+  final matched = _matchDomainPrefix(text);
+  if (matched != null) {
+    final parsed = _parseNormalized(matched.rest);
+    // 元宝第三轮：域词歧义兜底——「公司团建要用的投影仪」剥掉「公司」后
+    // 解析不出合法意图 → **按原句走**，不吞句、不误落库、不报错。
+    if (parsed is! ParseUnrecognized) {
+      return ParseEnvelope(payload: parsed, targetDomain: matched.domain);
+    }
+  }
+  return ParseEnvelope(payload: _parseNormalized(text), targetDomain: null);
+}
+
+/// V4.0：解析结果 + 目标域。
+class ParseEnvelope {
+  const ParseEnvelope({required this.payload, this.targetDomain});
+
+  /// 解析出的意图（未带域时与 [parsePhrase] 完全一致）。
+  final ParseResult payload;
+
+  /// 目标域（null = 当前域）。
+  final InventoryDomain? targetDomain;
+
+  /// 是否指定了目标域。
+  bool get hasDomain => targetDomain != null;
+}
+
+/// V4.0：域前缀白名单（可扩展常量表）。
+///
+/// 命中在**解析器入口**处理，不依赖守卫顺序——靠"排在前面"碰运气不是确定性。
+/// 加新域只改这张表，**不改解析器结构**。
+const Map<String, InventoryDomain> _domainPrefixes = <String, InventoryDomain>{
+  '工作区': InventoryDomain.work,
+  '工作仓储': InventoryDomain.work,
+  '公司': InventoryDomain.work,
+  '生活区': InventoryDomain.life,
+  '生活仓储': InventoryDomain.life,
+  '家里': InventoryDomain.life,
+};
+
+/// 域前缀命中结果：命中的域 + 剥掉前缀后的剩余文本。
+class _DomainPrefixMatch {
+  const _DomainPrefixMatch(this.domain, this.rest);
+
+  final InventoryDomain domain;
+  final String rest;
+}
+
+/// 在解析器入口匹配域前缀（[parsePhraseEnvelope] 专用）。
+///
+/// 命中条件：文本以某个域词开头，且域词后面还有内容。
+/// 「公司团建要用的投影仪」会命中「公司」→ rest = "团建要用的投影仪"，
+/// 但它解析不出合法意图 → 上层**按原句走**（域词歧义兜底，元宝第三轮要求）。
+_DomainPrefixMatch? _matchDomainPrefix(String text) {
+  if (text.isEmpty) return null;
+  // 长前缀优先：「工作仓储」必须排在「工作区」前面，避免前缀互相截断。
+  final candidates = _domainPrefixes.keys.toList()
+    ..sort((a, b) => b.length.compareTo(a.length));
+  for (final prefix in candidates) {
+    if (!text.startsWith(prefix)) continue;
+    final rest = text.substring(prefix.length).trim();
+    if (rest.isEmpty) continue; // 只有域词没有内容 → 不算命中。
+    return _DomainPrefixMatch(_domainPrefixes[prefix]!, rest);
+  }
+  return null;
+}
+
+/// 解析器主体（输入已归一化）。
+///
+/// [parsePhrase] 与 [parsePhraseEnvelope] 共用这一份实现——
+/// 域路由只在入口分流，解析逻辑**只有一份**，不会两套行为漂移。
+ParseResult _parseNormalized(String text) {
   if (text.isEmpty) return const ParseUnrecognized();
 
   // V3 显式前缀：「记：」强制录入，「查：」强制查询。
@@ -1385,6 +1558,11 @@ ParseResult parsePhrase(String input) {
   // 「梯子借出几个」含「借」会被借出抢答——先拦下来再说。
   final qtyQuery = _parseQuantityQuery(text);
   if (qtyQuery != null) return qtyQuery;
+  //
+  // V4.0：新增提醒（「提醒我明天交周报」）——排在录入之前，
+  // 免得句中的「放/搁/塞」把提醒句吃掉；不排最前是因为数量查询优先级更高。
+  final reminder = _parseReminderAdd(text);
+  if (reminder != null) return reminder;
   //
   // 为什么改借期排最前：「梯子借期改成5天」含「借」，若先跑借出分支，
   // 会被切成 borrower=梯子 / item=期改成5天 的乱账。

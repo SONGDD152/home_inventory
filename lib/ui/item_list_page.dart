@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
+import '../data/domain.dart';
 import '../data/excel_exporter.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
@@ -24,7 +25,11 @@ class ItemListPage extends StatefulWidget {
     this.gateway,
     this.exporter,
     this.title = '物品明细',
+    this.domain = InventoryDomain.life,
   });
+
+  /// V4.0：这一页属于哪个域（备份/Excel 文件名带域标识）。
+  final InventoryDomain domain;
 
   final InventoryRepository repository;
 
@@ -264,7 +269,7 @@ class _ItemListPageState extends State<ItemListPage> {
     final gateway = widget.gateway ?? SystemBackupGateway();
     setState(() => _busy = true);
     try {
-      final exporter = widget.exporter ?? const ExcelExporter();
+      final exporter = widget.exporter ?? ExcelExporter(domain: widget.domain);
       final activeRows = _rows ?? const <ItemWithLocations>[];
       final deletedRows = await widget.repository.getDeletedItems();
       final loanData = await _loanExportData();
@@ -274,7 +279,7 @@ class _ItemListPageState extends State<ItemListPage> {
           loans: loanData.loans,
           locationByItem: loanData.locationByItem,
           discards: discards);
-      final fileName = exporter.fileNameFor(DateTime.now());
+      final fileName = exporter.fileNameForDomain(DateTime.now(), widget.domain);
       final saved = await gateway.saveBytesToDevice(fileName, bytes);
       if (!mounted) return;
       if (saved == null) {
@@ -306,7 +311,7 @@ class _ItemListPageState extends State<ItemListPage> {
       final loanData = await _loanExportData();
       // V3.12：废弃流水一并导出。
       final discards = await widget.repository.getDiscards(includeRestored: true);
-      final path = await (widget.exporter ?? const ExcelExporter())
+      final path = await (widget.exporter ?? ExcelExporter(domain: widget.domain))
           .writeExcelFile(activeRows, deletedRows,
               loans: loanData.loans,
               locationByItem: loanData.locationByItem,

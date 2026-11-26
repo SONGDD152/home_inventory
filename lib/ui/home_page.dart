@@ -2,16 +2,25 @@
 // Flutter 3.50 将 material.dart 标记为 deprecated，Material 组件本版本仍可用。
 import 'package:flutter/material.dart';
 
+import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/normalize.dart';
 import '../data/phrase_parser.dart';
+import '../data/reminder_repository.dart';
+import '../domain/domain_hub.dart';
+import '../domain/overview_reader.dart';
+import '../domain/reminder_source.dart';
+import '../domain/reminder_sources.dart';
 import 'backup_page.dart';
 import 'calibration_page.dart';
+import 'home_module.dart';
 import 'item_list_page.dart';
 import 'location_list_page.dart';
 import 'loan_list_page.dart';
+import 'overview_page.dart';
+import 'schedule_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
@@ -22,31 +31,35 @@ import 'loan_list_page.dart';
 /// 交互为单入口：一个句式框——「<物品>放<位置>」录入、「<物品>在哪」查询；
 /// parsePhrase 纯函数解析三态，未识别走「没听懂」且零写入；
 /// 归一化由仓储边界负责，UI 不自行预处理文本。
+///
+/// **V4.0 多域**：传入 [hub] 即进入多域形态——顶栏 [概览][生活][工作]、
+/// 底栏按域动态渲染、语音可跨域落库（落目标账、**界面不切域**）。
+/// 不传 [hub] 时是单域形态（生活域），行为与 V3.13 完全一致。
 class HomePage extends StatefulWidget {
   const HomePage({
     super.key,
     required this.repository,
     this.title = '家庭仓储布局',
+    this.hub,
   });
 
   final InventoryRepository repository;
   final String title;
 
+  /// V4.0 域中枢（null = 单域形态）。
+  final DomainHub? hub;
+
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-/// V3.5 五模块底栏导航骨架：一级模块枚举。
-/// 仅仓储（storage）有真实功能；其余四个模块为产品规划中的占位，
-/// 数据层/页面/业务逻辑待后续迭代逐个落地（详见 V35 方案简报事实①）。
-enum _HomeModule {
-  storage('仓储'),
-  schedule('日程'),
-  knowledge('知识库'),
-  dining('餐饮'),
-  wardrobe('衣橱');
+/// V4.0：顶栏三选一（概览 / 生活 / 工作）。
+enum _TopSection {
+  overview('概览'),
+  life('生活'),
+  work('工作');
 
-  const _HomeModule(this.label);
+  const _TopSection(this.label);
   final String label;
 }
 
@@ -58,8 +71,41 @@ class _HomePageState extends State<HomePage> {
   ItemWithLocations? _result;
   bool _busy = false;
 
-  // V3.5 底栏当前模块（0=仓储，默认选中——唯一可用模块）。
-  int _moduleIndex = 0;
+  /// V4.0：当前执行用的仓储。
+  ///
+  /// 默认 = 当前域的仓储；**语音跨域落库时临时指向目标域**，
+  /// 执行完立刻切回（语音是操作指令，不是导航指令——
+  /// 说「工作区放梯子在书房」梯子进工作库，界面还停在生活区）。
+  late InventoryRepository _execRepo;
+
+  /// V4.0：底栏选中模块的 **id**（不是索引——增删模块不会让选中态错位）。
+  String _selectedModuleId = 'storage';
+
+  /// V4.0：顶栏当前分区（概览 / 生活 / 工作）。单域形态恒为生活区。
+  _TopSection _section = _TopSection.life;
+
+  /// 是否多域形态（有 [DomainHub]）。
+  bool get _multiDomain => widget.hub != null;
+
+  /// 当前域（单域形态恒为生活区）。
+  InventoryDomain get _domain =>
+      widget.hub?.currentDomain ?? InventoryDomain.life;
+
+  /// 当前域的仓储（UI 操作用它）。
+  InventoryRepository get _repo => widget.hub?.repository ?? widget.repository;
+
+  /// 当前域的模块注册表（底栏按它渲染）。
+  List<DomainModule> get _modules => modulesOf(_domain);
+
+  /// 当前选中的模块。
+  DomainModule get _currentModule =>
+      moduleById(_domain, _selectedModuleId) ?? _modules.first;
+
+  /// 当前底栏索引（由 id 反查，索引只在渲染时用）。
+  int get _moduleIndex {
+    final index = _modules.indexWhere((m) => m.id == _selectedModuleId);
+    return index < 0 ? 0 : index;
+  }
 
   // V3 交互说明文案（替换 V1 冻结文案，逐字符合文档六）。
   // V3.4：_emptyLocation/_locationAdded 随首页手动添加入口撤下移除
@@ -76,6 +122,20 @@ class _HomePageState extends State<HomePage> {
       '已更新：$item → $location（原位置：$previous）';
 
   @override
+  void initState() {
+    super.initState();
+    _execRepo = _repo;
+  }
+
+  @override
+  void didUpdateWidget(covariant HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.repository != widget.repository) {
+      _execRepo = _repo;
+    }
+  }
+
+  @override
   void dispose() {
     _phraseController.dispose();
     super.dispose();
@@ -84,7 +144,11 @@ class _HomePageState extends State<HomePage> {
   /// 句式主入口：parsePhrase 解析 → 三态分支。原文作为 rawText 落库。
   Future<void> _submitPhrase() async {
     final rawText = _phraseController.text;
-    final parsed = parsePhrase(rawText);
+    // V4.0：语音解析 + **域路由**（域前缀白名单在解析器入口处理）。
+    // 命中域前缀 → 落那一本账，**界面不切域**。
+    final envelope = parsePhraseEnvelope(rawText);
+    final parsed = envelope.payload;
+    final targetDomain = envelope.targetDomain;
 
     if (parsed is ParseUnrecognized) {
       // V3.7：未识别不再静默失败——若解析器有意图猜测，弹确认框展示
@@ -98,7 +162,19 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // V4.0：跨域能力检查——目标域没有这个能力时**明确报错并给引导按钮**，
+    // **不默默记到当前域**（否则用户以为记到工作区，其实记到生活区了）。
+    if (targetDomain != null && !_supportsIntent(targetDomain, parsed)) {
+      await _showCrossDomainGuidance(targetDomain, parsed);
+      return;
+    }
+
     setState(() => _busy = true);
+    // 跨域落库：临时把执行目标指向目标域；执行完立刻切回当前域。
+    final previousRepo = _execRepo;
+    if (targetDomain != null) {
+      _execRepo = widget.hub!.repositoryOf(targetDomain);
+    }
     try {
       if (parsed is ParseQuantityQuery) {
         // PM 2026-11-25 真机新增：「梯子有几个」回在库/在借/一共。
@@ -122,6 +198,9 @@ class _HomePageState extends State<HomePage> {
       } else if (parsed is ParseRestore) {
         // V3.9：恢复（「恢复梯子」）——同名则合并数量。
         await _handleRestore(parsed);
+      } else if (parsed is ParseReminderAdd) {
+        // V4.0：新增提醒（「提醒我明天交周报」）。
+        await _handleReminderAdd(parsed);
       } else if (parsed is ParseAmbiguous) {
         // V3.9：歧义（「梯子不要了放阳台」）——弹框让用户选意图，不替他猜。
         await _handleAmbiguous(parsed);
@@ -136,7 +215,75 @@ class _HomePageState extends State<HomePage> {
         _notice = _notUnderstood;
         _result = null;
       });
+    } finally {
+      // 执行完切回当前域的执行目标（界面不切域，数据已落到目标账）。
+      _execRepo = previousRepo;
     }
+  }
+
+  /// V4.0：目标域是否支持这条意图（**域能力开关**）。
+  ///
+  /// 仓储意图两个域都支持；提醒/日程类只生活域开放（工作域本轮不做）。
+  bool _supportsIntent(InventoryDomain domain, ParseResult parsed) {
+    if (parsed is ParseReminderAdd) {
+      return domainSupports(domain, DomainCapability.reminders);
+    }
+    return true;
+  }
+
+  /// V4.0：跨域落库被能力拦住时的提示——**带引导按钮**。
+  ///
+  /// 文案按元宝批复写死：「工作区暂不支持提醒，是否切换到生活区创建？」。
+  /// 点【切换到生活区】→ 切域并**预填**该条提醒，用户接着就能保存。
+  Future<void> _showCrossDomainGuidance(
+      InventoryDomain domain, ParseResult parsed) async {
+    final title = parsed is ParseReminderAdd ? parsed.title : '';
+    final life = InventoryDomain.life;
+    final shouldSwitch = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('cross_domain_dialog'),
+        title: const Text('该区域暂不支持这项操作'),
+        content: Text('${domain.label}暂不支持提醒，\n是否切换到${life.label}创建？'),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('cross_domain_cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('cross_domain_switch'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text('切换到${life.label}'),
+          ),
+        ],
+      ),
+    );
+    if (shouldSwitch != true || !mounted) return;
+    await _switchSection(_TopSection.life);
+    if (!mounted) return;
+    if (title.isNotEmpty) {
+      _phraseController.text = '提醒我$title';
+      setState(() {});
+    }
+  }
+
+  /// V4.0：新增提醒落库（走目标域的提醒能力）。
+  Future<void> _handleReminderAdd(ParseReminderAdd parsed) async {
+    final repo = _execRepo;
+    if (repo is! ReminderRepository) {
+      _show('该区域暂不支持提醒');
+      return;
+    }
+    // await 会重置 Dart 的类型提升 → 这里显式取一份具体类型再调。
+    final reminders = repo as ReminderRepository;
+    await reminders.addReminder(parsed.title, dueAt: parsed.dueAt);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _notice = '已加提醒：${parsed.title}';
+      _result = null;
+    });
   }
 
   /// V3.7：未识别且解析器有猜测时，弹确认框展示意图并给句式引导。
@@ -175,7 +322,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _handleQuery(String item) async {
-    final found = await widget.repository.findByName(item);
+    final found = await _execRepo.findByName(item);
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -189,9 +336,9 @@ class _HomePageState extends State<HomePage> {
   /// 回三口径：在库几个、在借几个、一共几个。与「梯子在哪」（查位置）
   /// 分开，后者仍回位置列表。没记录过则明确说没有记录，与没听懂分开。
   Future<void> _handleQuantityQuery(String item) async {
-    final info = await widget.repository.getQuantityInfo(item);
+    final info = await _execRepo.getQuantityInfo(item);
     if (!mounted) return;
-    final found = await widget.repository.findByName(item);
+    final found = await _execRepo.findByName(item);
     if (!mounted) return;
     if (found == null || (info.stock == 0 && info.lent == 0)) {
       setState(() {
@@ -242,9 +389,9 @@ class _HomePageState extends State<HomePage> {
     }
 
     // 放置动词 + 带数量：只覆盖/累加目标位置，其他位置保持不动。
-    final locationId = await widget.repository.addLocation(location);
+    final locationId = await _execRepo.addLocation(location);
     if (!mounted) return;
-    final result = await widget.repository.upsertItemLocation(
+    final result = await _execRepo.upsertItemLocation(
       item,
       locationId,
       rawText: rawText,
@@ -252,7 +399,7 @@ class _HomePageState extends State<HomePage> {
       additive: additive,
     );
     if (!mounted) return;
-    final info = await widget.repository.getQuantityInfo(item);
+    final info = await _execRepo.getQuantityInfo(item);
     if (!mounted) return;
     final nameInDb = await _locationName(locationId);
     if (!mounted) return;
@@ -276,13 +423,13 @@ class _HomePageState extends State<HomePage> {
   /// 弹窗问「从哪个位置挪」（元宝批复：没说位置就问，不静默猜）。
   Future<void> _handleMove(ParseUpsert parsed, String rawText) async {
     final item = parsed.item;
-    final toId = await widget.repository.addLocation(parsed.location);
+    final toId = await _execRepo.addLocation(parsed.location);
     if (!mounted) return;
     final toName = await _locationName(toId);
     if (!mounted) return;
 
     if (!parsed.hasQuantity) {
-      final result = await widget.repository.moveItemWhole(item, toId, rawText: rawText);
+      final result = await _execRepo.moveItemWhole(item, toId, rawText: rawText);
       if (!mounted) return;
       // 放置动词（「放」）的整体挪沿用旧「已更新/已记下」文案（元宝要求
       // 回显须明说整体挪；这里补一句总数不变）。「挪」动词用整体挪专用文案。
@@ -310,7 +457,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     // 部分挪：确定源位置。
-    final found = await widget.repository.findByName(item);
+    final found = await _execRepo.findByName(item);
     if (!mounted) return;
     if (found == null) {
       setState(() {
@@ -351,7 +498,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      await widget.repository.moveItemPartial(
+      await _execRepo.moveItemPartial(
         item, fromId, toId,
         quantity: parsed.quantity,
         rawText: rawText,
@@ -361,7 +508,7 @@ class _HomePageState extends State<HomePage> {
           .where((l) => l.id == fromId)
           .map((l) => l.name)
           .firstOrNull ?? '原位置';
-      final info = await widget.repository.getQuantityInfo(item);
+      final info = await _execRepo.getQuantityInfo(item);
       if (!mounted) return;
       setState(() {
         _busy = false;
@@ -381,7 +528,7 @@ class _HomePageState extends State<HomePage> {
 
   /// V3.11：读某位置的数量（展示用）。
   Future<int> _positionQty(String item, int locationId) async {
-    final found = await widget.repository.findByName(item);
+    final found = await _execRepo.findByName(item);
     return found?.quantityAt(locationId) ?? 0;
   }
 
@@ -393,9 +540,9 @@ class _HomePageState extends State<HomePage> {
   /// 单位置时直接改，不打扰。物品必须已存在。
   Future<void> _handleQuantityOnly(
       String item, int quantity, bool additive) async {
-    final info = await widget.repository.getQuantityInfo(item);
+    final info = await _execRepo.getQuantityInfo(item);
     if (!mounted) return;
-    final exists = await widget.repository.findByName(item);
+    final exists = await _execRepo.findByName(item);
     if (!mounted) return;
     if (exists == null) {
       setState(() {
@@ -447,17 +594,17 @@ class _HomePageState extends State<HomePage> {
   ) async {
     try {
       if (locationId != null) {
-        await widget.repository.setLocationQuantity(
+        await _execRepo.setLocationQuantity(
           item, locationId, quantity,
           additive: additive,
         );
       } else {
-        final info = await widget.repository.getQuantityInfo(item);
+        final info = await _execRepo.getQuantityInfo(item);
         final newStock = additive ? info.stock + quantity : quantity;
-        await widget.repository.setItemQuantity(item, newStock);
+        await _execRepo.setItemQuantity(item, newStock);
       }
       if (!mounted) return;
-      final info = await widget.repository.getQuantityInfo(item);
+      final info = await _execRepo.getQuantityInfo(item);
       if (!mounted) return;
       setState(() {
         _busy = false;
@@ -483,7 +630,7 @@ class _HomePageState extends State<HomePage> {
     int quantity,
     bool additive,
   ) async {
-    final found = await widget.repository.findByName(item);
+    final found = await _execRepo.findByName(item);
     if (!mounted) return null;
     if (found == null) return null;
     final locs = found.locations;
@@ -551,7 +698,7 @@ class _HomePageState extends State<HomePage> {
     try {
       // V3.11：物品在多个位置时，弹窗问「从哪个位置借」（元宝批复口径②）。
       int? fromLocationId;
-      final found = await widget.repository.findByName(parsed.item);
+      final found = await _execRepo.findByName(parsed.item);
       if (!mounted) return;
       if (found != null && found.locations.length > 1) {
         fromLocationId = await _pickLocation(
@@ -570,7 +717,7 @@ class _HomePageState extends State<HomePage> {
           return;
         }
       }
-      final loan = await widget.repository.lendItem(
+      final loan = await _execRepo.lendItem(
         parsed.item,
         parsed.borrower,
         quantity: parsed.quantity,
@@ -582,7 +729,7 @@ class _HomePageState extends State<HomePage> {
       final where = await _itemLocationSuffix(loan.itemName);
       if (!mounted) return;
       // V3.10：回显剩余可借数，用户能立刻知道账面对不对。
-      final info = await widget.repository.getQuantityInfo(loan.itemName);
+      final info = await _execRepo.getQuantityInfo(loan.itemName);
       if (!mounted) return;
       final rest = info.available > 0 ? '，还剩 ${info.available} 个在家' : '';
       setState(() {
@@ -608,7 +755,7 @@ class _HomePageState extends State<HomePage> {
   /// 取物品明细页同一份数据（当前未删位置），位置多时用「、」并列。
   /// 返回可直接拼在提示末尾的后缀，如「 · 在阳台」。
   Future<String> _itemLocationSuffix(String itemName) async {
-    final all = await widget.repository.getAllItemsWithLocations();
+    final all = await _execRepo.getAllItemsWithLocations();
     if (!mounted) return '';
     final key = normalizeName(itemName);
     final hit = all.where((i) => i.item.name == key).firstOrNull;
@@ -634,7 +781,7 @@ class _HomePageState extends State<HomePage> {
   ///  ③ 句中没指名且有多笔未还清 → 弹候选框让用户点是谁还的，
   ///     绝不静默记账；同时提示可说「还了1个梯子给张三」。
   Future<void> _handleReturn(ParseReturn parsed) async {
-    final loans = await widget.repository.getAllLoans();
+    final loans = await _execRepo.getAllLoans();
     if (!mounted) return;
     final key = normalizeName(parsed.item);
     final outstanding = loans
@@ -703,11 +850,11 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     int? toLocationId;
     if (newLocation != null) {
-      toLocationId = await widget.repository.addLocation(newLocation);
+      toLocationId = await _execRepo.addLocation(newLocation);
       if (!mounted) return;
     }
     // 归还数量直接加到目标位置（未指定则加主位置），不软删其他位置。
-    await widget.repository.returnLoan(
+    await _execRepo.returnLoan(
       hit.id!,
       quantity: requestedQty,
       toLocationId: toLocationId,
@@ -717,7 +864,7 @@ class _HomePageState extends State<HomePage> {
     var where = await _itemLocationSuffix(hit.itemName);
     if (!mounted) return;
     if (newLocation != null) where = ' · 在$newLocation';
-    final info = await widget.repository.getQuantityInfo(hit.itemName);
+    final info = await _execRepo.getQuantityInfo(hit.itemName);
     if (!mounted) return;
     final stockText = '，家里现在 ${info.stock} 个';
     setState(() {
@@ -792,7 +939,7 @@ class _HomePageState extends State<HomePage> {
   ///
   /// 返回 null = 用户点「先不改」，沿用原位置；否则返回要挪到的位置名。
   Future<String?> _askReturnLocation(String item) async {
-    final locations = await widget.repository.getAllLocations();
+    final locations = await _execRepo.getAllLocations();
     if (!mounted) return null;
     final names = <String>{
       for (final loc in locations)
@@ -950,7 +1097,7 @@ class _HomePageState extends State<HomePage> {
   /// 不是禁止。确认框里明说会先归还给谁，不搞黑箱。
   Future<void> _handleDiscard(ParseDiscard parsed) async {
     final key = normalizeName(parsed.item);
-    final all = await widget.repository.getAllItemsWithLocations();
+    final all = await _execRepo.getAllItemsWithLocations();
     if (!mounted) return;
     // V3.9.1 真机打回（PM 场景②）：精确优先，找不到再按词根兜底——
     // 历史脏数据把物品建成「梯子借」，用户说「梯子」也要能命中它。
@@ -960,7 +1107,7 @@ class _HomePageState extends State<HomePage> {
       hits = all.where((i) => itemNamesMatch(i.item.name, key)).toList(growable: false);
     }
     if (hits.isEmpty || hits.first.item.id == null) {
-      final deleted = await widget.repository.getDeletedItems();
+      final deleted = await _execRepo.getDeletedItems();
       if (!mounted) return;
       final inTrash = deleted
           .where((i) => i.item.name == key || itemNamesMatch(i.item.name, key))
@@ -994,7 +1141,7 @@ class _HomePageState extends State<HomePage> {
 
     // 借出中的物品：先自动归还（PM 拍板）。
     // 按物品名匹配未还清借出（语音本来就是按名字说的，不依赖 item_id 一致性）。
-    final loans = await widget.repository.getAllLoans();
+    final loans = await _execRepo.getAllLoans();
     if (!mounted) return;
     final sameItem = loans
         .where((l) => itemNamesMatch(l.itemName, key) && !l.isReturned)
@@ -1091,7 +1238,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     for (final loan in toReturn) {
-      await widget.repository.returnLoan(
+      await _execRepo.returnLoan(
         loan.id!,
         quantity: loan.quantity - loan.returnedQty,
       );
@@ -1099,7 +1246,7 @@ class _HomePageState extends State<HomePage> {
     for (final target in targets) {
       final targetId = target.item.id;
       if (targetId == null) continue;
-      await widget.repository.deleteItem(targetId);
+      await _execRepo.deleteItem(targetId);
     }
     if (!mounted) return;
     final others = untouched
@@ -1147,7 +1294,7 @@ class _HomePageState extends State<HomePage> {
         .join('、');
 
     // ---- ① 废在库的，还是废借出去的那笔？ ----
-    final loans = await widget.repository.getAllLoans();
+    final loans = await _execRepo.getAllLoans();
     if (!mounted) return;
     final openLoans = loans
         .where((l) => itemNamesMatch(l.itemName, key) && !l.isReturned)
@@ -1254,12 +1401,12 @@ class _HomePageState extends State<HomePage> {
 
     try {
       if (loanToReturn != null) {
-        await widget.repository.returnLoan(
+        await _execRepo.returnLoan(
           loanToReturn.id!,
           quantity: qty,
         );
       }
-      final outcome = await widget.repository.discardQuantity(
+      final outcome = await _execRepo.discardQuantity(
         primary.item.name,
         qty,
         locationId: locationId,
@@ -1422,7 +1569,7 @@ class _HomePageState extends State<HomePage> {
   /// 回显要说明"并进去了、现在共几个"。
   Future<void> _handleRestore(ParseRestore parsed) async {
     final key = normalizeName(parsed.item);
-    final deleted = await widget.repository.getDeletedItems();
+    final deleted = await _execRepo.getDeletedItems();
     if (!mounted) return;
     // V3.9.1：精确优先，找不到再按词根兜底（历史脏名「梯子借」）。
     var hit = deleted.where((i) => i.item.name == key).firstOrNull;
@@ -1435,7 +1582,7 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    final all = await widget.repository.getAllItemsWithLocations();
+    final all = await _execRepo.getAllItemsWithLocations();
     if (!mounted) return;
     var live = all.where((i) => i.item.name == key).firstOrNull;
     live ??= all.where((i) => itemNamesMatch(i.item.name, key)).firstOrNull;
@@ -1456,7 +1603,7 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    final outcome = await widget.repository.restoreItem(hit.item.id!);
+    final outcome = await _execRepo.restoreItem(hit.item.id!);
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -1473,7 +1620,7 @@ class _HomePageState extends State<HomePage> {
   /// 元宝补充③：已还清的记录不允许改借期，如实提示「这笔已还清，改不了」。
   /// 「缩短」本批不支持（没有催还机制，支持了也无效）。
   Future<void> _handleDueChange(ParseDueChange parsed) async {
-    final loans = await widget.repository.getAllLoans();
+    final loans = await _execRepo.getAllLoans();
     if (!mounted) return;
     var candidates =
         loans.where((l) => !l.isReturned).toList(growable: false);
@@ -1550,7 +1697,7 @@ class _HomePageState extends State<HomePage> {
       });
       return;
     }
-    await widget.repository.updateLoanDue(hit.id!, days);
+    await _execRepo.updateLoanDue(hit.id!, days);
     if (!mounted) return;
     final newDue = hit.borrowedAt + days * 86400000;
     setState(() {
@@ -1689,7 +1836,7 @@ class _HomePageState extends State<HomePage> {
 
   /// 按 id 取仓储中的归一化位置名，回显与入库一致。
   Future<String> _locationName(int id) async {
-    final locations = await widget.repository.getAllLocations();
+    final locations = await _execRepo.getAllLocations();
     return locations
             .where((l) => l.id == id)
             .map((l) => l.name)
@@ -1730,7 +1877,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openCalibration() async {
     final message = await Navigator.of(context).push<String>(
       MaterialPageRoute<String>(
-        builder: (_) => CalibrationPage(repository: widget.repository),
+        builder: (_) => CalibrationPage(repository: _execRepo),
       ),
     );
     if (!mounted || message == null) return;
@@ -1750,7 +1897,11 @@ class _HomePageState extends State<HomePage> {
     if (drawerWasOpen) {
       Navigator.of(context).pop();
     }
-    setState(() => _moduleIndex = index);
+    // V4.0：选中态按 **id** 记（不按索引）——工作区将来加模块时，
+    // 索引会整体错位，按 id 则不会。
+    final modules = _modules;
+    if (index < 0 || index >= modules.length) return;
+    setState(() => _selectedModuleId = modules[index].id);
     if (!drawerWasOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -1760,27 +1911,11 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /// 底栏一级模块图标（V3.5 方案简报）。
-  IconData _moduleIcon(_HomeModule module) {
-    switch (module) {
-      case _HomeModule.storage:
-        return Icons.inventory_2;
-      case _HomeModule.schedule:
-        return Icons.event_note;
-      case _HomeModule.knowledge:
-        return Icons.menu_book;
-      case _HomeModule.dining:
-        return Icons.restaurant;
-      case _HomeModule.wardrobe:
-        return Icons.checkroom;
-    }
-  }
-
   /// 占位模块子项（决策点①A：渲染「建设中」ListTile，
   /// 决策点③：点击仅提示，不进空白假页）。
-  Widget _buildingTile(_HomeModule module) {
+  Widget _buildingTile(DomainModule module) {
     return ListTile(
-      key: Key('drawer_building_${module.name}'),
+      key: Key('drawer_building_${module.id}'),
       leading: const Icon(Icons.construction),
       title: Text('${module.label}（建设中）'),
       subtitle: const Text('该模块规划中，敬请期待'),
@@ -1788,7 +1923,7 @@ class _HomePageState extends State<HomePage> {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            key: Key('building_snackbar_${module.name}'),
+            key: Key('building_snackbar_${module.id}'),
             content: Text('${module.label}模块建设中，敬请期待'),
           ),
         );
@@ -1896,7 +2031,7 @@ class _HomePageState extends State<HomePage> {
                   const SizedBox(height: 4),
                   // V3.5：副标题随当前模块显示（审核意见 7）。
                   Text(
-                    '${_HomeModule.values[_moduleIndex].label}模块',
+                    '${_currentModule.label}模块',
                     key: Key('drawer_module_subtitle'),
                     style: TextStyle(
                       fontSize: 14,
@@ -1908,7 +2043,9 @@ class _HomePageState extends State<HomePage> {
             ),
             // V3.5：抽屉按 currentModule 渲染子菜单——仓储为真实四项，
             // 其余模块为「建设中」占位（不做假功能、不做弹窗式子菜单）。
-            if (_moduleIndex == 0) ...<Widget>[
+            // V4.0：概览页抽屉只留标题（概览与生活/工作同级，不摆业务入口）。
+            if (_section != _TopSection.overview) ...<Widget>[
+              if (_currentModule.kind == ModuleKind.storage) ...<Widget>[
               ListTile(
                 key: const Key('drawer_voice'),
                 leading: const Icon(Icons.mic_none),
@@ -1923,7 +2060,7 @@ class _HomePageState extends State<HomePage> {
                 subtitle: const Text('位置列表、备注、增删改'),
                 onTap: () {
                   Navigator.of(context).pop();
-                  _push(LocationListPage(repository: widget.repository));
+                  _push(LocationListPage(repository: _execRepo));
                 },
               ),
               ListTile(
@@ -1933,7 +2070,7 @@ class _HomePageState extends State<HomePage> {
                 subtitle: const Text('全部物品与存放位置，可搜索'),
                 onTap: () {
                   Navigator.of(context).pop();
-                  _push(ItemListPage(repository: widget.repository));
+                  _push(ItemListPage(repository: _execRepo, domain: _domain));
                 },
               ),
               ListTile(
@@ -1943,7 +2080,7 @@ class _HomePageState extends State<HomePage> {
                 subtitle: const Text('导出 JSON / 从文件恢复'),
                 onTap: () {
                   Navigator.of(context).pop();
-                  _push(BackupPage(repository: widget.repository));
+                  _push(BackupPage(repository: _execRepo, domain: _domain));
                 },
               ),
               // V3.7：借出管理（元宝决策③A，排最后；不动五模块底栏）。
@@ -1954,7 +2091,7 @@ class _HomePageState extends State<HomePage> {
                 subtitle: const Text('借出/归还/逾期提醒'),
                 onTap: () {
                   Navigator.of(context).pop();
-                  _push(LoanListPage(repository: widget.repository));
+                  _push(LoanListPage(repository: _execRepo));
                 },
               ),
               // V3.10（PM 补充要求2）：「校准数量」工具入口。
@@ -1971,11 +2108,12 @@ class _HomePageState extends State<HomePage> {
                   _openCalibration();
                 },
               ),
-            ] else ...<Widget>[
+              ],
               // V3.5 补丁（PM 2026-11-22）：占位项收敛——选中哪个
               // 非仓储模块，只渲染该模块自己的一条「建设中」占位项，
               // 与决策点①A「各渲染一个」口径一致。
-              _buildingTile(_HomeModule.values[_moduleIndex]),
+              if (_currentModule.kind != ModuleKind.storage)
+                _buildingTile(_currentModule),
             ],
           ],
         ),
@@ -1985,6 +2123,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final modules = _modules;
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
@@ -2006,25 +2145,171 @@ class _HomePageState extends State<HomePage> {
           icon: const Icon(Icons.menu, size: 28, color: Colors.white),
           onPressed: _openDrawer,
         ),
+        // V4.0：顶栏三选一 [概览][生活][工作]（PM 拍板，与生活区/工作区同级）。
+        bottom: _multiDomain ? _buildSectionSwitcher() : null,
       ),
       drawer: _buildDrawer(),
       // V3.5 五模块底栏（决策点②：浅色底深色图标，与内容区一致、
       // 与深色 AppBar 上下呼应；fixed 类型为 >3 项必需，避免
       // shifting 折叠文字）。仓储默认选中（唯一可用模块）。
-      bottomNavigationBar: BottomNavigationBar(
-        key: const Key('home_bottom_nav'),
-        currentIndex: _moduleIndex,
-        type: BottomNavigationBarType.fixed,
-        onTap: _selectModule,
-        items: <BottomNavigationBarItem>[
-          for (final module in _HomeModule.values)
-            BottomNavigationBarItem(
-              icon: Icon(_moduleIcon(module)),
-              label: module.label,
+      // V4.0：概览页**隐藏底栏**（PM 拍板）；生活区底栏五项固定，
+      // 工作区按需长出（模块注册表渲染，不是硬编码枚举）。
+      bottomNavigationBar: _buildBottomNav(modules),
+      body: _buildBody(),
+    );
+  }
+
+  /// V4.0：底栏渲染。
+  ///
+  /// * 概览页：**没有底栏**（PM 拍板「概览底部不摆」）。
+  /// * 生活区：五项固定（[BottomNavigationBar]，旧版结构不变）。
+  /// * 工作区：按需长出——本轮只有一项，而 Flutter 的 [BottomNavigationBar]
+  ///   硬性要求**至少两项**，所以单模块域改用一条按钮底栏
+  ///   （不假装有两个 tab，也不空着）。
+  Widget? _buildBottomNav(List<DomainModule> modules) {
+    if (_section == _TopSection.overview) return null;
+    if (modules.length < 2) {
+      final module = modules.first;
+      return BottomAppBar(
+        key: const Key('home_bottom_nav_single'),
+        child: TextButton.icon(
+          key: Key('home_bottom_nav_item_${module.id}'),
+          onPressed: () => _selectModule(0),
+          icon: Icon(module.icon),
+          label: Text(module.label),
+        ),
+      );
+    }
+    return BottomNavigationBar(
+      key: const Key('home_bottom_nav'),
+      currentIndex: _moduleIndex,
+      type: BottomNavigationBarType.fixed,
+      onTap: _selectModule,
+      items: <BottomNavigationBarItem>[
+        for (final module in modules)
+          BottomNavigationBarItem(
+            icon: Icon(module.icon),
+            label: module.label,
+          ),
+      ],
+    );
+  }
+
+  /// V4.0：顶栏分区切换（概览 / 生活 / 工作）。
+  PreferredSizeWidget _buildSectionSwitcher() {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(52),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+        child: SegmentedButton<_TopSection>(
+          key: const Key('top_section_switch'),
+          showSelectedIcon: false,
+          segments: const <ButtonSegment<_TopSection>>[
+            ButtonSegment<_TopSection>(
+              value: _TopSection.overview,
+              label: Text('概览'),
             ),
-        ],
+            ButtonSegment<_TopSection>(
+              value: _TopSection.life,
+              label: Text('生活'),
+            ),
+            ButtonSegment<_TopSection>(
+              value: _TopSection.work,
+              label: Text('工作'),
+            ),
+          ],
+          selected: <_TopSection>{_section},
+          onSelectionChanged: (selection) {
+            final next = selection.first;
+            if (next == _section) return;
+            _switchSection(next);
+          },
+        ),
       ),
-      body: SingleChildScrollView(
+    );
+  }
+
+  /// V4.0：切换顶栏分区。
+  ///
+  /// 切域走 [DomainHub.switchTo]（切库守卫：等旧查询收尾、超时置脏、
+  /// 切换期间拒写），切完**全量刷新**（清掉旧域的结果与提示）。
+  Future<void> _switchSection(_TopSection section) async {
+    if (!_multiDomain) return;
+    if (section == _section) return;
+    if (section == _TopSection.overview) {
+      setState(() {
+        _section = section;
+        _selectedModuleId = 'storage';
+        _result = null;
+        _notice = null;
+      });
+      return;
+    }
+    final hub = widget.hub!;
+    final target =
+        section == _TopSection.work ? InventoryDomain.work : InventoryDomain.life;
+    await hub.switchTo(target);
+    if (!mounted) return;
+    setState(() {
+      _section = section;
+      _selectedModuleId = 'storage';
+      _result = null;
+      _notice = null;
+      _execRepo = _repo;
+    });
+  }
+
+  /// 主体分派：概览 / 按模块种类。
+  Widget _buildBody() {
+    if (_multiDomain) {
+      if (_section == _TopSection.overview) {
+        return OverviewPage(
+          reader: InventoryOverviewReader(
+            life: widget.hub!.life.repository,
+            work: widget.hub!.work.repository,
+          ),
+          sources: _reminderSources(),
+          switchTimeoutCount: widget.hub!.switchTimeoutCount,
+        );
+      }
+      switch (_currentModule.kind) {
+        case ModuleKind.storage:
+          return _storageBody();
+        case ModuleKind.schedule:
+          final repo = _execRepo;
+          return SchedulePage(
+            domain: _domain,
+            reminders: repo is ReminderRepository ? repo as ReminderRepository : null,
+          );
+        case ModuleKind.building:
+          return BuildingPlaceholderPage(label: _currentModule.label);
+      }
+    }
+    // 单域形态：与 V3.13 完全一致（主体恒为仓储页）。
+    return _storageBody();
+  }
+
+  /// V4.0：提醒源注册表（统一 [ReminderSource] 接口，概览代码不因新增源而改）。
+  List<ReminderSource> _reminderSources() {
+    final hub = widget.hub;
+    if (hub == null) return const <ReminderSource>[];
+    final lifeRepo = hub.life.repository;
+    final workRepo = hub.work.repository;
+    final sources = <ReminderSource>[
+      LoanDueReminderSource(lifeRepo),
+      LoanDueReminderSource(workRepo),
+    ];
+    if (lifeRepo is ReminderRepository) {
+      // await 会重置类型提升 → 这里先取一份具体类型再注册。
+      final reminders = lifeRepo as ReminderRepository;
+      sources.add(ScheduleReminderSource(reminders));
+    }
+    return sources;
+  }
+
+  /// 仓储主体（V3.13 原样）。
+  Widget _storageBody() {
+    return SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2102,8 +2387,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
         ),
-      ),
-    );
+      );
   }
 }
 

@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
+import '../data/domain.dart';
 import '../data/inventory_repository.dart';
 import 'backup_actions.dart';
 
@@ -16,9 +17,13 @@ class BackupPage extends StatelessWidget {
     super.key,
     required this.repository,
     this.gateway,
+    this.domain = InventoryDomain.life,
   });
 
   final InventoryRepository repository;
+
+  /// V4.0：本页备份/恢复的是哪个域。
+  final InventoryDomain domain;
 
   /// 备份交互网关；生产默认系统实现，测试注入假网关。
   final BackupGateway? gateway;
@@ -47,6 +52,7 @@ class BackupPage extends StatelessWidget {
               repository: repository,
               gateway: gateway,
               compact: false,
+              domain: domain,
             ),
           ],
         ),

@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
+import '../data/domain.dart';
 import '../data/inventory_repository.dart';
 
 /// 备份/恢复/Excel 导出操作块（可复用）。
@@ -25,7 +26,11 @@ class BackupActions extends StatefulWidget {
     this.onExportExcel,
     this.onShareExcel,
     this.compact = true,
+    this.domain = InventoryDomain.life,
   });
+
+  /// V4.0：这一份备份属于哪个域（文件名带域标识）。
+  final InventoryDomain domain;
 
   final InventoryRepository repository;
 
@@ -57,10 +62,11 @@ class _BackupActionsState extends State<BackupActions> {
 
   // ---------- 备份导出 ----------
 
-  /// 备份文件名（与 SystemBackupGateway.writeBackupFile 同格式，便于用户识别）。
+  /// 备份文件名（V4.0 起带域标识：分库后一份备份就是一个域，
+  /// 文件名必须能分清是哪本账）。
   String _backupFileName(DateTime now) {
     String two(int v) => v.toString().padLeft(2, '0');
-    return 'home_inventory_backup_'
+    return '家庭仓储-${widget.domain.storageLabel}-'
         '${now.year}${two(now.month)}${two(now.day)}_'
         '${two(now.hour)}${two(now.minute)}${two(now.second)}.json';
   }
@@ -146,10 +152,13 @@ class _BackupActionsState extends State<BackupActions> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('恢复备份'),
-        content: const Text(
-          '将从备份文件覆盖当前全部数据。\n\n'
+        // 注意：首句保持 V3.6 原文（旧测试按这句话定位弹窗正文），
+        // 域信息追加在后面，不改既有口径。
+        content: Text(
+          '将从备份文件覆盖当前全部数据（${widget.domain.label}）。\n\n'
           '建议先点「导出备份」留存当前数据，'
-          '再选择要恢复的 .json 文件。',
+          '再选择要恢复的 .json 文件。\n'
+          '别的区域的备份不能恢复到这里。',
         ),
         actions: <Widget>[
           TextButton(

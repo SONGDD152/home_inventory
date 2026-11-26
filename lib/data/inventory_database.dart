@@ -2,9 +2,13 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
+import 'domain.dart';
+import '../domain/domain_instance.dart';
 import 'item.dart';
 import 'inventory_repository.dart';
 import 'normalize.dart';
+import 'reminder.dart';
+import 'reminder_repository.dart';
 
 /// 家庭仓储数据访问层（三张表：物品 / 位置 / 关联）。
 ///
@@ -16,12 +20,23 @@ import 'normalize.dart';
 /// [databasePath]（测试指向临时文件库，验证重开仍有数据）。
 ///
 /// 这里不解析自然语言；「梯子在哪」的拆分由上层完成，本层只接收精确字段值。
-class InventoryDatabase implements InventoryRepository {
+class InventoryDatabase
+    implements InventoryRepository, ReminderRepository, DomainInstance {
+  /// V4.0：当前库文件的 schema 版本。
+  ///
+  /// v10 = V3.13（仓储六表）；**v11 = V4.0（加 reminders / daily_reports 两表）**。
+  /// 两域各自独立升级到 v11：生活库走 v10→v11 迁移，工作库新建直接建到 v11。
+  static const int currentSchemaVersion = 11;
+
   /// 生产构造：不暴露任何测试钩子，生产入口 main.dart 用此构造。
+  ///
+  /// V4.0：[domain] 决定这个实例管哪本账——生活域用 `home_inventory.db`
+  /// （路径不变，用户既有数据天然保留），工作域用 `work_inventory.db`（新建）。
   InventoryDatabase({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 10,
+    this.version = currentSchemaVersion,
+    this.domain = InventoryDomain.life,
   })  : _injectedFactory = databaseFactory,
         _injectedPath = databasePath,
         _migrationFailureHook = null,
@@ -38,7 +53,8 @@ class InventoryDatabase implements InventoryRepository {
   InventoryDatabase.forTesting({
     DatabaseFactory? databaseFactory,
     String? databasePath,
-    this.version = 10,
+    this.version = currentSchemaVersion,
+    this.domain = InventoryDomain.life,
     void Function()? migrationFailureHook,
     void Function()? migrationV5FailureHook,
     void Function()? migrationV6FailureHook,
@@ -64,6 +80,9 @@ class InventoryDatabase implements InventoryRepository {
   static const String tableLoans = 'loans';
   // V3.12 部分废弃：废弃流水表（一次"废了几个"一行）。
   static const String tableItemDiscards = 'item_discards';
+  // V4.0 日程/日报：提醒条目表 + 日报存档表。
+  static const String tableReminders = 'reminders';
+  static const String tableDailyReports = 'daily_reports';
 
   static const String columnId = 'id';
   static const String columnName = 'name';
@@ -96,6 +115,21 @@ class InventoryDatabase implements InventoryRepository {
   static const String columnDiscardedAt = 'discarded_at';
   static const String columnSourceType = 'source_type';
   static const String columnRestoredQuantity = 'restored_quantity';
+  // V4.0 提醒/日报字段。
+  static const String columnTitle = 'title';
+  static const String columnDetail = 'detail';
+  static const String columnReminderDueAt = 'due_at';
+  static const String columnStatus = 'status';
+  static const String columnDoneAt = 'done_at';
+  static const String columnRepeatRule = 'repeat_rule';
+  static const String columnReportDate = 'report_date';
+  static const String columnContentMd = 'content_md';
+  static const String columnGeneratedAt = 'generated_at';
+  static const String columnSourceSnapshot = 'source_snapshot';
+
+  /// 提醒状态：待办 / 已完成（两态，不硬删——已完成也要留着，日报要看）。
+  static const String reminderStatusPending = 'pending';
+  static const String reminderStatusDone = 'done';
 
   /// 未删除记录的唯一约束：物品名唯一、位置名唯一、同一(物品,位置)关联唯一。
   static const String itemsUniqueIndex = 'idx_items_name_unique';
@@ -108,6 +142,59 @@ class InventoryDatabase implements InventoryRepository {
   final DatabaseFactory? _injectedFactory;
   final String? _injectedPath;
   final int version;
+
+  /// V4.0：本实例管哪本账。
+  ///
+  /// 决定两件事：① 库文件路径（[InventoryDomain.fileName]）② 备份里的域标识。
+  /// 两域各自持有独立实例，**共用同一套引擎代码**——借出/废弃/数量/位置/校准
+  /// 逻辑不写第二遍，只是连的库不同。
+  final InventoryDomain domain;
+
+  /// V4.0：在飞操作计数（切库守卫用）。
+  ///
+  /// 切域时必须等旧实例在飞查询收尾，否则旧结果可能盖掉新域界面。
+  /// 只统计**重查询**（见 [_tracked] 的调用点）与显式挂起的操作。
+  int _activeOperations = 0;
+
+  /// 当前在飞操作数（切库守卫读它判断能否安全切换）。
+  @override
+  int get activeOperations => _activeOperations;
+
+  /// V4.0：切换期间写操作闸门。
+  ///
+  /// 切域过程中正在落库的操作如果继续跑，可能写进"马上要作废的那本账"。
+  /// 因此切换期间**直接拒绝写入**（抛 [DomainSwitchInProgress]），
+  /// **不静默重试**——静默重试正是写错库的来源。
+  bool _writesBlocked = false;
+
+  /// 切换期间禁止本实例写入（由切库守卫调用）。
+  @override
+  void setWritesBlocked(bool blocked) {
+    _writesBlocked = blocked;
+  }
+
+  /// 写操作前的闸门检查。
+  void _guardWrite() {
+    if (_writesBlocked) {
+      throw const DomainSwitchInProgress();
+    }
+  }
+
+  /// 把一次可能较慢的操作计入在飞计数。
+  Future<T> _tracked<T>(Future<T> Function() action) async {
+    _activeOperations++;
+    try {
+      return await action();
+    } finally {
+      _activeOperations--;
+    }
+  }
+
+  /// 挂起一次"在飞操作"（切库守卫的测试用它制造超时场景）。
+  ///
+  /// 生产上用于切域前把长查询纳入守卫视野；测试里用来模拟
+  /// 「旧实例查询迟迟不收尾 → 切域超时」。
+  Future<T> trackOperation<T>(Future<T> Function() action) => _tracked(action);
 
   /// 仅供测试的失败注入点：在 v4 清洗的清表之后、重建之前调用。
   /// 私有字段，仅 [InventoryDatabase.forTesting] 可注入，生产构造恒为 null。
@@ -145,7 +232,9 @@ class InventoryDatabase implements InventoryRepository {
   Future<String> _resolvePath() async {
     final injected = _injectedPath;
     if (injected != null) return injected;
-    return p.join(await getDatabasesPath(), 'home_inventory.db');
+    // V4.0：库文件按域分家——生活域沿用旧路径（用户数据天然保留），
+    // 工作域是独立新文件。物理隔离是 PM 拍板的方案 B。
+    return p.join(await getDatabasesPath(), domain.fileName);
   }
 
   Future<Database> open() async {
@@ -165,6 +254,23 @@ class InventoryDatabase implements InventoryRepository {
 
   bool get isOpen => _db?.isOpen ?? false;
 
+  // ---------- V4.0 DomainInstance 实现 ----------
+
+  @override
+  InventoryRepository get repository => this;
+
+  @override
+  String get domainId => domain.id;
+
+  /// 重建连接（脏连接自愈）：关掉再打开，schema 版本不变、数据不动。
+  @override
+  Future<void> reopen() async {
+    await close();
+    await open();
+  }
+
+  @override
+  @override
   Future<void> close() async {
     final db = _db;
     _db = null;
@@ -208,7 +314,51 @@ class InventoryDatabase implements InventoryRepository {
     ''');
     await _createBorrowTables(db);
     await _createDiscardTables(db);
+    await _createReminderTables(db);
     await _createIndexes(db);
+  }
+
+  /// V4.0：提醒条目表 + 日报存档表。
+  ///
+  /// 两域**结构完全一致**（各 8 张表，逐表逐列核对）——工作域虽然本轮
+  /// 不开放提醒功能，但表照样建齐，这样两本账的 schema 可以直接对比。
+  ///
+  /// 「工作区暂不支持提醒」是**能力开关**（见 [domain.dart] 的
+  /// [domainCapabilities]），不是「表不存在」——技术口吻不给用户看。
+  Future<void> _createReminderTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableReminders (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnTitle TEXT NOT NULL,
+        $columnDetail TEXT,
+        $columnDueAt INTEGER,
+        $columnStatus TEXT NOT NULL DEFAULT '$reminderStatusPending',
+        $columnDoneAt INTEGER,
+        $columnRepeatRule TEXT,
+        $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
+        $columnCreatedAt INTEGER NOT NULL,
+        $columnUpdatedAt INTEGER NOT NULL,
+        $columnDeletedAt INTEGER
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $tableDailyReports (
+        $columnId INTEGER PRIMARY KEY AUTOINCREMENT,
+        $columnReportDate TEXT NOT NULL,
+        $columnContentMd TEXT NOT NULL,
+        $columnGeneratedAt INTEGER NOT NULL,
+        $columnSourceSnapshot TEXT
+      )
+    ''');
+    // 一日一条：日报按日期唯一，避免并发补生成写重复。
+    await db.execute(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_reports_date '
+      'ON $tableDailyReports($columnReportDate)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reminders_due '
+      'ON $tableReminders($columnDueAt)',
+    );
   }
 
   /// V3.12：废弃流水表。
@@ -482,6 +632,14 @@ class InventoryDatabase implements InventoryRepository {
       if (v10Hook != null) v10Hook();
       await _createDiscardTables(db);
     }
+
+    // v10 → v11：V4.0 日程/日报——新建 reminders / daily_reports 两张表。
+    // 两域结构一致：工作库走 onCreate 直接建到 v11，生活库从这里补齐，
+    // 元宝验收要求「工作库八表与生活库 v11 逐表逐列核对」。
+    // 老库没有日程概念 → **不需要任何数据搬迁**，新表建出来是空的。
+    if (oldVersion < 11 && newVersion >= 11) {
+      await _createReminderTables(db);
+    }
   }
 
   /// 若表中无此列则 ALTER ADD；列已存在则跳过（升级幂等）。
@@ -732,6 +890,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 部分唯一索引兜底并发写。
   @override
   Future<void> updateItem(int id, String name) async {
+    _guardWrite();
     final valid = _normalizeName(name, '物品名称');
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -770,6 +929,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 幂等：物品不存在或已删除时无操作。
   @override
   Future<void> deleteItem(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
@@ -859,6 +1019,7 @@ class InventoryDatabase implements InventoryRepository {
     required int locationId,
     DiscardSource sourceType = DiscardSource.inStock,
   }) async {
+    _guardWrite();
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', '废弃数量至少 1 个');
     }
@@ -927,6 +1088,7 @@ class InventoryDatabase implements InventoryRepository {
     int toLocationId, {
     int? quantity,
   }) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<ItemDiscard>((txn) async {
@@ -1003,6 +1165,7 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.12：彻底删除一条废弃流水（物理清除，不可恢复）。
   @override
   Future<void> purgeDiscard(int discardId) async {
+    _guardWrite();
     final db = await open();
     await db.delete(
       tableItemDiscards,
@@ -1125,6 +1288,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 幂等：物品不存在或未删除时无操作（返回未合并的结果）。
   @override
   Future<RestoreOutcome> restoreItem(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     return db.transaction<RestoreOutcome>((txn) async {
@@ -1354,6 +1518,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 幂等：物品不存在时无操作。
   @override
   Future<void> purgeItem(int id) async {
+    _guardWrite();
     final db = await open();
     await db.transaction<void>((txn) async {
       final rows = await txn.query(
@@ -1401,6 +1566,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 及其全部关联行，不可恢复）。
   @override
   Future<void> purgeAll() async {
+    _guardWrite();
     final db = await open();
     await db.transaction<void>((txn) async {
       // 先按已删物品删其关联行，再删物品行（顺序无外键约束要求，仅逻辑清晰）。
@@ -1423,6 +1589,7 @@ class InventoryDatabase implements InventoryRepository {
   /// V3：可选 [remark] 备注随新位置写入；命中已有位置时备注不变（幂等语义不变）。
   @override
   Future<int> addLocation(String name, {String? remark}) async {
+    _guardWrite();
     final valid = _normalizeName(name, '位置名称');
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -1434,6 +1601,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 改名撞到另一个未删除位置（唯一索引）时抛 ArgumentError，由 UI 兜底提示。
   @override
   Future<void> updateLocation(int id, {String? name, String? remark}) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     final updates = <String, Object?>{columnUpdatedAt: now};
@@ -1462,6 +1630,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 语义）；**新建同名位置是新行、新 id**，旧软删关联不会跟随新 id 回显。
   @override
   Future<void> deleteLocation(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
@@ -1526,6 +1695,7 @@ class InventoryDatabase implements InventoryRepository {
   @override
   Future<UpsertResult> upsertItemLocation(String itemName, int locationId,
       {String? rawText, int? quantity, bool additive = false}) async {
+    _guardWrite();
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
 
@@ -1626,6 +1796,7 @@ class InventoryDatabase implements InventoryRepository {
   @override
   Future<MoveResult> moveItemWhole(String itemName, int toLocationId,
       {String? rawText}) async {
+    _guardWrite();
     final valid = _normalizeName(itemName, '物品名称');
     final db = await open();
     await _activeLocationRow(db, toLocationId);
@@ -1685,6 +1856,7 @@ class InventoryDatabase implements InventoryRepository {
     required int quantity,
     String? rawText,
   }) async {
+    _guardWrite();
     final valid = _normalizeName(itemName, '物品名称');
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', '挪动数量至少为 1');
@@ -1781,6 +1953,7 @@ class InventoryDatabase implements InventoryRepository {
     int quantity, {
     bool additive = false,
   }) async {
+    _guardWrite();
     final valid = _normalizeName(itemName, '物品名称');
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
@@ -1834,6 +2007,7 @@ class InventoryDatabase implements InventoryRepository {
     int quantity, {
     bool additive = false,
   }) async {
+    _guardWrite();
     final valid = _normalizeName(itemName, '物品名称');
     if (quantity < 1) {
       throw ArgumentError.value(quantity, 'quantity', '数量至少为 1');
@@ -2226,6 +2400,9 @@ class InventoryDatabase implements InventoryRepository {
     final db = await open();
     return <String, Object?>{
       'app': 'home_inventory',
+      // V4.0：备份带域标识——分库后一份备份就是一个域，
+      // 恢复时强制校验（生活备份恢复进工作库 = 覆盖工作账，必须拦住）。
+      'domain': domain.id,
       'schemaVersion': version,
       'exportedAt': DateTime.now().millisecondsSinceEpoch,
       tableItems: await db.query(tableItems, orderBy: '$columnId ASC'),
@@ -2237,6 +2414,10 @@ class InventoryDatabase implements InventoryRepository {
       // V3.12：废弃流水一并导出（否则恢复后"废掉的那几个"就找不回来了）。
       tableItemDiscards:
           await db.query(tableItemDiscards, orderBy: '$columnId ASC'),
+      // V4.0：提醒与日报一并导出。
+      tableReminders: await db.query(tableReminders, orderBy: '$columnId ASC'),
+      tableDailyReports:
+          await db.query(tableDailyReports, orderBy: '$columnId ASC'),
     };
   }
 
@@ -2248,6 +2429,32 @@ class InventoryDatabase implements InventoryRepository {
   Future<void> restoreBackup(Map<String, Object?> data) async {
     if (data['app'] != 'home_inventory') {
       throw ArgumentError.value(data, 'data', '不是本应用的备份文件');
+    }
+    // V4.0：跨域误恢复必须拦住（分库后这是"覆盖另一本账"级别的事故）。
+    // ① 备份带域标识且与本库不一致 → 拒绝，文案直说哪本账。
+    // ② 备份无域标识（旧版备份）→ 归生活库；工作库拒绝接收。
+    final backupDomainId = data['domain'] as String?;
+    final backupDomain = InventoryDomain.fromId(backupDomainId);
+    if (backupDomainId != null && backupDomain == null) {
+      throw ArgumentError.value(
+        backupDomainId,
+        'domain',
+        '备份文件的区域标识无法识别，可能不是本应用导出的文件',
+      );
+    }
+    if (backupDomain != null && backupDomain != domain) {
+      throw ArgumentError.value(
+        backupDomainId,
+        'domain',
+        '这是${backupDomain.label}的备份，不能恢复到${domain.label}',
+      );
+    }
+    if (backupDomain == null && domain != InventoryDomain.life) {
+      throw ArgumentError.value(
+        backupDomainId,
+        'domain',
+        '这是旧版备份（没有区域标识），只能恢复到${InventoryDomain.life.label}',
+      );
     }
     final backupVersion = (data['schemaVersion'] as num?)?.toInt();
     if (backupVersion == null || backupVersion > version) {
@@ -2271,11 +2478,20 @@ class InventoryDatabase implements InventoryRepository {
     final discardMaps = data.containsKey(tableItemDiscards)
         ? _rowsOf(data, tableItemDiscards)
         : <Map<String, Object?>>[];
+    // V4.0：提醒与日报一并恢复（旧备份没有这两张表 → 按空表处理）。
+    final reminderMaps = data.containsKey(tableReminders)
+        ? _rowsOf(data, tableReminders)
+        : <Map<String, Object?>>[];
+    final reportMaps = data.containsKey(tableDailyReports)
+        ? _rowsOf(data, tableDailyReports)
+        : <Map<String, Object?>>[];
 
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
       // 清空顺序：先子表后主表，避免外键/索引干扰。
+      await txn.delete(tableDailyReports);
+      await txn.delete(tableReminders);
       await txn.delete(tableItemDiscards);
       await txn.delete(tableLoans);
       await txn.delete(tableBorrowers);
@@ -2299,6 +2515,12 @@ class InventoryDatabase implements InventoryRepository {
       }
       for (final row in discardMaps) {
         await txn.insert(tableItemDiscards, _discardMapForInsert(row));
+      }
+      for (final row in reminderMaps) {
+        await txn.insert(tableReminders, Reminder.fromMap(row).toMap());
+      }
+      for (final row in reportMaps) {
+        await txn.insert(tableDailyReports, DailyReport.fromMap(row).toMap());
       }
       // V3.11（元宝批复第 8 条）：恢复收口统一走 _syncItemTotal，
       // 禁止另写一套重算逻辑（两套迟早漂移）。
@@ -2400,6 +2622,7 @@ class InventoryDatabase implements InventoryRepository {
     int? days,
     int? fromLocationId,
   }) async {
+    _guardWrite();
     final validItem = _normalizeName(itemName, '物品名称');
     // V3.9.1 真机打回：解析器漏掉的一路（口语「梯子借给张三」）会把「借」
     // 留在名字里，物品被建成「梯子借」，借出记录也挂在这个脏名上，之后说
@@ -2539,6 +2762,7 @@ class InventoryDatabase implements InventoryRepository {
   @override
   Future<void> returnLoan(int loanId,
       {int? quantity, int? toLocationId}) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     await db.transaction<void>((txn) async {
@@ -2614,6 +2838,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 单笔改借期（天数从借出时刻起算，UTC）。
   @override
   Future<void> updateLoanDue(int loanId, int days) async {
+    _guardWrite();
     if (days < 1) {
       throw ArgumentError.value(days, 'days', '借期至少为 1 天');
     }
@@ -2672,6 +2897,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 记录不存在或已软删时抛 ArgumentError。
   @override
   Future<void> deleteLoan(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final rows = await db.query(
@@ -2699,6 +2925,7 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.8：恢复已软删的借出记录（回借出管理列表）。
   @override
   Future<void> restoreLoan(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final rows = await db.query(
@@ -2755,6 +2982,7 @@ class InventoryDatabase implements InventoryRepository {
   /// V3.8：彻底删除借出记录（物理 DELETE，不可恢复）。
   @override
   Future<void> purgeLoan(int id) async {
+    _guardWrite();
     final db = await open();
     final rows = await db.query(
       tableLoans,
@@ -2788,6 +3016,7 @@ class InventoryDatabase implements InventoryRepository {
   /// 软删借阅人（历史 loan 的 borrower_name 快照不受影响）。
   @override
   Future<void> softDeleteBorrower(int id) async {
+    _guardWrite();
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     await db.update(
@@ -2811,5 +3040,151 @@ class InventoryDatabase implements InventoryRepository {
       where: '$columnIsDeleted = 0',
     );
     return (rows.first['n'] as num).toInt();
+  }
+
+  // ---------- V4.0 日程 / 日报 ----------
+
+  @override
+  Future<List<Reminder>> getReminders({bool includeDone = true}) async {
+    final db = await open();
+    final rows = await db.query(
+      tableReminders,
+      where: includeDone
+          ? '$columnIsDeleted = 0'
+          : '$columnIsDeleted = 0 AND $columnStatus = ?',
+      whereArgs: includeDone ? null : <Object?>[reminderStatusPending],
+      orderBy: 'COALESCE($columnReminderDueAt, 9223372036854775807) ASC, '
+          '$columnId ASC',
+    );
+    return rows.map(Reminder.fromMap).toList();
+  }
+
+  @override
+  Future<int> addReminder(String title,
+      {String? detail, DateTime? dueAt, String? repeatRule}) async {
+    _guardWrite();
+    final clean = title.trim();
+    if (clean.isEmpty) {
+      throw ArgumentError.value(title, 'title', '提醒标题不能为空');
+    }
+    if (clean.length > maxNameLength) {
+      throw ArgumentError.value(
+          title, 'title', '提醒标题不能超过 $maxNameLength 个字符');
+    }
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return db.insert(tableReminders, <String, Object?>{
+      columnTitle: clean,
+      if (detail != null) columnDetail: detail,
+      if (dueAt != null) columnReminderDueAt: dueAt.millisecondsSinceEpoch,
+      columnStatus: reminderStatusPending,
+      if (repeatRule != null) columnRepeatRule: repeatRule,
+      columnIsDeleted: 0,
+      columnCreatedAt: now,
+      columnUpdatedAt: now,
+    });
+  }
+
+  @override
+  Future<void> updateReminder(int id,
+      {String? title, String? detail, DateTime? dueAt}) async {
+    _guardWrite();
+    final values = <String, Object?>{};
+    if (title != null) {
+      final clean = title.trim();
+      if (clean.isEmpty) {
+        throw ArgumentError.value(title, 'title', '提醒标题不能为空');
+      }
+      values[columnTitle] = clean;
+    }
+    if (detail != null) values[columnDetail] = detail;
+    if (dueAt != null) values[columnReminderDueAt] = dueAt.millisecondsSinceEpoch;
+    if (values.isEmpty) return;
+    values[columnUpdatedAt] = DateTime.now().millisecondsSinceEpoch;
+    final db = await open();
+    await db.update(
+      tableReminders,
+      values,
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  @override
+  Future<void> setReminderDone(int id, {bool done = true}) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.update(
+      tableReminders,
+      <String, Object?>{
+        columnStatus: done ? reminderStatusDone : reminderStatusPending,
+        columnDoneAt: done ? now : null,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  @override
+  Future<void> deleteReminder(int id) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.update(
+      tableReminders,
+      <String, Object?>{
+        columnIsDeleted: 1,
+        columnDeletedAt: now,
+        columnUpdatedAt: now,
+      },
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  @override
+  Future<DailyReport?> getDailyReport(String reportDate) async {
+    final db = await open();
+    final rows = await db.query(
+      tableDailyReports,
+      where: '$columnReportDate = ?',
+      whereArgs: <Object?>[reportDate],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return DailyReport.fromMap(rows.first);
+  }
+
+  @override
+  Future<List<DailyReport>> getDailyReports({int limit = 30}) async {
+    final db = await open();
+    final rows = await db.query(
+      tableDailyReports,
+      orderBy: '$columnReportDate DESC',
+      limit: limit,
+    );
+    return rows.map(DailyReport.fromMap).toList();
+  }
+
+  @override
+  Future<void> saveDailyReport(String reportDate, String contentMd,
+      {String? sourceSnapshot}) async {
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 一日一条：先删同日的旧行再插，避免主键冲突（唯一索引兜底）。
+    await db.delete(
+      tableDailyReports,
+      where: '$columnReportDate = ?',
+      whereArgs: <Object?>[reportDate],
+    );
+    await db.insert(tableDailyReports, <String, Object?>{
+      columnReportDate: reportDate,
+      columnContentMd: contentMd,
+      columnGeneratedAt: now,
+      if (sourceSnapshot != null) columnSourceSnapshot: sourceSnapshot,
+    });
   }
 }

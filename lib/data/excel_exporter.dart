@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:excel/excel.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'domain.dart';
 import 'item.dart';
 
 /// V3.6：物品明细 Excel 导出器（决策点⑤A 列头口径）。
@@ -20,7 +21,10 @@ import 'item.dart';
 /// 家庭级数据量（<1000 行）主线程同步生成，不强制 Isolate。
 /// 空列表导出仅含表头的文件，不报错。
 class ExcelExporter {
-  const ExcelExporter({this.fileWriter});
+  const ExcelExporter({this.fileWriter, this.domain = InventoryDomain.life});
+
+  /// V4.0：这一份导出属于哪个域（分库后一份文件就是一个域）。
+  final InventoryDomain domain;
 
   /// 字节落盘函数；生产默认 [defaultWrite]（path_provider 临时目录 + File），
   /// 测试注入内存假件（widget 假异步环境禁止真实文件 IO）。
@@ -84,16 +88,26 @@ class ExcelExporter {
     return writer(bytes);
   }
 
-  /// 当日导出文件名。
+  /// 当日导出文件名（V3.6 原始格式，保持不变）。
   String fileNameFor(DateTime now) {
     return '家庭仓储物品明细_'
+        '${now.year}${_two(now.month)}${_two(now.day)}.xlsx';
+  }
+
+  /// V4.0：带域标识的当日导出文件名。
+  ///
+  /// 分库后一份文件就是一个域，文件名必须能让人一眼分清是哪本账
+  /// （「生活」还是「工作」），否则两个 JSON/xlsx 混在一起没法认。
+  String fileNameForDomain(DateTime now, [InventoryDomain? domain]) {
+    final target = domain ?? this.domain;
+    return '家庭仓储物品明细-${target.storageLabel}-'
         '${now.year}${_two(now.month)}${_two(now.day)}.xlsx';
   }
 
   /// 生产落盘实现：path_provider 临时目录 + File 写入。
   Future<String> defaultWrite(Uint8List bytes) async {
     final dir = await getTemporaryDirectory();
-    final name = fileNameFor(DateTime.now());
+    final name = fileNameForDomain(DateTime.now());
     final file = File('${dir.path}${Platform.pathSeparator}$name');
     await file.writeAsBytes(bytes, flush: true);
     return file.path;

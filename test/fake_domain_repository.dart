@@ -5,7 +5,9 @@ import 'package:home_inventory/data/item.dart';
 import 'package:home_inventory/data/normalize.dart';
 import 'package:home_inventory/data/reminder.dart';
 import 'package:home_inventory/data/reminder_repository.dart';
+import 'package:home_inventory/data/todo_state.dart';
 import 'package:home_inventory/domain/domain_instance.dart';
+import 'package:home_inventory/domain/todo_state_writer.dart';
 
 /// V4.0 测试用：内存域实例。
 ///
@@ -50,7 +52,13 @@ class FakeDomainInstance implements DomainInstance {
 }
 
 /// V4.0 测试用：内存仓储（只实现 widget 测试真正用到的方法）。
-class FakeDomainRepository implements InventoryRepository, ReminderRepository {
+///
+/// V4.1 批次 2：加实现 [TodoStateWriter]（内存版 `todo_states`），
+/// 让概览页的 widget 测试能真正点延期 / 点备注——
+/// 之前概览页 widget 测试完全没做过，因为假仓储拿不到待办写口，
+/// 界面上那些按钮全是 disabled 的（等于没测）。
+class FakeDomainRepository
+    implements InventoryRepository, ReminderRepository, TodoStateWriter {
   final List<Location> _locations = <Location>[];
   final List<Item> _items = <Item>[];
   final List<ItemLocation> _links = <ItemLocation>[];
@@ -343,7 +351,10 @@ class FakeDomainRepository implements InventoryRepository, ReminderRepository {
 
   @override
   Future<int> addReminder(String title,
-      {String? detail, DateTime? dueAt, String? repeatRule}) async {
+      {String? detail,
+      DateTime? dueAt,
+      String? repeatRule,
+      int priority = ReminderPriority.normal}) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final id = ++_nextId;
     _reminders.add(Reminder(
@@ -352,6 +363,8 @@ class FakeDomainRepository implements InventoryRepository, ReminderRepository {
       detail: detail,
       dueAt: dueAt?.millisecondsSinceEpoch,
       repeatRule: repeatRule,
+      // V4.1 批次 2（元宝裁定①）：优先级。
+      priority: ReminderPriority.normalize(priority),
       createdAt: now,
       updatedAt: now,
     ));
@@ -360,7 +373,10 @@ class FakeDomainRepository implements InventoryRepository, ReminderRepository {
 
   @override
   Future<void> updateReminder(int id,
-      {String? title, String? detail, DateTime? dueAt}) async {
+      {String? title,
+      String? detail,
+      DateTime? dueAt,
+      int? priority}) async {
     final index = _reminders.indexWhere((r) => r.id == id);
     if (index < 0) return;
     final old = _reminders[index];
@@ -372,6 +388,9 @@ class FakeDomainRepository implements InventoryRepository, ReminderRepository {
       status: old.status,
       doneAt: old.doneAt,
       repeatRule: old.repeatRule,
+      priority: priority == null
+          ? old.priority
+          : ReminderPriority.normalize(priority),
       createdAt: old.createdAt,
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
@@ -420,6 +439,87 @@ class FakeDomainRepository implements InventoryRepository, ReminderRepository {
       sourceSnapshot: sourceSnapshot,
     ));
   }
+
+  // ---------- V4.1：待办状态（todo_states）内存实现 ----------
+
+  /// 内存版 `todo_states`：key = `'{sourceType}_{sourceId}'`。
+  final Map<String, TodoState> _todoStates = <String, TodoState>{};
+
+  @override
+  Future<TodoState?> readState(String sourceType, int sourceId) async =>
+      _todoStates[TodoState.entryKeyOf(sourceType, sourceId)];
+
+  @override
+  Future<List<TodoState>> loadStates() async => _todoStates.values.toList();
+
+  @override
+  Future<void> markDone(String sourceType, int sourceId,
+      {bool done = true}) async {
+    final key = TodoState.entryKeyOf(sourceType, sourceId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final old = _todoStates[key];
+    _todoStates[key] = TodoState(
+      id: old?.id,
+      sourceType: sourceType,
+      sourceId: sourceId,
+      status: done ? TodoStatus.done : TodoStatus.pending,
+      doneAt: done ? now : null,
+      // 撤销完成态**不清**延期次数与备注——那是历史，不是完成态。
+      deferCount: old?.deferCount ?? 0,
+      handleNote: old?.handleNote,
+      nextDueAt: old?.nextDueAt,
+      createdAt: old?.createdAt ?? now,
+      updatedAt: now,
+    );
+  }
+
+  @override
+  Future<void> defer(String sourceType, int sourceId,
+      {String? reason, int days = 1, DateTime? dueOn}) async {
+    final key = TodoState.entryKeyOf(sourceType, sourceId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final old = _todoStates[key];
+    final anchor = old?.nextDueAt ?? now;
+    final next = dueOn != null
+        ? dueOn.millisecondsSinceEpoch
+        : DateTime.fromMillisecondsSinceEpoch(anchor)
+            .add(Duration(days: days))
+            .millisecondsSinceEpoch;
+    _todoStates[key] = TodoState(
+      id: old?.id,
+      sourceType: sourceType,
+      sourceId: sourceId,
+      status: TodoStatus.deferred,
+      doneAt: old?.doneAt,
+      deferCount: (old?.deferCount ?? 0) + 1,
+      handleNote: reason ?? old?.handleNote,
+      nextDueAt: next,
+      createdAt: old?.createdAt ?? now,
+      updatedAt: now,
+    );
+  }
+
+  @override
+  Future<void> setNote(String sourceType, int sourceId, String note) async {
+    final key = TodoState.entryKeyOf(sourceType, sourceId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final old = _todoStates[key];
+    _todoStates[key] = TodoState(
+      id: old?.id,
+      sourceType: sourceType,
+      sourceId: sourceId,
+      status: old?.status ?? TodoStatus.pending,
+      doneAt: old?.doneAt,
+      deferCount: old?.deferCount ?? 0,
+      handleNote: note,
+      nextDueAt: old?.nextDueAt,
+      createdAt: old?.createdAt ?? now,
+      updatedAt: now,
+    );
+  }
+
+  @override
+  Future<int> syncOverdue(DateTime now) async => 0;
 }
 
 /// 造一对内存域实例（生活 + 工作），供 widget 测试用。

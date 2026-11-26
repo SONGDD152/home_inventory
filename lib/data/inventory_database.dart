@@ -23,16 +23,19 @@ import 'todo_state.dart';
 ///
 /// 这里不解析自然语言；「梯子在哪」的拆分由上层完成，本层只接收精确字段值。
 class InventoryDatabase implements InventoryRepository, ReminderRepository,
-    TodoStateWriter, DomainInstance {
+    TodoStateWriter, TodoStateReader, DomainInstance {
   /// V4.1：当前库文件的 schema 版本。
   ///
   /// v10 = V3.13（仓储六表）；v11 = V4.0（加 reminders / daily_reports 两表）；
-  /// **v12 = V4.1（加 todo_states 第 9 表）**。
-  /// 两域各自独立升级到 v12：生活库走 v10→v11→v12 迁移，工作库新建直接建到 v12。
+  /// **v12 = V4.1 批次 1（加 todo_states 第 9 表）**；
+  /// **v13 = V4.1 批次 2（reminders 加 priority 列，元宝裁定①）**。
+  /// 两域各自独立升级到 v13：生活库走 v10→v11→v12→v13 迁移，
+  /// 工作库新建直接建到 v13。
   ///
   /// v12 迁移只做 `CREATE TABLE IF NOT EXISTS`——**不动任何旧表旧列**，
   /// 所以旧备份兼容零风险、老代码读路径不变、迁移幂等天然满足。
-  static const int currentSchemaVersion = 12;
+  /// v13 迁移用幂等加列（`_addColumnIfMissing`），同样不碰任何旧列。
+  static const int currentSchemaVersion = 13;
 
   /// 生产构造：不暴露任何测试钩子，生产入口 main.dart 用此构造。
   ///
@@ -135,6 +138,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
   static const String columnStatus = 'status';
   static const String columnDoneAt = 'done_at';
   static const String columnRepeatRule = 'repeat_rule';
+  // V4.1 批次 2：提醒优先级（元宝裁定①：0低 / 1中 / 2高，默认 1）。
+  static const String columnPriority = 'priority';
   static const String columnReportDate = 'report_date';
   static const String columnContentMd = 'content_md';
   static const String columnGeneratedAt = 'generated_at';
@@ -357,6 +362,7 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         $columnStatus TEXT NOT NULL DEFAULT '$reminderStatusPending',
         $columnDoneAt INTEGER,
         $columnRepeatRule TEXT,
+        $columnPriority INTEGER NOT NULL DEFAULT 1,
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
         $columnCreatedAt INTEGER NOT NULL,
         $columnUpdatedAt INTEGER NOT NULL,
@@ -726,6 +732,18 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     // 元宝验收口径同步升级：「工作库八表与 v11 逐表核对」→ **「九表与 v12 逐表核对」**。
     if (oldVersion < 12 && newVersion >= 12) {
       await _createTodoStateTable(db);
+    }
+
+    // v12 → v13：V4.1 批次 2 提醒优先级——reminders 加 priority 列。
+    //
+    // 用幂等加列（`_addColumnIfMissing`）：列已存在就跳过，
+    // 所以连跑两次结果一致、迁移可重入。
+    //
+    // 旧数据默认 1（中）：元宝裁定①「默认1」——
+    // 老提醒不该因为升级就被判成低优先级。
+    if (oldVersion < 13 && newVersion >= 13) {
+      await _addColumnIfMissing(db, tableReminders, columnPriority,
+          type: 'INTEGER NOT NULL DEFAULT 1');
     }
   }
 
@@ -3168,7 +3186,10 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
 
   @override
   Future<int> addReminder(String title,
-      {String? detail, DateTime? dueAt, String? repeatRule}) async {
+      {String? detail,
+      DateTime? dueAt,
+      String? repeatRule,
+      int priority = ReminderPriority.normal}) async {
     _guardWrite();
     final clean = title.trim();
     if (clean.isEmpty) {
@@ -3186,6 +3207,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
       if (dueAt != null) columnReminderDueAt: dueAt.millisecondsSinceEpoch,
       columnStatus: reminderStatusPending,
       if (repeatRule != null) columnRepeatRule: repeatRule,
+      // V4.1 批次 2（元宝裁定①）：优先级，越界归为中。
+      columnPriority: ReminderPriority.normalize(priority),
       columnIsDeleted: 0,
       columnCreatedAt: now,
       columnUpdatedAt: now,
@@ -3194,7 +3217,7 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
 
   @override
   Future<void> updateReminder(int id,
-      {String? title, String? detail, DateTime? dueAt}) async {
+      {String? title, String? detail, DateTime? dueAt, int? priority}) async {
     _guardWrite();
     final values = <String, Object?>{};
     if (title != null) {
@@ -3206,6 +3229,10 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     }
     if (detail != null) values[columnDetail] = detail;
     if (dueAt != null) values[columnReminderDueAt] = dueAt.millisecondsSinceEpoch;
+    // V4.1 批次 2（元宝裁定①）：日程签编辑时可改优先级。
+    if (priority != null) {
+      values[columnPriority] = ReminderPriority.normalize(priority);
+    }
     if (values.isEmpty) return;
     values[columnUpdatedAt] = DateTime.now().millisecondsSinceEpoch;
     final db = await open();
@@ -3402,18 +3429,25 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
 
   @override
   Future<void> defer(String sourceType, int sourceId,
-      {String? reason, int days = 1}) async {
+      {String? reason, int days = 1, DateTime? dueOn}) async {
     _guardWrite();
     final db = await open();
     final now = DateTime.now().millisecondsSinceEpoch;
     final existing = await _readTodoStateRow(db, sourceType, sourceId);
-    // 基准：已有 next_due_at 就从它往后推，否则从源条目的原到期日往后推。
-    final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??
-        await _sourceDueAt(db, sourceType, sourceId) ??
-        now;
-    final newNext = DateTime.fromMillisecondsSinceEpoch(anchor)
-        .add(Duration(days: days))
-        .millisecondsSinceEpoch;
+    // 两种口径（元宝裁定③）：
+    // - dueOn 给了 → **绝对日期**，直接写 next_due_at（延到明天 / 具体日期）。
+    // - 没给 → **相对推进**：从现有 next_due_at（没有就从源条目原到期日）往后推 N 天。
+    final int newNext;
+    if (dueOn != null) {
+      newNext = dueOn.millisecondsSinceEpoch;
+    } else {
+      final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??
+          await _sourceDueAt(db, sourceType, sourceId) ??
+          now;
+      newNext = DateTime.fromMillisecondsSinceEpoch(anchor)
+          .add(Duration(days: days))
+          .millisecondsSinceEpoch;
+    }
     final count = ((existing?[columnDeferCount] as num?)?.toInt() ?? 0) + 1;
     if (existing == null) {
       await db.insert(tableTodoStates, <String, Object?>{

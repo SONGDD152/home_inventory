@@ -9,6 +9,9 @@ import 'data/inventory_database.dart';
 import 'data/report_state_store.dart';
 import 'domain/domain_hub.dart';
 import 'domain/overview_reader.dart';
+import 'domain/reminder_source.dart';
+import 'domain/reminder_sources.dart';
+import 'domain/todo_state_writer.dart';
 import 'ui/home_page.dart';
 
 /// 应用入口：生产使用 sqflite 默认工厂，注入到界面。
@@ -33,6 +36,21 @@ Future<void> main() async {
     reminders: life,
     overview: InventoryOverviewReader(life: life, work: work),
     stateStore: FileReportStateStore(),
+    // V4.1 批次 2：日报导出要带「已完成 / 未完成」两块内容，
+    // 数据来自催办源 + todo_states 状态——与概览日报签**同一份口径**。
+    //
+    // **逐域注入**：`todo_states` 每库一张表，催办条目却跨两域，
+    // 只给生活库 → 工作区条目的状态读不到 → 导出与界面对不上
+    // （违反元宝 B6 的同源要求）。
+    todoReaders: <InventoryDomain, TodoStateReader>{
+      InventoryDomain.life: life,
+      InventoryDomain.work: work,
+    },
+    todoSources: <ReminderSource>[
+      LoanDueReminderSource(life, InventoryDomain.life),
+      LoanDueReminderSource(work, InventoryDomain.work),
+      ScheduleReminderSource(life, InventoryDomain.life),
+    ],
   );
 
   runApp(HomeInventoryApp(
@@ -75,7 +93,13 @@ class HomeInventoryApp extends StatelessWidget {
     return MaterialApp(
       title: '家庭仓储布局',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.green),
-      home: HomePage(repository: database, hub: hub),
+      // V4.1 批次 2：日报服务往下传到 HomePage → 概览日报签的「日报」入口
+      // 才能打开日报页（此前 DailyReportPage 是孤儿页，全仓无引用）。
+      home: HomePage(
+        repository: database,
+        hub: hub,
+        reportService: reportService,
+      ),
     );
   }
 }

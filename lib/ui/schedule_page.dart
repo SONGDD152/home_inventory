@@ -60,6 +60,7 @@ class _SchedulePageState extends State<SchedulePage> {
       result.title,
       detail: result.detail,
       dueAt: result.dueAt,
+      priority: result.priority,
     );
     await _reload();
   }
@@ -69,7 +70,12 @@ class _SchedulePageState extends State<SchedulePage> {
     if (repo == null) return;
     final result = await _editDialog(existing: item);
     if (result == null) return;
-    await repo.updateReminder(item.id!, title: result.title, detail: result.detail);
+    await repo.updateReminder(
+      item.id!,
+      title: result.title,
+      detail: result.detail,
+      priority: result.priority,
+    );
     await _reload();
   }
 
@@ -113,6 +119,8 @@ class _SchedulePageState extends State<SchedulePage> {
     DateTime? dueAt = existing?.dueAt == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(existing!.dueAt!);
+    // V4.1 批次 2（元宝裁定①）：优先级可设（高 / 中 / 低，默认中）。
+    var priority = ReminderPriority.normalize(existing?.priority);
     return showDialog<_ReminderDraft>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -152,6 +160,37 @@ class _SchedulePageState extends State<SchedulePage> {
                     ? '选日期（可选）'
                     : '日期：${dueAt!.month}月${dueAt!.day}日'),
               ),
+              const SizedBox(height: 12),
+              // 优先级（裁定①）：决定催办区排序 + 提前进区天数。
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('优先级',
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: Theme.of(context).colorScheme.outline)),
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: <Widget>[
+                  for (final p in ReminderPriority.all) ...<Widget>[
+                    ChoiceChip(
+                      key: Key('reminder_priority_$p'),
+                      label: Text(ReminderPriority.labelOf(p)),
+                      selected: priority == p,
+                      onSelected: (_) => setLocal(() => priority = p),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _priorityHint(priority),
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ),
             ],
           ),
           actions: <Widget>[
@@ -170,6 +209,7 @@ class _SchedulePageState extends State<SchedulePage> {
                       ? null
                       : detailController.text.trim(),
                   dueAt: dueAt,
+                  priority: priority,
                 ));
               },
               child: const Text('保存'),
@@ -178,6 +218,23 @@ class _SchedulePageState extends State<SchedulePage> {
         ),
       ),
     );
+  }
+
+  /// 优先级提示文案（把「提前几天进催办区」讲明白）。
+  static String _priorityHint(int priority) {
+    final days = ReminderPriority.leadDaysOf(priority);
+    if (days <= 0) return '到期当天才进催办区';
+    return '到期前 $days 天进催办区';
+  }
+
+  /// 列表副标题：备注 + 优先级标记（裁定①，一眼看见这条有多急）。
+  Widget? _subtitle(Reminder item) {
+    final parts = <String>[];
+    if (item.detail != null && item.detail!.isNotEmpty) {
+      parts.add(item.detail!);
+    }
+    parts.add('优先级${ReminderPriority.labelOf(item.priority)}');
+    return Text(parts.join(' · '));
   }
 
   @override
@@ -230,7 +287,7 @@ class _SchedulePageState extends State<SchedulePage> {
                           style: TextStyle(
                               decoration:
                                   item.isDone ? TextDecoration.lineThrough : null)),
-                      subtitle: item.detail == null ? null : Text(item.detail!),
+                      subtitle: _subtitle(item),
                       trailing: PopupMenuButton<String>(
                         key: Key('reminder_menu_${item.id}'),
                         onSelected: (value) {
@@ -274,9 +331,13 @@ class _ReminderDraft {
     required this.title,
     this.detail,
     this.dueAt,
+    this.priority = ReminderPriority.normal,
   });
 
   final String title;
   final String? detail;
   final DateTime? dueAt;
+
+  /// 优先级（0 低 / 1 中 / 2 高）——元宝裁定①。
+  final int priority;
 }

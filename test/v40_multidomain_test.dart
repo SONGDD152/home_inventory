@@ -383,7 +383,11 @@ void main() {
       overview: InventoryOverviewReader(life: life, work: work),
     );
     final content = await service.buildContent(DateTime(2026, 11, 25));
-    expect(content, contains('提醒清单'));
+    // V4.1 批次 2（元宝 B6/B7）：「提醒清单」拆成**已完成 / 未完成**两块
+    // ——未完成条目带标红标记（`!!` 前缀，docx 里走 OOXML 真红色）。
+    // 「仓储动态」「账目快照」两块不变。
+    expect(content, contains('已完成'));
+    expect(content, contains('未完成'));
     expect(content, contains('仓储动态'));
     expect(content, contains('账目快照'));
     expect(content, contains('生活区'));

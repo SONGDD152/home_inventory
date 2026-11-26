@@ -14,12 +14,19 @@ abstract class ReminderRepository {
   Future<List<Reminder>> getReminders({bool includeDone = true});
 
   /// 新增一条提醒，返回新条目 id。
+  ///
+  /// [priority]：0 低 / 1 中 / 2 高，默认 1 中（元宝裁定①）。
   Future<int> addReminder(String title,
-      {String? detail, DateTime? dueAt, String? repeatRule});
+      {String? detail,
+      DateTime? dueAt,
+      String? repeatRule,
+      int priority = ReminderPriority.normal});
 
   /// 编辑提醒（只改传入的字段）。
+  ///
+  /// [priority]：0 低 / 1 中 / 2 高（元宝裁定①，日程签编辑时可设）。
   Future<void> updateReminder(int id,
-      {String? title, String? detail, DateTime? dueAt});
+      {String? title, String? detail, DateTime? dueAt, int? priority});
 
   /// 标记完成 / 取消完成（两态，不硬删——已完成也要留着，日报要看）。
   Future<void> setReminderDone(int id, {bool done = true});

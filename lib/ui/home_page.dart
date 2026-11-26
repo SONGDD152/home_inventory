@@ -2,6 +2,7 @@
 // Flutter 3.50 将 material.dart 标记为 deprecated，Material 组件本版本仍可用。
 import 'package:flutter/material.dart';
 
+import '../data/daily_report_service.dart';
 import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
@@ -16,6 +17,7 @@ import '../domain/reminder_sources.dart';
 import '../domain/todo_state_writer.dart';
 import 'backup_page.dart';
 import 'calibration_page.dart';
+import 'daily_report_page.dart';
 import 'home_module.dart';
 import 'item_list_page.dart';
 import 'location_list_page.dart';
@@ -42,6 +44,7 @@ class HomePage extends StatefulWidget {
     required this.repository,
     this.title = '家庭仓储布局',
     this.hub,
+    this.reportService,
   });
 
   final InventoryRepository repository;
@@ -49,6 +52,9 @@ class HomePage extends StatefulWidget {
 
   /// V4.0 域中枢（null = 单域形态）。
   final DomainHub? hub;
+
+  /// V4.1 批次 2：日报服务（null = 无日报能力，概览页不显示日报入口）。
+  final DailyReportService? reportService;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -2273,9 +2279,14 @@ class _HomePageState extends State<HomePage> {
           // V4.1：概览**只写待办状态**（不碰账）——TodoStateWriter 的入参
           // 只有 sourceType + sourceId，拿不到任何仓储句柄，
           // 「概览改不了账」在编译期成立。
-          todoWriter: _todoWriter(),
+          //
+          // V4.1 批次 2：按域各给一个写口——物理分库下 `todo_states`
+          // 每库一张，只给当前域的话另一个域的状态读不到。
+          todoWriters: _todoWriters(),
           switchTimeoutCount: widget.hub!.switchTimeoutCount,
           onOpenDomain: _openDomainSection,
+          // V4.1 批次 2：日报入口（修孤儿页）。
+          onOpenReport: widget.reportService == null ? null : _openReport,
         );
       }
       switch (_currentModule.kind) {
@@ -2295,14 +2306,28 @@ class _HomePageState extends State<HomePage> {
     return _storageBody();
   }
 
-  /// V4.1：待办状态写入口（只写 `todo_states`，不碰账）。
+  /// V4.1：各域的待办状态写入口（只写 `todo_states`，不碰账）。
   ///
-  /// 取当前域的仓储实例——它是 `InventoryDatabase` 时才具备待办写能力；
-  /// 拿不到就退化为只读展示（页面不崩，只是不能打勾）。
-  TodoStateWriter? _todoWriter() {
-    final repo = _execRepo;
-    if (repo is TodoStateWriter) return repo as TodoStateWriter;
-    return null;
+  /// **按域各取一个**：物理分库下 `todo_states` 是**每库一张表**，
+  /// 概览催办区却同时展示生活域与工作域的条目——只给当前域一个写口，
+  /// 另一个域的状态根本读不到（条目永远显示「未处理」）。
+  ///
+  /// 取不到能力的域直接不登记 → 那一域的条目退化为只读展示（页面不崩）。
+  ///
+  /// **写边界不受影响**：每个写口的能力面仍然只有「写 `todo_states`」，
+  /// 入参仍然只有 sourceType + sourceId，拿不到任何仓储句柄。
+  Map<InventoryDomain, TodoStateWriter> _todoWriters() {
+    final hub = widget.hub;
+    if (hub == null) return const <InventoryDomain, TodoStateWriter>{};
+    final writers = <InventoryDomain, TodoStateWriter>{};
+    for (final domain in InventoryDomain.values) {
+      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
+      final repo = instance.repository;
+      if (repo is TodoStateWriter) {
+        writers[domain] = repo as TodoStateWriter;
+      }
+    }
+    return writers;
   }
 
   /// 「去某域建首个位置」——空态引导用（切到目标域的仓储页）。
@@ -2314,6 +2339,17 @@ class _HomePageState extends State<HomePage> {
     await _switchSection(
       domain == InventoryDomain.life ? _TopSection.life : _TopSection.work,
     );
+  }
+
+  /// V4.1 批次 2：打开日报页（**孤儿页修复**）。
+  ///
+  /// 之前 `DailyReportPage` 全仓零引用 → 日报能自动生成、能导出，
+  /// 但界面上没有任何入口能打开它（PM 装了 V4.0 也进不去日报）。
+  /// 现在概览页日报签右上角有「日报」按钮，点了进这里。
+  void _openReport() {
+    final service = widget.reportService;
+    if (service == null) return;
+    _push(DailyReportPage(service: service));
   }
 
   /// V4.0：提醒源注册表（统一 [ReminderSource] 接口，概览代码不因新增源而改）。

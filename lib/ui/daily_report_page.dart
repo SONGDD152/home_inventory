@@ -152,7 +152,10 @@ class _DailyReportPageState extends State<DailyReportPage> {
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          // 静态文字而不是持续转的 CircularProgressIndicator：
+          // 持续动画会让 widget 测试的 pumpAndSettle 永远等不到静止帧
+          // （V4.1 批次 1 踩过的坑：概览页测试卡死 16 分钟）。
+          ? const Center(child: Text('加载中…'))
           : Padding(
               padding: const EdgeInsets.all(16),
               child: Column(

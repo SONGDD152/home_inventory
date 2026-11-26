@@ -14,6 +14,21 @@ import 'dart:typed_data';
 /// 产出的 `.docx` 是标准 OOXML 包（ZIP + XML），
 /// Word / WPS 可直接打开、编辑（本项目的测试会解压校验结构与文本）。
 ///
+/// V4.1 批次 2：正文行（可标红）。
+///
+/// 元宝 B6：「未完成：提示框内未处理的条目，**标红显示**」。
+/// Markdown 没有颜色语法，所以 .md 用 `!!` 前缀标记；
+/// .docx 走 OOXML 的 `<w:color w:val="FF0000"/>` —— **真红色**。
+class DocxLine {
+  const DocxLine(this.text, {this.red = false});
+
+  /// 正文文本。
+  final String text;
+
+  /// 是否标红（未完成条目）。
+  final bool red;
+}
+
 /// ZIP 采用 **store（不压缩）** 模式：实现最小、格式合法，
 /// 文件略大一点，对日报这种小文档无所谓。
 class DocxWriter {
@@ -23,6 +38,17 @@ class DocxWriter {
   ///
   /// [title] 是文档标题（一级标题）；[lines] 是正文行。
   static Uint8List build({String? title, List<String> lines = const <String>[]}) {
+    return buildLines(
+      title: title,
+      lines: lines.map((t) => DocxLine(t)).toList(),
+    );
+  }
+
+  /// 生成一份 docx（支持标红行）。
+  static Uint8List buildLines({
+    String? title,
+    required List<DocxLine> lines,
+  }) {
     final entries = <String, List<int>>{
       '[Content_Types].xml': _utf8(_contentTypes()),
       '_rels/.rels': _utf8(_rootRels()),
@@ -91,7 +117,7 @@ class DocxWriter {
 </w:styles>
 ''';
 
-  static String _documentXml(String? title, List<String> lines) {
+  static String _documentXml(String? title, List<DocxLine> lines) {
     final buffer = StringBuffer();
     buffer.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
     buffer.write(
@@ -102,7 +128,11 @@ class DocxWriter {
           '<w:r><w:t xml:space="preserve">${_escapeXml(title)}</w:t></w:r></w:p>');
     }
     for (final line in lines) {
-      buffer.write('<w:p><w:r><w:t xml:space="preserve">${_escapeXml(line)}</w:t></w:r></w:p>');
+      // 标红：走 OOXML 的 run properties（真红色，Word / WPS 都能显示）。
+      final runProps =
+          line.red ? '<w:rPr><w:color w:val="FF0000"/><w:b/></w:rPr>' : '';
+      buffer.write('<w:p><w:r>$runProps'
+          '<w:t xml:space="preserve">${_escapeXml(line.text)}</w:t></w:r></w:p>');
     }
     buffer.write('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
         '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '

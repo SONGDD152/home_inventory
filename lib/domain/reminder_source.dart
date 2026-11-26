@@ -1,4 +1,5 @@
 import '../data/domain.dart';
+import '../data/reminder.dart';
 import '../data/todo_state.dart';
 
 /// V4.0：概览里的一条提醒条目。
@@ -21,6 +22,8 @@ class OverviewEntry {
     this.dayDelta,
     this.deferCount = 0,
     this.handleNote,
+    // ── V4.1 批次 2 新增 ──
+    this.priority = ReminderPriority.normal,
   });
 
   /// 条目唯一 id（同一来源内唯一即可）。
@@ -63,6 +66,15 @@ class OverviewEntry {
 
   /// 处理备注 / 延期原因。
   final String? handleNote;
+
+  // ── V4.1 批次 2 新增 ──
+
+  /// 优先级（0 低 / 1 中 / 2 高）——元宝裁定①。
+  final int priority;
+
+  /// 提前进催办区的天数（裁定②）——由优先级推导：
+  /// 高 = 提前 3 天，中 = 提前 1 天，低 = 不提前。
+  int get leadDays => ReminderPriority.leadDaysOf(priority);
 
   /// 与 `todo_states` 配对的业务键（`'{sourceType}_{sourceId}'`）。
   ///

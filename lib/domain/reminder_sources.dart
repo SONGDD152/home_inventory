@@ -1,5 +1,6 @@
 import '../data/domain.dart';
 import '../data/inventory_repository.dart';
+import '../data/reminder.dart';
 import '../data/reminder_repository.dart';
 import '../data/todo_state.dart';
 import 'reminder_source.dart';
@@ -74,6 +75,13 @@ class LoanDueReminderSource implements ReminderSource {
         startedAt: loan.borrowedAt,
         expectedDays: expected,
         dayDelta: delta,
+        // V4.1 批次 2（元宝裁定①）：系统类优先级。
+        //
+        // 系统类没有「创建时设置优先级」的入口（借出是仓储动作带出来的，
+        // 不是用户在提醒库里新建的），所以由源自己定。
+        // 这里定**高**（提前 3 天进催办区）：借出到期是「忘了会出事」的事，
+        // 与日程类默认「中」不同——**此口径为 buddy 定，待元宝追认**。
+        priority: ReminderPriority.high,
       ));
     }
     return entries;
@@ -117,6 +125,8 @@ class ScheduleReminderSource implements ReminderSource {
         sourceId: item.id,
         startedAt: item.createdAt,
         dayDelta: delta,
+        // V4.1 批次 2（元宝裁定①）：优先级 —— 决定催办区排序与提前量。
+        priority: item.priority,
       );
     }).toList();
   }

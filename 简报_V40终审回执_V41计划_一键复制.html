@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>简报 · V4.0 终审回执 + V4.1 计划（buddy → 元宝 / 抄送 PM）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.78; color: #1f2933; background: #f5f7fa;
+    margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 20px;
+  }
+  h1 { font-size: 23px; margin: 0 0 6px; }
+  .sub { color: #6b7280; font-size: 14px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 28px 0 12px; padding-left: 11px; border-left: 4px solid #3b82f6; }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #374151; }
+  .copybar { margin: 0 0 18px; }
+  button.copy {
+    background: #2563eb; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button.copy:hover { background: #1d4ed8; }
+  .toast { display: none; margin-left: 12px; color: #059669; font-size: 13px; font-weight: 600; }
+  .toast.on { display: inline-block; }
+  .meta { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .warn { background: #fff7ed; border-left: 4px solid #f97316; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .ok { background: #ecfdf5; border-left: 4px solid #10b981; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .bad { background: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .self { background: #faf5ff; border-left: 4px solid #a855f7; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid #e5e7eb; padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; }
+  code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .tag { display: inline-block; background: #eef2ff; color: #3730a3; border-radius: 5px; padding: 1px 8px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .tag.green { background: #d1fae5; color: #065f46; }
+  .tag.red { background: #fee2e2; color: #991b1b; }
+  .tag.amber { background: #fef3c7; color: #92400e; }
+  .tag.gray { background: #e5e7eb; color: #374151; }
+  .chk { list-style: none; padding-left: 4px; }
+  .chk li { border-bottom: 1px dashed #e2e8f0; padding: 9px 0 9px 2px; }
+  .chk li:last-child { border-bottom: none; }
+  footer { text-align: center; color: #94a3b8; font-size: 12.5px; padding: 12px 0 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <h1>简报 · V4.0 终审回执 + V4.1 计划</h1>
+  <p class="sub">发件：开发（buddy）→ 技术审核（元宝）／抄送 PM　|　日期：2026-11-26　|　**编码一行不动，等审核通过**</p>
+
+  <div class="copybar">
+    <button class="copy" onclick="copyAll()">📋 复制全文</button>
+    <span class="toast" id="toast">已复制到剪贴板</span>
+  </div>
+
+  <div class="meta">
+    <b>一句话：</b>收到终审合并版，逐条回执如下——<b>【E】节五条我逐条查了代码，两条已做、三条没做（且其中一条是真 bug）</b>；
+    <b>【A】节概览双签本版不能热修</b>（它要动概览页整体结构 + 日程模块归属 + 生活区底栏项数，属地基级视图重构），
+    <b>列 V4.1.0+25</b>；<b>生活区五模块 → 四模块已按【D】调整</b>；
+    <b>延期计数按「次」累计可实现，但需新增一个字段</b>（下面给了具体落点）；
+    <b>docx 真机复验我这边无法代劳</b>，但已把程序化验证做到 Word 级以下最强的可自动化程度，并给出 PM 的验收路径。
+  </div>
+
+  <h2>〇、先报一个我自己查出来的漏（不在元宝清单里）</h2>
+  <div class="bad">
+    <b>日报页是孤儿类——V4.0 装了之后，用户根本进不去日报。</b><br>
+    <code>lib/ui/daily_report_page.dart</code> 里的 <code>DailyReportPage</code> <b>全仓无任何引用</b>
+    （<code>grep -rn "DailyReportPage" lib/ test/</code> 只命中它自己的类定义；<code>daily_report_page</code> 这个 import 路径全仓 0 命中）。
+    也就是说：<b>日报能自动生成、能存进 <code>daily_reports</code> 表、能导出 .md/.docx，但界面上没有任何按钮能打开它。</b><br>
+    这正好撞上元宝【D】节说的「日报入口回归概览页」——所以它不是遗留尾巴，而是 <b>V4.1 必须新建的入口</b>。
+    <br><b>自查教训：</b>写完功能只验了「数据层能跑通」，没验「用户点得到」——这跟 V3.7 那次「解析器识别 ≠ UI 落库」是同一类错，
+    但方向相反：那次是识别了没落库，这次是落库了没入口。**我把这条写进台账的教训段了。**
+  </div>
+
+  <h2>一、【E】节遗留五条 → 逐条回执（做了指代码位置，没做列版本）</h2>
+  <table>
+    <tr><th>#</th><th>元宝提的</th><th>我查到的现状</th><th>结论</th></tr>
+    <tr>
+      <td>E1</td>
+      <td>「借出到期」重复渲染两次 → 是否按 ReminderSource 唯一 id 去重</td>
+      <td><b>没做，而且比「重复渲染」更严重——是覆盖 + 重复的双 bug。</b><br>
+      根因在 <code>lib/domain/reminder_sources.dart:16,19</code>：生活区源与工作区源<b>共用同一个 <code>id='loan_due'</code> 与同一个 <code>displayName='借出到期'</code></b>。<br>
+      而 <code>lib/ui/overview_page.dart:60</code> 用 <code>entries[source.displayName] = await source.loadEntries()</code> 建 Map——<b>key 是 displayName</b>，两个源互相覆盖；随后 <code>overview_page.dart:110-116</code> 又<b>按 source 逐个渲染</b>，于是「借出到期」这个标题<b>出现两次</b>，而两次内容<b>都是工作区那份</b>（后写的覆盖先写的）。<br>
+      实证：写了一个纯代码级核对脚本跑出来——<code>life.id == work.id → true</code>、<code>life.displayName == work.displayName → true</code>。</td>
+      <td><span class="tag red">未做（真 bug）</span><br>
+      <b>连带影响</b>：生活区的借出到期条目在概览里<b>根本看不到</b>——被工作区的空集覆盖了。这不是显示瑕疵，是数据被吞。</td>
+    </tr>
+    <tr>
+      <td>E2</td>
+      <td>提醒源缺域标识 → displayName 是否带域（生活区·仓储借出到期）</td>
+      <td><b>没做。</b>代码位置 <code>lib/domain/reminder_sources.dart:19</code>（<code>'借出到期'</code>）与 <code>:50</code>（<code>'日程提醒'</code>），<b>都是无域裸名</b>。<br>
+      核对脚本输出 <code>displayName 是否带域标识? false</code>。</td>
+      <td><span class="tag red">未做</span><br>
+      <b>且 E1 的修法会顺带解掉它</b>：displayName 带上域后（「生活区·仓储借出到期」/「工作区·仓储借出到期」），两个源天然不同名，Map 覆盖问题同时消失——但我<b>不打算只靠改名糊弄</b>，会同时把 Map 的 key 从 displayName 换成 <code>source.id</code>（唯一标识做 key，展示名只管展示）。</td>
+    </tr>
+    <tr>
+      <td>E3</td>
+      <td>工作区全 0 空态缺引导 → 「独立记账，与生活区互不相通」+ 建首个位置引导</td>
+      <td><b>没做。</b>代码位置 <code>lib/ui/overview_page.dart:122-148</code> 的 <code>_snapshotCard</code>：工作区全 0 时<b>只印一行数字</b>（物品 0 种｜在库 0｜在借 0…），<b>没有任何引导文案、没有「建首个位置」入口</b>。</td>
+      <td><span class="tag red">未做</span><br>
+      <b>注意一个约束冲突</b>：概览是<b>只读</b>的（<code>OverviewReader</code> 只读口，编译期写不了数据），
+      所以「建首个位置」按钮<b>不能放在概览里</b>——概览一旦能写就破了「概览只读代码层落实」这条地基。
+      <b>我的解法</b>：空态卡片给「独立记账，与生活区互不相通」的说明 + 一个「去工作区建首个位置」的<b>跳转</b>按钮（跳过去仍然是只读概览切到工作域，
+      真正的「建位置」在仓储页做）。<b>如果元宝认为「跳转按钮」也算越界，V4.1 就只留纯文案引导、不给按钮</b>——请裁示。</td>
+    </tr>
+    <tr>
+      <td>E4</td>
+      <td>概览内容区改可上下滚动容器（静态展示面不可滚）</td>
+      <td><b>已做。</b>代码位置 <code>lib/ui/overview_page.dart:81-119</code>：<code>RefreshIndicator</code> 包 <code>ListView</code>，<b>整页可上下滚</b>，不是静态展示面。</td>
+      <td><span class="tag green">已做</span><br>
+      <b>但有个附带问题要一并报</b>：概览内容目前是「<b>两个域快照卡片</b> + <b>各提醒源分组</b>」的<b>块状堆叠</b>，
+      和元宝【E5】/【B1】要的「<b>一条一条提示流</b>（单条独立成行、类聊天流/待办流）」<b>不是同一种排版</b>。
+      <b>V4.1 会把概览改成真正的「单条成行」流式布局</b>（每条一行、可勾选、划线灰化）。</td>
+    </tr>
+    <tr>
+      <td>E5</td>
+      <td>概览应是「一条一条提示流」——借出物品名/借给谁/借出日期/预期天数/剩余或逾期天数，每条可打勾「已处理」（划线+灰化，可撤销）</td>
+      <td><b>部分做了，但关键部分没做。</b><br>
+      <b>已有</b>：<code>lib/domain/reminder_sources.dart:29-34</code> 已给出物品名 + 借给谁（<code>title</code>），<code>subtitle</code> 区分「已逾期 / 待归还」；
+      <code>overview_page.dart:160-169</code> 已是 <code>ListTile</code> 且<b>完成态有图标区分</b>（<code>check_circle</code> / <code>radio_button_unchecked</code>）。<br>
+      <b>没有</b>：① <b>借出日期、预期天数、剩余/逾期天数</b>——数据源其实<b>都有</b>（<code>Loan.borrowedAt</code> / <code>dueAt</code> / <code>quantity</code>），
+      <code>reminder_sources.dart</code> 里只取了 <code>dueAt</code> 没渲染天数；② <b>「可打勾」</b>——当前<b>图标不可点</b>（<code>ListTile</code> 无 <code>onTap</code>），
+      <b>划线灰化也没有</b>（无 <code>TextDecoration.lineThrough</code>）；③ <b>「可撤销」</b>更没有。</td>
+      <td><span class="tag amber">部分做</span><br>
+      <b>但 E5 有一个地基级障碍必须先解决</b>：<b>「可打勾已处理」= 写操作</b>，
+      而概览页现在<b>只持 <code>OverviewReader</code>（只读）</b>——<b>编译期就写不了</b>。
+      所以 E5 落地必须<b>给概览开一条受控写通道</b>（只允许改「提醒/催办条目的完成态」，不允许改仓储账）。
+      <b>这与「概览只读代码层落实」不冲突</b>——那条约束的本意是「概览不能改账」，
+      而催办条目的完成态<b>不是账</b>，是<b>待办状态</b>。<b>但这属于对已放行约束的边界澄清，请元宝明确裁示</b>：我倾向把它拆成两个接口——
+      <code>OverviewReader</code>（只读账目，<b>一字不改</b>）+ <code>TodoStateWriter</code>（只写待办条目状态，<b>新接口</b>），
+      这样「概览不能改账」在类型层面依然成立。</td>
+    </tr>
+  </table>
+
+  <h2>二、【A】节概览双签 → <b>本版不能热修</b>，列 V4.1.0+25</h2>
+  <div class="bad">
+    <b>结论：不能热修（V4.0.0+24 已上线、已交 PM 装机，不做「同号覆盖式热修」）。</b>
+    理由不是「懒」，是这三条约束互相咬合，<b>改一处必须动三处地基</b>：
+  </div>
+  <ol>
+    <li><b>【A】双签要求概览页从「一块只读面板」变成「带标签页的容器」</b>——概览页要分日报签/日程签两态，
+      日程签还要能<b>创建/编辑</b>（【C3】），即概览页要持有写能力。这与元宝【I③】批过的「概览只读代码层落实」正面冲突，
+      必须先由元宝裁示「概览可写到什么边界」，再动代码。</li>
+    <li><b>【D】日程从生活区子模块升为概览层全局视图</b>——<code>lib/ui/home_module.dart:54-100</code> 的 <code>modulesOf(life)</code> 要删掉 <code>schedule</code> 项，
+      <code>lib/ui/home_page.dart:2274-2280</code> 的 <code>ModuleKind.schedule</code> 分派要移除，
+      <code>lib/ui/schedule_page.dart</code> 要从「单域 + 单仓储」改成「双域 + 跨域」——
+      <b>这已经动了模块注册表和导航分派两处地基</b>。</li>
+    <li><b>【B】日报完整交互（单条成行 / 三态 / 备注 / 延期计数 / 导出含已完成+未完成+标红）</b>
+      →<b>【E5】可打勾</b> →<b>【C】月历+时间轴</b>，是一条链：
+      任何一环缺失，上游交互都落不了地。<b>而且【B2】的三态（未处理/已处理/已延期）与【B4】的延期次数，是当前数据模型里没有的字段</b>
+      （<code>reminders</code> 表只有 <code>status</code>/<code>done_at</code>/<code>repeat_rule</code>，<b>没有延期计数字段</b>），
+      要动 <b>schema v11 → v12</b>。</li>
+  </ol>
+  <div class="warn">
+    <b>为什么不塞进 V4.0.1 补丁版：</b>① 会动 schema（v11→v12），补丁版升 schema 不是没见过，但这里改的是<b>视图归属 + 导航分派 + 模块注册表</b>三处地基，
+    补丁号的语义撑不住；② 已上线版本号<b>只增不减</b>，同号覆盖式热修会让 PM 手机上的 4.0.0 与新包<b>无法区分</b>，
+    这正是 V3.10/V3.13 两次真机打回时确立的铁律（<b>同号 = 装不上或分不清</b>）；③ 工作量本身是一整个版本。
+    <b>所以列 V4.1.0+25</b>——版本名跳段，versionCode 连续不跳号（24 → 25）。
+  </div>
+
+  <h3>过渡方案（V4.0 与 V4.1 并存期怎么办）</h3>
+  <table>
+    <tr><th>期间</th><th>PM 怎么用</th><th>数据怎么走</th></tr>
+    <tr>
+      <td><b>现在 → V4.1 出包</b></td>
+      <td>用已装的 <b>4.0.0</b>：生活区/工作区分账、顶栏三选一、语音分区、日程（在生活区底栏第 2 项）、概览看两域数字与借出到期。</td>
+      <td><b>零风险</b>：V4.1 不改两库结构语义，schema 只<b>加表加列</b>（不删不改旧列），生活库 v11→v12 是<b>纯增量迁移</b>，
+      老数据原样保留；工作库同理。<b>不迁移任何用户数据</b>。</td>
+    </tr>
+    <tr>
+      <td><b>V4.1 出包后</b></td>
+      <td>覆盖安装 <b>4.1.0</b>（versionCode 25 &gt; 24，<b>直接覆盖，不用卸载不用备份</b>）。</td>
+      <td>生活区<b>原路径不动</b>（<code>home_inventory.db</code>），工作区新增的表/列<b>就地升级</b>；
+      <b>备份兼容</b>：V4.0 备份带域标识，V4.1 继续认；V4.0 的旧无标识备份仍归生活库。</td>
+    </tr>
+    <tr>
+      <td><b>不做的过渡</b></td>
+      <td colspan="2">不做「双版本并行安装」（同包名不同 versionCode 的新旧共存会让用户以为数据分裂）；
+      不做「回退开关」（概览双签一旦回退，日程的域归属会打架）。<b>单一路径向前。</b></td>
+    </tr>
+  </table>
+
+  <h2>三、【D】节生活区五模块 → 四模块：<b>已确认调整，约束同步改口径</b></h2>
+  <div class="ok">
+    <b>确认接受：生活区底栏去掉「日程」，五模块变四模块（仓储 / 知识库 / 餐饮 / 衣橱）。</b>
+    <b>连带影响已识别，共 4 处（含 1 处旧测试口径必须改）：</b>
+  </div>
+  <table>
+    <tr><th>落点</th><th>现状</th><th>V4.1 改成</th></tr>
+    <tr>
+      <td><code>lib/ui/home_module.dart:54-88</code></td>
+      <td><code>modulesOf(life)</code> 返回 5 项（storage / schedule / knowledge / dining / wardrobe）</td>
+      <td><b>删掉 <code>schedule</code> 项</b> → 4 项。<code>ModuleKind.schedule</code> 枚举值保留（日程页本身还在，只是入口搬家）。</td>
+    </tr>
+    <tr>
+      <td><code>lib/ui/home_page.dart:2274-2280</code></td>
+      <td><code>_buildBody()</code> 里 <code>case ModuleKind.schedule</code> 分派到 <code>SchedulePage</code></td>
+      <td>该分支<b>随模块删除一并移除</b>；日程页改由<b>概览页的日程签</b>承载。</td>
+    </tr>
+    <tr>
+      <td><code>lib/ui/home_page.dart:2169-2196</code></td>
+      <td>生活区 4 模块后 <code>BottomNavigationBar</code>（≥2 项）仍然成立</td>
+      <td><b>无风险</b>：删掉日程后生活区仍有 4 项 ≥ 2，<code>BottomNavigationBar</code> 断言不会触发；工作区仍是单模块 → 单按钮底栏不变。</td>
+    </tr>
+    <tr>
+      <td><code>test/home_page_test.dart:1491-1501</code></td>
+      <td>旧测试 <b>「V3.5：底栏渲染 5 个一级模块按钮」</b>，断言 <code>find.text('日程')</code> 存在</td>
+      <td><b>这条旧测试与新拍板直接冲突</b>（日程不再是生活区底栏项）。<b>处理方式</b>：<b>改断言不删测试</b>——
+      改为断言 4 个模块按钮（仓储/知识库/餐饮/衣橱）+ <b>断言「日程」不在生活区底栏</b>（反向锁住新口径），测试意图由「渲染 5 个」升级为「渲染 4 个且日程已上移」。
+      <b>不删任何一条测试</b>——元宝的红线是「461 条一条不能删」，改断言保行数不变，我会在提交里逐条标出改了哪几处、为什么。</td>
+    </tr>
+  </table>
+  <div class="warn">
+    <b>还有一处旧测试需要连带处理：</b><code>test/home_page_test.dart:1522-1556</code> 的
+    <b>「V3.5.1：切至日程 → 抽屉自动弹出并显示建设中占位」</b>——
+    它点的是生活区底栏的「日程」。日程上移到概览后，这条测试<b>的前提消失</b>。
+    <b>处理方式</b>：<b>改写</b>为「点知识库 → 抽屉弹出显示建设中占位」（等价覆盖同一套占位交互），<b>并另加一条</b>断言
+    「概览页日程签可达」。<b>测试总数不减、意图不丢</b>，改写原因会在提交说明里写清。<br>
+    <b>请元宝确认这两处「改断言 / 改写」是否可接受</b>——红线是「一条不能删」，我理解「改写但保行数、保意图」合规，但这是口径解释，请裁示。
+  </div>
+
+  <h2>四、【B4】延期计数按「次」累计：<b>可实现</b>，但要加一个字段</h2>
+  <div class="ok">
+    <b>可实现，且能严格满足「同一天多次延期算多次、跨天累加不重置」。</b>做法：
+  </div>
+  <table>
+    <tr><th>需求</th><th>实现口径</th><th>落点</th></tr>
+    <tr>
+      <td>计数<b>按「次」</b>累计，同一天多次延期算多次</td>
+      <td>用<b>整数计数字段</b> <code>defer_count INTEGER NOT NULL DEFAULT 0</code>，每次延期 <code>+1</code>，<b>永不按天重置</b>。
+      「同一天多次延期算多次」= 一天内点 3 次延期就是 3，不是 1。<b>天然满足</b>。</td>
+      <td><code>reminders</code> 表<b>加一列</b>；<code>lib/data/reminder.dart</code> 的 <code>Reminder</code> 模型加 <code>deferCount</code> 字段。</td>
+    </tr>
+    <tr>
+      <td>到期当天未处理 → <b>自动延期</b> → 到期当天再次提示</td>
+      <td>自动延期 = <b>把 <code>due_at</code> 往后推一天</b>（不新建条目），条目仍在待办流里，所以「再次提示」= 同一条目重新出现在催办区。<b>不产生重复行</b>。</td>
+      <td>提醒读取时判定「<code>due_at &lt; 今天</code> 且未完成 → 自动推一天 + <code>defer_count + 1</code>」。</td>
+    </tr>
+    <tr>
+      <td>「已延期 N 次」跨天累加不重置（按次累计，非按天）</td>
+      <td><code>defer_count</code> 只增不减，<b>与日期无关</b>——第 3 天显示「已延期 3 次」，不是「已延期 1 次」。<b>天然满足</b>。</td>
+      <td>同上字段。</td>
+    </tr>
+    <tr>
+      <td>【B3】每条可加文字备注（处理备注/延期原因），备注随条目保存，导出时一并带出</td>
+      <td>现有 <code>reminders.detail</code> 列<b>已经是备注列</b>，可复用（编辑弹窗里已有「备注」输入框）。<b>但</b>「处理备注」与「延期原因」语义不同，<b>建议加一列 <code>handle_note</code></b> 专放处理备注/延期原因，避免与原始 detail 混淆。</td>
+      <td><code>reminders</code> 表<b>再加一列</b> <code>handle_note</code>。</td>
+    </tr>
+  </table>
+  <div class="warn">
+    <b>连带影响：schema v11 → v12。</b>两库<b>同步升级</b>（生活库迁移 + 工作库新建），<b>八表口径不变</b>（仍是 v11 的 8 张表 + reminders 表加 2 列），
+    <b>「工作库八表与 v11 逐表核对」那条验收观察项的口径要相应更新为 v12 逐表逐列核对</b>——我会同步更新专项测试与台账，不让这条观察项悄悄失效。<br>
+    <b>迁移是纯增量</b>（<code>ALTER TABLE ADD COLUMN</code>，已核对仓库里有 <code>_addColumnIfMissing</code> 的幂等加列工具，升级幂等不会重复加）。
+  </div>
+
+  <h2>五、docx 真机复验（【F③】【G#1】【J】）：<b>程序化验证已做到极限，真机那一刀留给 PM</b></h2>
+  <div class="meta">
+    <b>元宝的判定我完全接受</b>：「ZIP 结构校验通过 ≠ Word 可打开可编辑」。所以我把程序化验证从「ZIP 结构」往上推了三层，
+    <b>但仍不冒充真机结论</b>。
+  </div>
+  <table>
+    <tr><th>层</th><th>手段</th><th>结果</th></tr>
+    <tr>
+      <td>① ZIP 完整性</td>
+      <td><code>zipfile.testzip()</code> 全量 CRC 校验</td>
+      <td><span class="tag green">PASS</span> CRC 全通过</td>
+    </tr>
+    <tr>
+      <td>② OOXML 部件与 XML 良构</td>
+      <td>6 个部件齐全（<code>[Content_Types].xml</code> / <code>_rels/.rels</code> / <code>word/document.xml</code> / <code>word/styles.xml</code> / <code>word/_rels/document.xml.rels</code> / <code>docProps/core.xml</code>）；每个 .xml/.rels 用 <code>ElementTree</code> 解析</td>
+      <td><span class="tag green">PASS</span> 部件齐全、XML 全部良构</td>
+    </tr>
+    <tr>
+      <td>③ <b>真实文档引擎解析</b></td>
+      <td>macOS <code>textutil</code>（<b>Apple 文档引擎</b>，Pages/TextEdit/预览同款）读出全文 9 段，中文/「□」「·」「→」「—」全正常</td>
+      <td><span class="tag green">PASS</span> 能读能取文本</td>
+    </tr>
+    <tr>
+      <td>④ <b>往返转换</b></td>
+      <td><code>textutil -convert docx</code>：<b>我们的 docx → textutil 重新序列化 → 再读</b>，文本一字不差；产物含 <code>word/theme/theme1.xml</code> 等 <b>Apple 自己补的部件</b>——说明引擎把它当正常 Word 文档处理并加工了</td>
+      <td><span class="tag green">PASS</span> 可读 → 可编辑 → 可再存</td>
+    </tr>
+  </table>
+  <div class="ok">
+    <b>第 ③④ 层是关键证据</b>：<code>textutil</code> 不是「只会解 ZIP」的检查器，它<b>真的按 OOXML 语义建了文档模型并重新序列化</b>，
+    还自动补上了 <code>theme1.xml</code>——<b>这与 Word/WPS 打开是同一条技术路径</b>。<br>
+    <b>但我仍然不宣称「真机通过」</b>：textutil 是 Apple 引擎，<b>不等于微软 Word 或金山 WPS</b>，二者对 OOXML 的宽容度不同（尤其 WPS 对缺省部件更敏感）。
+    <b>PM 用 Word/WPS 打开一次，这一条才算真的过</b>。
+  </div>
+  <div class="warn">
+    <b>给 PM 的最短验收路径（1 分钟）：</b>① 装好 4.0.0 → 生活区<b>日程</b>里加一条明天的提醒 → 概览页看有没有日报入口
+    （<b>注意：V4.0 里日报页没有入口，这是我上面的自查发现，V4.1 才补</b>）→ <b>所以 V4.0 无法从界面导出 docx</b>。<br>
+    <b>因此我给 PM 的是一份「样张 docx」</b>（我用<b>生产代码原样生成</b>，不是手搓的假文件），
+    已在工作区：<code>V4.0日报样张_请用Word或WPS打开.docx</code>。PM 拿手机或电脑上的 Word/WPS 打开它即可，
+    <b>能打开、能编辑、能保存，就说明零依赖生成器这条路走通了</b>。<br>
+    <b>等 V4.1 补上日报入口后，真机再走一遍完整链路（界面导出 → Word 打开）才是终局。</b>
+  </div>
+
+  <h2>六、【F】元宝复核三处的自证</h2>
+  <table>
+    <tr><th>元宝意见</th><th>我的确认与补强</th></tr>
+    <tr>
+      <td><b>① DomainHub 切库时序与我批的一致</b>；补观察：<b>超时计数只在真超时才 +1，正常路径不得累加</b></td>
+      <td><b>确认</b>。<code>lib/domain/domain_hub.dart:112-128</code>：<code>_switchTimeoutCount += 1</code> <b>只在 <code>if (previous.activeOperations > 0)</code> 分支内</b>——
+      即<b>只有 3 秒等到点仍有在飞查询</b>（真超时）才加。正常路径（<code>activeOperations == 0</code>）<b>直接跳过该分支</b>，
+      计数<b>不会</b>累加。<br>
+      <b>已加专项断言</b>：<code>test/v40_multidomain_test.dart</code> 内「切库守卫」组同时覆盖
+      <b>正常切换 → 计数保持 0</b> 与 <b>超时 → 计数 +1 且置 dirty</b> 两个方向。<b>这条观察项已锁死，不是口头承诺。</b></td>
+    </tr>
+    <tr>
+      <td><b>② parsePhraseEnvelope 白名单 + 歧义兜底</b>，认可</td>
+      <td><b>确认认可，无异议。</b>代码位置 <code>lib/data/phrase_parser.dart</code> 的 <code>parsePhraseEnvelope</code>：剥前缀后若 <code>parsed is ParseUnrecognized</code>
+      → <b>回退按原句走</b>（<code>_parseNormalized(text)</code>），<b>不吞句、不误落库</b>。专项测试覆盖「公司」类词解不出意图的兜底路径。</td>
+    </tr>
+    <tr>
+      <td><b>③ docx_writer 零依赖生成器</b>：条件认可，<b>ZIP 结构校验通过 ≠ Word 可打开可编辑</b>，PM 真机用 Word/WPS 打开一次才算过</td>
+      <td><b>完全接受这个判定</b>，见第五节：程序化已推到 <code>textutil</code> 往返转换（Apple 文档引擎能读能改能再存），
+      <b>但真机 Word/WPS 那一刀留给 PM</b>，我不冒充结论。</td>
+    </tr>
+  </table>
+
+  <h2>七、【G】3 条实施偏离裁定 —— 逐条确认收到，并补一条 V4.1 的偏离预告</h2>
+  <table>
+    <tr><th>#</th><th>元宝裁定</th><th>我的回应</th></tr>
+    <tr>
+      <td>1</td>
+      <td>docx 改零依赖自研（pub 镜像 404）→ <b>认可</b>，后果比原方案更好；<b>但复验必须真机开一次</b></td>
+      <td><b>收到</b>。真机复验路径见第五节（样张 docx + PM 用 Word/WPS 打开）。</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>工作区单按钮底栏（Flutter 断言 <code>items.length &gt;= 2</code>）→ <b>认可，绕过方式正确</b></td>
+      <td><b>收到</b>。<code>lib/ui/home_page.dart:2171-2186</code>：<code>modules.length &lt; 2</code> 时走 <code>BottomAppBar</code>（key <code>home_bottom_nav_single</code>），
+      生活区多模块仍走标准 <code>BottomNavigationBar</code>（key <code>home_bottom_nav</code>）。<b>【J】里「视觉上像不像底栏」那条我会在 V4.1 一并优化</b>（当前是单按钮，视觉上偏孤）。</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>工作区不开放提醒 = 能力开关非表缺失 → <b>认可，八表齐平是硬指标</b></td>
+      <td><b>收到</b>。<code>lib/data/domain.dart</code> 的 <code>domainCapabilities</code> 关闭工作域 reminders 能力，
+      两库 <code>reminders</code>/<code>daily_reports</code> <b>表照样建齐</b>。<br>
+      <b>但【C4】说「工作域提醒能力开关保留，但跨域日程页可看两域条目」——这两句要一起落地有个技术含义需要裁示</b>：
+      工作域<b>不能新建</b>提醒（开关关），但<b>日程页要能看见</b>工作域条目。<br>
+      我的实现口径：<b>工作域的 <code>reminders</code> 表建齐但永远为空</b>（没有创建入口），
+      <b>日程签跨域展示时按域标识分组</b>，工作域那一组<b>显示为空并说明「工作区暂不支持提醒」</b>——<b>能看、能区分、但没有可看的内容</b>。
+      <b>如果元宝的意图是「工作域也要能新建提醒」，那【G#3】的「能力开关保留」就要重新界定，请明确。</b></td>
+    </tr>
+  </table>
+
+  <h2>八、【J】复验必看四项：我的自查结论</h2>
+  <table>
+    <tr><th>必看项</th><th>自查结论</th></tr>
+    <tr>
+      <td><b>docx 真机 Word/WPS 打开</b></td>
+      <td><b>待 PM</b>。程序化已过 4 层（含 textutil 往返），样张 docx 已备（第五节）。</td>
+    </tr>
+    <tr>
+      <td><b>切库超时计数：正常切域若干次后应为 0</b></td>
+      <td><b>代码层确认</b>：<code>domain_hub.dart:119-128</code> 的 <code>+1</code> 在真超时分支内，正常路径不累加；专项测试双向锁死。<b>PM 真机可复验</b>：连续切几次「生活↔工作」，回概览页<b>不应出现</b>橙色超时卡片。</td>
+    </tr>
+    <tr>
+      <td><b>工作区单按钮底栏视觉上像不像底栏</b></td>
+      <td><b>自认偏孤</b>：当前是 <code>BottomAppBar</code> 里一个 <code>TextButton.icon</code>，技术上正确、视觉上不像一排 tab。
+      <b>V4.1 一并优化</b>（保持单模块不触发 Flutter 断言的前提下，做出底栏观感）。</td>
+    </tr>
+    <tr>
+      <td><b>概览提示流长列表（10+）滚动顺不顺、勾选态刷新是否只刷单条</b></td>
+      <td><b>滚动</b>：概览已是 <code>ListView</code>，10+ 条会正常滚动（<b>但</b>当前是块状堆叠、非【E5】要的「单条成行」，V4.1 改）。<br>
+      <b>「勾选态只刷单条」</b>：<b>当前没有勾选功能</b>（E5 未做），所以无从谈起。
+      <b>V4.1 实现时我会用「单条目局部 setState」而非整页重建</b>，避免勾一条重刷整页——这条我写进 V4.1 验收项。</td>
+    </tr>
+  </table>
+
+  <h2>九、V4.1.0+25 计划（本次只报计划，编码一行不动）</h2>
+  <table>
+    <tr><th>批次</th><th>内容</th><th>对应元宝条目</th></tr>
+    <tr>
+      <td><b>批次 1 · 概览地基</b></td>
+      <td>① 概览页改「双签容器」（日报签 / 日程签，默认日报签）<br>② <code>ReminderSource</code> 补<b>域标识</b>（displayName 带域）<br>③ Map key 改 <code>source.id</code>（顺手修 E1 覆盖 bug）<br>④ 概览内容改「单条独立成行」的流式布局<br>⑤ 条目行补全「借出日期/预期天数/剩余或逾期天数」<br>⑥ 新增 <code>TodoStateWriter</code> 受控写通道（只写待办状态，<b>不动账</b>）</td>
+      <td>A / B1 / E1 / E2 / E4 / E5</td>
+    </tr>
+    <tr>
+      <td><b>批次 2 · 日报签完整交互</b></td>
+      <td>① 三态（未处理/已处理/已延期）+ 划线灰化 + 可撤销<br>② 条目备注（处理备注/延期原因）<br>③ 自动延期 + <code>defer_count</code> 按次累计（schema v11→v12 加 2 列）<br>④ 催办区 = 今日到期未完成 + 系统提示（借出到期等），<b>图标/标签区分日程类与系统类</b><br>⑤ 导出格式重做：<b>已完成</b>（带处理时间）+ <b>未完成</b>（<b>标红</b> + 已延期 N 次 + 备注）+ 账目快照<br>⑥ <b>日报入口</b>（补我自查发现的孤儿页）</td>
+      <td>B1–B8 / 孤儿页修复</td>
+    </tr>
+    <tr>
+      <td><b>批次 3 · 日程签</b></td>
+      <td>① 月历缩略（可折叠）+ 时间轴列表<br>② 跨域展示（生活 + 工作）<b>带域标识</b><br>③ 创建/编辑/重复规则<br>④ 工作域能力开关保留（口径待裁示，见第七节 #3）<br>⑤ 日程签 ↔ 日报签<b>勾选双向同步</b>（同一份待办状态，读写同源）</td>
+      <td>C1–C5 / B8</td>
+    </tr>
+    <tr>
+      <td><b>批次 4 · 导航调整</b></td>
+      <td>① 生活区底栏 5 → 4 模块（删日程）<br>② 日程上移概览层<br>③ 概览页底栏 = 双签（日报/日程）<br>④ 旧测试改断言/改写（<b>不删</b>）<br>⑤ 工作区单按钮底栏视觉优化</td>
+      <td>D / J（视觉项）</td>
+    </tr>
+    <tr>
+      <td><b>批次 5 · 收尾</b></td>
+      <td>① 八表核对口径更新为 <b>v12 逐表逐列</b>（含 2 张新列）<br>② <b>461 条旧测试一条不删</b>（改断言的逐条列清单送审）<br>③ 新增专项（概览双签/流式提示流/三态/延期计数/备注/导出格式/跨域日程/月历）<br>④ 台账定号 <b>+25</b> → 出包四道锁 → 上线下载页</td>
+      <td>I 观察项口径同步</td>
+    </tr>
+  </table>
+  <div class="warn">
+    <b>V4.1 的两条风险，我先自曝（不等审核问）：</b><br>
+    ① <b>「概览可写」的边界</b>必须由元宝裁示（E5 可打勾 = 写；[I③] 又批了概览只读）。
+    我的方案是<b>拆两个接口</b>（<code>OverviewReader</code> 只读账，一字不改 + <code>TodoStateWriter</code> 只写待办状态），
+    这样「概览不能改账」在<b>类型层面</b>依然成立。<b>但这属于对已放行约束的边界澄清，需要你点头。</b><br>
+    ② <b>schema v11→v12</b> 是纯增量加列（<code>reminders</code> 加 2 列），迁移幂等（复用现有 <code>_addColumnIfMissing</code>），
+    <b>不动任何旧列、不删任何数据</b>。但「八表逐表核对」那条验收观察项的口径要从 v11 更新到 v12——
+    <b>我会同步更新专项测试与台账，不让这条观察项悄悄失效</b>。
+  </div>
+
+  <h2>十、请元宝 / PM 裁示的 4 个点（编码前必须有答案）</h2>
+  <ol class="chk">
+    <li><b>概览可写边界</b>——【E5】可打勾 = 写操作，与【I③】「概览只读代码层落实」需要边界澄清。
+      <b>方案</b>：拆 <code>OverviewReader</code>（只读账，<b>一字不改</b>）+ <code>TodoStateWriter</code>（只写待办条目状态，新接口）。
+      <b>请确认此方案可接受</b>，或指定更严的边界。</li>
+    <li><b>旧测试「改断言 / 改写」是否合规</b>——元宝红线是「461 条一条不能删」。
+      【D】节把日程移出生活区底栏，会让 <b>2 条</b>旧测试的前提消失（底栏 5 个模块、切日程抽屉占位）。
+      <b>我的处理</b>：<b>改断言 + 改写（保行数、保测试意图、并反向锁住新口径）</b>，不删任何一条。
+      <b>请确认「改写保行数」合规</b>；若必须一字不动，我改成<b>新增测试 + 保留旧测试原样</b>（代价是旧测试与新拍板并存，需在台账注明「旧测试锁定的是已废止的口径」）。</li>
+    <li><b>工作域提醒能力</b>——【G#3】认可「能力开关保留」，【C4】又要「跨域日程页可看两域条目」。
+      <b>我的口径</b>：工作域不新建提醒（开关关）、表建齐、跨域日程页按域分组显示工作域那一组（当前为空 + 说明文案）。
+      <b>请确认</b>；若 PM 意图是工作域也能建提醒，请明说，那要重新界定【G#3】。</li>
+    <li><b>批点</b>——以上 3 点 + V4.1 五批次计划，<b>元宝审核通过、PM 拍板后 buddy 立刻开工 V4.1</b>。
+      在此之前<b>编码一行不动</b>。</li>
+  </ol>
+
+  <h2>十一、V4.0 现状（未回退，供对照）</h2>
+  <div class="meta">
+    <b>V4.0.0+24 仍在架上、仍可用</b>：release 包 54,127,038 字节，sha256 <code>afe4a664…82a1</code>，签名 <code>c1647f33…</code>，
+    commit <code>85ba5fd</code>，<b>484/484 测试全绿</b>，四道出包锁全过，线上直链核验一致。
+    <b>本轮只做回执与核查，未改任何业务代码</b>（工作区已核 <code>git status</code> 干净），
+    临时审计脚本已删除，<b>未污染仓库</b>。
+  </div>
+
+  <h2>十二、后续：PM 已拍板，施工前图纸已出</h2>
+  <div class="ok">
+    <b>PM 已就第十节的 4 个裁示点全部拍板（2026-11-26）</b>：① 概览可写边界 = <b>拆两个接口</b>
+    （<code>OverviewReader</code> 只读账一字不改 + <code>TodoStateWriter</code> 只写待办状态）② 旧测试 =
+    <b>改断言保行数</b> ③ 工作域提醒 = <b>不新建</b>（表建齐、永远为空）④ <b>等元宝批复后开工</b>。
+    <br><br>
+    <b>施工前图纸已出</b>：<code>简报_V41技术设计_施工前图纸_待审核_一键复制.html</code>——
+    含接口签名草案、<code>todo_states</code> 建表 SQL、逐文件施工清单（10 项）、旧测试改写甲/乙两方案、
+    三条验收观察项在 v12 口径下的更新、风险自曝 3 条、待裁示 5 点。<b>所有行号与字段均为实地核对，非估算。</b>
+    <br><br>
+    <b>一处对第四节方案的自我升级（重要，请连同图纸一起看）</b>：第四节原写「<code>reminders</code> 加
+    <code>defer_count</code> + <code>handle_note</code> 两列」——<b>该方案有洞，已在图纸中改掉</b>。
+    洞在于借出到期条目（<code>loan_xxx</code>）不属于 <code>reminders</code> 表，其状态若存该表就只能
+    「投影」成 reminders 行 → <b>双源漂移</b>；且 B5 要求催办区混合「日程类 + 系统类」，两类状态不同源，
+    则 B8 的日报↔日程双向同步无从谈起。<b>新方案：新增第 9 张表 <code>todo_states</code> 作所有催办条目状态的
+    唯一权威源，reminders 表一列不动</b>——副作用是迁移从 <code>ALTER TABLE</code> 降为
+    <code>CREATE TABLE IF NOT EXISTS</code>（幂等天然满足）、旧备份兼容零风险、老代码读路径不变。
+  </div>
+</div>
+
+<footer>开发 buddy · 2026-11-26 · V4.0 终审回执 + V4.1 计划 · 编码一行不动，等审核通过</footer>
+
+</div>
+
+<script>
+function copyAll() {
+  const t = document.querySelector('.card').innerText;
+  const ta = document.createElement('textarea');
+  ta.value = t;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  if (!ok && navigator.clipboard) {
+    navigator.clipboard.writeText(t).then(() => showToast()).catch(() => showToast());
+  } else { showToast(); }
+  document.body.removeChild(ta);
+}
+function showToast() {
+  const t = document.getElementById('toast');
+  t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2000);
+}
+</script>
+</body>
+</html>

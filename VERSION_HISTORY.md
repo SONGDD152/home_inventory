@@ -8,10 +8,10 @@
 
 | 项 | 值 |
 |---|---|
-| 当前 versionName | 3.13.0 |
-| 当前 versionCode | 23 |
-| 下一版应占用 | 24 |
-| 下一版 versionName | **4.0.0**（PM 规划的多域架构大版本；versionCode 仍须连续为 24，不得因跳版本号而跳号） |
+| 当前 versionName | 4.0.0 |
+| 当前 versionCode | 24 |
+| 下一版应占用 | 25 |
+| 下一版 versionName | **待 PM 拍板**（versionCode 恒为 25，不得跳号） |
 
 ## V4.0 架构决策留档（2026-11-26 PM 拍板）
 
@@ -35,7 +35,7 @@
 - **语音域路由**：解析器识别域前缀 → 直接交对应域实例执行，**不切当前激活域**；执行前检查目标域能力，缺能力明确报错不回落。
 - **备份跨域校验**：备份带域标识，恢复时强制校验（生活备份恢复进工作库 → 拒绝并说明原因）；旧无标识备份归生活库。
 - **日报系统**：新增 `reminders`（含 `status` pending/done）与 `daily_reports` 两表（生活库）；概览预留 `ReminderSource` 接口 + 注册机制。
-- **导出**：`.md` 零新增依赖（复用 `saveBytesToDevice` + `share_plus`）；`.docx` 需新增纯 Dart 包 `docx`（**待元宝审是否同意**）。
+- **导出**：`.md` 零新增依赖（复用 `saveBytesToDevice` + `share_plus`）；`.docx` **实际实现为零依赖自研生成器**（`lib/data/docx_writer.dart`，手写 ZIP store + CRC32 + OOXML 片段），原计划的 `docx` 包因 pub 镜像 404 未采用（见「实施偏离留档」第 1 条）。
 
 **方案简报**：`简报_V40多域架构_物理分库_方案转审核_第四版_一键复制.html`（工作区留档，**最新版**）。
 第三版：`简报_V40多域架构_物理分库_方案转审核_第三版_一键复制.html`；
@@ -72,7 +72,38 @@
 **元宝点名验收的三条观察项（出包前开发侧先自检，对不上不出包）**：
 ① 切库超时用户可见（不是只在日志）；② **工作库八表与生活库 v11 逐表逐列核对**（列名/类型/默认值/索引，不允许「差不多」）；③ 概览只读代码层落实。
 
-**版本号状态**：元宝第三轮已同意 `4.0.0+24`，**等 PM 拍板**；versionCode 连续递增铁律不变，**恒为 24、不得跳号**。
+**版本号状态**：元宝第三轮已同意 `4.0.0+24`，**PM 已于 2026-11-26 拍板同意** → **V4.0.0+24 已出包上线**（见下节）。
+versionCode 连续递增铁律不变，**恒为 24、不得跳号**。
+
+### V4.0 实施偏离留档（3 条，开发侧自主决定，已按元宝批复口径处理）
+> 元宝批复「无地基级推翻」，以下 3 条为实现层的具体偏离，**留档以免日后查无实据**。
+
+| # | 偏离 | 原因 | 处理 |
+|---|---|---|---|
+| 1 | **`.docx` 导出改零依赖自研生成器**（`lib/data/docx_writer.dart`），未引入 `docx` 包 | pub 镜像 `pub.flutter-io.cn/api/packages/docx` 返回 404（已 curl 核实），pub.dev 不可达；替代包 `docx_creator` 连带 image/html/http 等一串依赖 | 后果比原方案更好：`checkReleaseAarMetadata` 构建风险直接归零；生成的 .docx 经 ZIP 结构校验（`[Content_Types].xml`/`_rels`/`word/document.xml` 齐备） |
+| 2 | **工作区（单模块域）底栏改用单按钮底栏**（`BottomAppBar`，key `home_bottom_nav_single`） | Flutter `BottomNavigationBar` 断言 `items.length >= 2`，工作区本轮只有「工作仓储」一项，用 BottomNavigationBar 会直接抛断言 | 生活区五模块仍走标准 `BottomNavigationBar`（key `home_bottom_nav`）；两处均有专项测试断言 |
+| 3 | **工作区不开放提醒 = 能力开关，不是表缺失** | 元宝批复要求「工作库八表与 v11 逐表核对」，同时认可工作域本轮不开放 reminders | **两库表结构齐平（8 张表，含 reminders/daily_reports）**，工作域通过 `domainCapabilities` 关闭 reminders 能力入口；用户看到的是「工作区暂不支持提醒」，不是「表不存在」 |
+
+## V4.0 出包四道锁核对（2026-11-26）
+
+| 锁 | 要求 | 实测结果 | 判定 |
+|---|---|---|---|
+| ① 台账定号 | 当前号 +1，不复用已占用号 | 23 → **24**（台账先定号后出包） | ✅ |
+| ② aapt2 实测 versionCode | APK 内 versionCode 与 pubspec 一致 | `aapt2 dump badging` → `versionCode='24' versionName='4.0.0'` | ✅ |
+| ③ release 验 `checkReleaseAarMetadata` | release 构建通过 | `flutter build apk --release` 成功（450s，产物 54.1MB），无 AAR metadata 报错 | ✅ |
+| ④ flutter test 全绿 | 旧 461 条一条不删 + 新增专项必过 | **484/484 All tests passed**（461 旧 + 23 新增 V4.0 专项） | ✅ |
+
+**APK 凭据**：54,127,038 字节 · sha256 `afe4a66407952008d7da4ce4a3e8695f264da2834a852a285afa2aa874a082a1`
+· 签名 v2 通过，指纹 `c1647f333c52ea7b170f6b143eec7ed46ea715784cbd92950eec4df2cc518e5f`（与历版一致，可覆盖安装）
+· commit `85ba5fd` · 线上直链核验 sha256 与字节数**完全一致**。
+
+**元宝点名的三条验收观察项，自检结论**：
+
+| 观察项 | 落地位置 | 自检结论 |
+|---|---|---|
+| ① 切库超时用户可见 | `DomainHub.switchTimeoutCount` → 概览页卡片展示（key `overview_switch_timeout`），只读、无清零按钮 | ✅ 超时不止写日志，计数进状态并在概览页可读 |
+| ② 工作库八表与 v11 逐表核对 | 专项测试 `v40_multidomain_test.dart` 逐表逐列断言（列名/类型/默认值/索引），两库同一份 `onCreate` + 生活库 v10→v11 迁移 | ✅ 8 表齐平（`items`/`locations`/`item_locations`/`item_discards`/`borrowers`/`loans`/`reminders`/`daily_reports`） |
+| ③ 概览只读代码层落实 | 概览页只持 `OverviewReader`（只读口）+ `DomainOverview` 不可变快照，**类型层面拿不到可写仓库** | ✅ 不靠「UI 没放按钮」 |
 
 ## 完整版本链
 
@@ -83,6 +114,7 @@
 | 21 | 3.11.0 | 21 | 11-25 15:53 | `81f0cea` | 已上线 | `bcfa4b0a…4484` |
 | 22 | 3.12.0 | 22 | 11-25 21:37 | `e70e0bf` | 已上线（部分废弃） | `375714fe…6995` |
 | 23 | 3.13.0 | 23 | 11-26 08:15 | `5413bad` | 已上线（删除孤儿修复） | `2570b2c8…fbc29` |
+| 24 | 4.0.0 | 24 | 11-26 16:30 | `85ba5fd` | 已上线（多域架构·物理分库） | `afe4a664…82a1` |
 
 历史：V3.6.1=+11、V3.7=+12、V3.7.1=+13、V3.8=+14、V3.8.1=+15、V3.9=+16、V3.9.1=+17、V3.9.2=+18。
 
@@ -95,6 +127,7 @@
 | 21 | 3.11.0 | `简报_V311交付上线_真机复验_一键复制.html` |
 | 22 | 3.12.0 | `简报_V312部分废弃_交付上线_真机复验_一键复制.html` |
 | 23 | 3.13.0 | `简报_V313删除孤儿修复_交付上线_真机复验_一键复制.html` |
+| 24 | 4.0.0 | `简报_V40多域架构_交付上线_真机复验_一键复制.html` |
 
 > 规则：**每一版（含补丁版）都必须有一份发版闭环简报**。V3.10 / V3.10.1 当时漏出，
 > 导致 2026-11-25 审核时 +20 在文档链上查无实据、被误判为跳号——已于当日补齐。

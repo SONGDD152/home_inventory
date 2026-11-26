@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>简报 · V4.0 多域架构（物理分库）· 交付上线 + PM 真机复验</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    line-height: 1.75; color: #1f2933; background: #f5f7fa;
+    margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 28px 32px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 20px;
+  }
+  h1 { font-size: 24px; margin: 0 0 6px; }
+  .sub { color: #6b7280; font-size: 14px; margin: 0 0 18px; }
+  h2 { font-size: 17px; margin: 26px 0 12px; padding-left: 11px; border-left: 4px solid #3b82f6; }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #374151; }
+  .copybar { margin: 0 0 18px; }
+  button.copy {
+    background: #2563eb; color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 600;
+  }
+  button.copy:hover { background: #1d4ed8; }
+  .toast { display: none; margin-left: 12px; color: #059669; font-size: 13px; font-weight: 600; }
+  .toast.on { display: inline-block; }
+  .meta { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .warn { background: #fff7ed; border-left: 4px solid #f97316; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .ok { background: #ecfdf5; border-left: 4px solid #10b981; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  .bad { background: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th, td { border: 1px solid #e5e7eb; padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; }
+  code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .tag { display: inline-block; background: #eef2ff; color: #3730a3; border-radius: 5px; padding: 1px 8px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .tag.green { background: #d1fae5; color: #065f46; }
+  .tag.red { background: #fee2e2; color: #991b1b; }
+  .chk { list-style: none; padding-left: 4px; }
+  .chk li { border-bottom: 1px dashed #e2e8f0; padding: 9px 0 9px 2px; }
+  .chk li:last-child { border-bottom: none; }
+  footer { text-align: center; color: #94a3b8; font-size: 12.5px; padding: 12px 0 30px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <h1>简报 · V4.0 多域架构（物理分库）· 交付上线 + PM 真机复验</h1>
+  <p class="sub">发件：开发（buddy）→ PM（拍板/终局验收）／抄送 技术审核（元宝）　|　日期：2026-11-26</p>
+
+  <div class="copybar">
+    <button class="copy" onclick="copyAll()">📋 复制全文</button>
+    <span class="toast" id="toast">已复制到剪贴板</span>
+  </div>
+
+  <div class="meta">
+    <b>一句话：</b>元宝第三轮批复<b>放行</b>、PM 拍板 <code>4.0.0+24</code> 后，V4.0 已<b>全部落地并出包上线</b>——
+    生活区与工作区<b>物理分库</b>（两个独立 .db，账目互不串）、顶栏三选一、概览<b>代码层只读</b>、语音域路由、
+    日程与日报、备份分域全部到位；老生活区数据<b>原地保留、零迁移</b>。<br>
+    <b>当前状态：</b>开发 → 自测 → 出包 → <b>上线全部完成</b>，测试 <b>484/484 全绿</b>（461 条旧测试一条未删 + 23 条 V4.0 专项），
+    静态分析无 issue；<b>线上已是 V4.0</b>，二维码与链接不变，PM 可直接扫码覆盖安装。
+  </div>
+
+  <h2>一、元宝批复逐条落地对照</h2>
+  <table>
+    <tr><th>元宝批复要点</th><th>本版落地</th></tr>
+    <tr>
+      <td><b>放行</b>，除底栏语义纠偏外无地基级推翻；PM 拍板 <code>4.0.0+24</code></td>
+      <td>PM 已拍板同意；<code>pubspec.yaml</code> = <code>version: 4.0.0+24</code>；<code>aapt2</code> 实测 <code>versionCode='24' versionName='4.0.0'</code>。</td>
+    </tr>
+    <tr>
+      <td>切库守卫：3 秒超时上限 + <b>dirty 重建</b></td>
+      <td><code>DomainHub</code>：切域时先<b>写闸门全拒</b>（不静默重试）→ dirty 时强制重建两库连接 → 等旧实例在飞查询收尾（<b>超时上限 3 秒</b>，超时置 dirty + 计数 +1）→ 换指针 → 解闸 + 全量刷新。</td>
+    </tr>
+    <tr>
+      <td><b>新增约束①</b>：切库超时次数<b>用户可见</b></td>
+      <td>计数进 <code>DomainHub.switchTimeoutCount</code>，<b>概览页卡片直接展示</b>（key <code>overview_switch_timeout</code>），<b>只读、无「清零」按钮</b>——降级放行不静默。</td>
+    </tr>
+    <tr>
+      <td>语音域路由：<b>解析器入口白名单</b>，命中即跳出</td>
+      <td>新增 <code>_matchDomainPrefix</code> 白名单（工作区/工作仓储/公司/生活区/生活仓储/家里）；<b><code>parsePhrase</code> 旧签名与行为一字未改</b>（保 461 条旧测试），新增 <code>parsePhraseEnvelope</code> 返回 <code>ParseEnvelope{payload, targetDomain}</code>。</td>
+    </tr>
+    <tr>
+      <td><b>新增约束②</b>：域词歧义兜底（「公司」歧义大）</td>
+      <td>剥前缀后<b>必须解析出合法意图</b>才认作域指令；解析不出（<code>ParseUnrecognized</code>）→ <b>按原句走</b>常规解析，<b>不吞句、不误落库</b>。</td>
+    </tr>
+    <tr>
+      <td><b>新增约束③</b>：日报每日一次判据<b>抗系统时间回拨</b></td>
+      <td>判重不用「上次检查日期」，改用 <code>ReportStateStore</code> 的<b>「已处理日期集合」</b>兜底——回拨不会重复补生成。</td>
+    </tr>
+    <tr>
+      <td><b>新增约束④</b>：概览只读<b>代码层</b>落实</td>
+      <td>概览页<b>只持 <code>OverviewReader</code>（只读口）</b> + <code>DomainOverview</code> 不可变快照，<b>类型层面拿不到可写仓库</b>——不是靠「UI 没放按钮」。</td>
+    </tr>
+    <tr>
+      <td><b>新增约束⑤</b>：备份跨域报错<b>文案固定</b></td>
+      <td>备份 JSON 带 <code>domain</code> 标识；跨域恢复文案固定为「<b>这是生活区的备份，不能恢复到工作区</b>」；旧无标识备份归生活库，工作库拒收并说明「这是旧版备份（没有区域标识），只能恢复到生活区」。</td>
+    </tr>
+    <tr>
+      <td>概览提醒源<b>统一接口</b>，不另开 OverviewPanel</td>
+      <td>统一 <code>ReminderSource</code>（<code>id</code>/<code>displayName</code>/<code>loadEntries()</code>），实现类 <code>LoanDueReminderSource</code> / <code>ScheduleReminderSource</code>。</td>
+    </tr>
+    <tr>
+      <td>语音跨域落库提示必须带<b>引导按钮</b></td>
+      <td>工作区不支持提醒时弹窗「工作区暂不支持提醒，是否切换到生活区创建？」+【切换到生活区】（预填「提醒我…」）+【取消】，不只报错。</td>
+    </tr>
+    <tr>
+      <td>底栏：<b>生活区五模块固定全显示</b>；「未建的不出现」只适用于工作区</td>
+      <td>生活区五模块全显示（知识库/餐饮/衣橱仍为占位页不隐藏）；工作区本轮只显示「工作仓储」一项。</td>
+    </tr>
+  </table>
+
+  <h2>二、v11 八表口径（工作库与生活库逐表齐平）</h2>
+  <div class="ok">
+    <b>现有 6 表</b>：<code>items</code> / <code>locations</code> / <code>item_locations</code> / <code>item_discards</code> / <code>borrowers</code> / <code>loans</code>
+    ＋ <b>V4.0 新增 2 表</b>：<code>reminders</code>（含 <code>status</code> pending/done、<code>done_at</code>、<code>repeat_rule</code>、软删列）/ <code>daily_reports</code>（<code>report_date</code> 唯一索引）
+    ＝ <b>v11 共 8 张表</b>。两库<b>同一份 <code>onCreate</code></b>，生活库走 v10→v11 迁移、工作库新建直接到 v11，<b>结构完全一致</b>。
+  </div>
+  <div class="warn">
+    <b>口径澄清（曾被误读为矛盾）：</b>工作区本轮<b>不开放提醒</b>，这是<b>能力开关</b>（<code>domainCapabilities</code> 关闭 reminders），
+    <b>不是表缺失</b>——工作库的 <code>reminders</code> 表照样建齐。八表齐平是硬指标。
+  </div>
+
+  <h2>三、导航与界面</h2>
+  <ul>
+    <li><b>顶栏三选一</b>：<code>[概览][生活][工作]</code> 分段控件（key <code>top_section_switch</code>）；<b>概览页底栏隐藏</b>。</li>
+    <li><b>底栏按域动态渲染</b>：生活区五模块（仓储/日程/知识库/衣橱/餐饮，固定全显示）；工作区按需长出（模块注册表 <code>modulesOf(domain)</code>，本轮仅「工作仓储」）。</li>
+    <li><b>选中态按模块 id</b>，不按索引——动态底栏下按索引会串位。</li>
+    <li><b>工作区单模块 → 单按钮底栏</b>（<code>BottomAppBar</code>，key <code>home_bottom_nav_single</code>）。原因：Flutter <code>BottomNavigationBar</code> 断言 <code>items.length >= 2</code>，单模块用标准底栏会直接抛断言。生活区仍走标准 <code>BottomNavigationBar</code>（key <code>home_bottom_nav</code>）。</li>
+  </ul>
+
+  <h2>四、本版 3 条实施偏离（留档，供审核调阅）</h2>
+  <table>
+    <tr><th>#</th><th>偏离</th><th>原因</th><th>处理</th></tr>
+    <tr>
+      <td>1</td>
+      <td><code>.docx</code> 导出改<b>零依赖自研生成器</b>（<code>lib/data/docx_writer.dart</code>），<b>未引入</b> <code>docx</code> 包</td>
+      <td>pub 镜像 <code>pub.flutter-io.cn/api/packages/docx</code> 返回 <b>404</b>（已 curl 核实），pub.dev 不可达；替代包 <code>docx_creator</code> 连带 image/html/http 等一串依赖</td>
+      <td><b>后果比原方案更好</b>：<code>checkReleaseAarMetadata</code> 构建风险<b>直接归零</b>；生成的 .docx 经 ZIP 结构校验（<code>[Content_Types].xml</code>/<code>_rels</code>/<code>word/document.xml</code> 齐备）</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>工作区（单模块域）底栏改单按钮底栏</td>
+      <td>Flutter <code>BottomNavigationBar</code> 断言 <code>items.length >= 2</code></td>
+      <td>两处底栏均有专项测试断言；生活区不受影响</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>工作区不开放提醒 = <b>能力开关</b>，非表缺失</td>
+      <td>元宝既要求「八表逐表核对」，又认可工作域本轮不开提醒</td>
+      <td>两库 8 表齐平（含 <code>reminders</code>/<code>daily_reports</code>），工作域仅关闭入口</td>
+    </tr>
+  </table>
+
+  <h2>五、出包四道锁（元宝指定）</h2>
+  <table>
+    <tr><th>锁</th><th>实测结果</th><th>判定</th></tr>
+    <tr><td>① 台账定号</td><td>23 → <b>24</b>，台账先定号后出包</td><td><span class="tag green">通过</span></td></tr>
+    <tr><td>② <code>aapt2 dump badging</code> 实测</td><td><code>versionCode='24' versionName='4.0.0'</code>，与 pubspec 一致</td><td><span class="tag green">通过</span></td></tr>
+    <tr><td>③ release 验 <code>checkReleaseAarMetadata</code></td><td><code>flutter build apk --release</code> 成功（450s），<b>无 AAR metadata 报错</b></td><td><span class="tag green">通过</span></td></tr>
+    <tr><td>④ <code>flutter test</code> 全绿</td><td><b>484/484 All tests passed</b>（461 旧 + 23 新增专项）</td><td><span class="tag green">通过</span></td></tr>
+  </table>
+  <div class="meta">
+    <b>APK 凭据：</b>54,127,038 字节 · sha256 <code>afe4a66407952008d7da4ce4a3e8695f264da2834a852a285afa2aa874a082a1</code><br>
+    <b>签名：</b>v2 通过，指纹 <code>c1647f333c52ea7b170f6b143eec7ed46ea715784cbd92950eec4df2cc518e5f</code>（与历版一致，<b>可覆盖安装</b>）<br>
+    <b>代码：</b>commit <code>85ba5fd</code> · 线上直链下载后 sha256 与字节数<b>完全一致</b>
+  </div>
+
+  <h2>六、元宝点名的三条验收观察项（自检结论）</h2>
+  <table>
+    <tr><th>观察项</th><th>落地位置</th><th>自检</th></tr>
+    <tr>
+      <td>① 切库超时<b>用户可见</b></td>
+      <td><code>DomainHub.switchTimeoutCount</code> → 概览页卡片展示（<code>overview_switch_timeout</code>），只读、无清零按钮</td>
+      <td><span class="tag green">已落实</span>超时不止写日志</td>
+    </tr>
+    <tr>
+      <td>② 工作库八表与 v11 <b>逐表逐列核对</b></td>
+      <td>专项测试 <code>v40_multidomain_test.dart</code> 逐表逐列断言（列名/类型/默认值/索引），两库同一份 <code>onCreate</code> + 生活库 v10→v11 迁移</td>
+      <td><span class="tag green">已落实</span>8 表齐平，不允许「差不多」</td>
+    </tr>
+    <tr>
+      <td>③ 概览只读<b>代码层</b>落实</td>
+      <td>概览页只持 <code>OverviewReader</code> + <code>DomainOverview</code> 不可变快照</td>
+      <td><span class="tag green">已落实</span>类型层面写不了数据</td>
+    </tr>
+  </table>
+
+  <h2>七、PM 真机复验清单（按这个顺序走最省事）</h2>
+  <ol class="chk">
+    <li><b>① 先确认老数据还在（最关键）</b>——覆盖安装后打开 App，进「生活」区。
+        <br><span class="tag green">本版应有</span>你之前录的物品、位置、借出账<b>原样都在</b>（老库 v10→v11 自动升级，路径不变）。
+        <br><span class="tag red">若老数据不见了</span>立刻告诉我，那说明迁移出问题，我按打回流程升号修复。</li>
+    <li><b>② 顶栏三选一</b>——顶部应有「概览 / 生活 / 工作」三段可点。
+        <br><span class="tag green">本版应有</span>概览页<b>底部没有模块底栏</b>；生活区<b>五个模块全显示</b>（含「建设中」占位）；工作区<b>只显示「工作仓储」一项</b>（单按钮底栏，不是空底栏）。</li>
+    <li><b>③ 概览只读</b>——在概览页看两个区的账：各区在库/在借/总拥有、账平不平。
+        <br><span class="tag green">本版应有</span>概览页<b>找不到任何能改数据的按钮</b>（它只拿只读口，代码层面写不了）。</li>
+    <li><b>④ 语音分区</b>——说「<b>工作区</b>放梯子」，看它落进工作区；再说「<b>生活区</b>查梯子」，看它查生活区。
+        <br><span class="tag green">本版应有</span>域词前缀被剥掉，物品名干净；<b>说的时候当前激活的区不会被切走</b>。</li>
+    <li><b>⑤ 域词歧义兜底</b>——说一句<b>含「公司」但不是域指令</b>的话（例如「公司报销单在抽屉」）。
+        <br><span class="tag green">本版应有</span>剥掉「公司」后<b>解析不出合法意图</b> → <b>按原句整句走</b>，不会被误当成工作区指令，也不会吞掉后半句。</li>
+    <li><b>⑥ 跨域能力提示</b>——在工作区说「提醒我明天交周报」。
+        <br><span class="tag green">本版应有</span>弹窗「工作区暂不支持提醒，是否切换到生活区创建？」，<b>带【切换到生活区】按钮</b>（点一下会预填「提醒我…」）；<b>【取消】</b>则什么都不做。</li>
+    <li><b>⑦ 日程与日报</b>——生活区进「日程」加一条提醒；在概览页看提醒清单；进「日报」看当天日报（提醒清单 / 仓储动态 / 账目快照三块），可导出 <code>.md</code> 与 <code>.docx</code>。</li>
+    <li><b>⑧ 备份分域</b>——分别导出生活区、工作区两份备份（文件名带「生活」「工作」）；用<b>生活区</b>的备份去<b>工作区</b>恢复。
+        <br><span class="tag green">本版应有</span>工作区<b>明确拒绝</b>并说「<b>这是生活区的备份，不能恢复到工作区</b>」；反过来也一样。</li>
+    <li><b>⑨ 工作库八表</b>——在「工作区 → 工作仓储」录一条物品、切到生活区确认互不干扰。
+        <br><span class="tag green">本版应有</span>两区账目<b>完全隔离</b>：工作区的东西不会出现在生活区，反之亦然。</li>
+  </ol>
+
+  <h2>八、备份与数据兼容</h2>
+  <div class="warn">
+    本版数据结构<b>升级到 v11</b>（新增 reminders / daily_reports 两表），生活区老库<b>首次打开自动升级</b>，物品/位置/借出账原样保留。<br>
+    <b>备份文件现在带区域标识</b>：本版及以后导出的备份<b>只能在它所属的区里恢复</b>；
+    <b>V3.13 及更早导出的旧备份（无区域标识）只能恢复到生活区</b>，工作区会拒收并说明原因。
+  </div>
+
+  <h2>九、给元宝的说明</h2>
+  <p>本版按第三轮批复<b>放行</b>后施工，第四版方案简报逐条落实，无地基级改动。请重点复核三处：
+    ① <code>DomainHub</code> 切库守卫的<b>写闸门 + 3 秒超时置 dirty + 计数</b>是否与你批的时序一致；
+    ② <code>parsePhraseEnvelope</code> 的<b>域前缀白名单 + 歧义兜底</b>（「公司」解析不出意图即按原句走）；
+    ③ <code>docx_writer.dart</code> 零依赖生成器产出的 <code>.docx</code> 是否达到可用标准（Word 可正常打开、可编辑）。</p>
+  <p>代码 commit <code>85ba5fd</code>，台账 <code>VERSION_HISTORY.md</code> 已更新（含 3 条实施偏离留档与四道锁核对结果）。</p>
+</div>
+
+<footer>开发 buddy · 2026-11-26 · V4.0 多域架构（物理分库）· 已出包已上线 + 待 PM 真机复验</footer>
+
+</div>
+
+<script>
+function copyAll() {
+  const t = document.querySelector('.card').innerText;
+  const ta = document.createElement('textarea');
+  ta.value = t;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  if (!ok && navigator.clipboard) {
+    navigator.clipboard.writeText(t).then(() => showToast()).catch(() => showToast());
+  } else { showToast(); }
+  document.body.removeChild(ta);
+}
+function showToast() {
+  const t = document.getElementById('toast');
+  t.classList.add('on');
+  setTimeout(() => t.classList.remove('on'), 2000);
+}
+</script>
+</body>
+</html>

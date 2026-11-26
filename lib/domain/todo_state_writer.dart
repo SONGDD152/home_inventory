@@ -50,8 +50,16 @@ abstract interface class TodoStateWriter implements TodoStateReader {
   /// - **[days] 相对推进**（旧口径，默认 1 天）：
   ///   从现有 `next_due_at`（没有就从源条目原到期日）往后推 N 天。
   /// - **[dueOn] 绝对日期**（裁定③要的「延到明天 / 具体日期」）：
-  ///   **直接写** `next_due_at = dueOn`，不管当前 `next_due_at` 是多少。
-  ///   「延到明天」传明天、「延到具体日期」传用户选的那天。
+  ///   写 `next_due_at = dueOn`。
+  ///
+  /// ## 只往后推，不许回拉（V4.1 批次 3 · 元宝裁定④修订）
+  ///
+  /// 选了**早于**当前下一次提示日（`next_due_at`；没有就回落到源条目
+  /// 原到期日，再没有就以「现在」为基准）的日子 → **这次延期被忽略**，
+  /// 状态行一个字不动（延期次数也不加），并抛 [ArgumentError]。
+  ///
+  /// **校验在数据层**：UI 只是入口，数据层才是唯一能保证这条规矩
+  /// 成立的地方——只在 UI 拦的话，绕过 UI 的调用照样能把提示时间往回拉。
   ///
   /// 两个口径都只动 `todo_states`（`next_due_at` / `defer_count` / `handle_note`），
   /// **不碰源表**（`reminders.due_at` 一列不动）——概览的写边界依然成立。

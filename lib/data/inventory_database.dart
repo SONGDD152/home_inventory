@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 
 import 'domain.dart';
 import '../domain/domain_instance.dart';
+import '../domain/reminder_editor.dart';
 import '../domain/todo_state_writer.dart';
 import 'item.dart';
 import 'inventory_repository.dart';
@@ -23,7 +24,7 @@ import 'todo_state.dart';
 ///
 /// 这里不解析自然语言；「梯子在哪」的拆分由上层完成，本层只接收精确字段值。
 class InventoryDatabase implements InventoryRepository, ReminderRepository,
-    TodoStateWriter, TodoStateReader, DomainInstance {
+    ReminderEditor, TodoStateWriter, TodoStateReader, DomainInstance {
   /// V4.1：当前库文件的 schema 版本。
   ///
   /// v10 = V3.13（仓储六表）；v11 = V4.0（加 reminders / daily_reports 两表）；
@@ -3278,9 +3279,64 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     );
   }
 
+  // ─────────────────── V4.1 批次 3：ReminderEditor 实现 ───────────────────
+  //
+  // 只写 `reminders` 表（提醒条目本身），**不碰** items / loans / locations。
+  // 概览页拿到这个写口，改不了仓储账——「概览改不了账」依然成立。
+
   @override
-  Future<DailyReport?> getDailyReport(String reportDate) async {
+  Future<int> createReminder(String title,
+      {String? detail,
+      DateTime? dueAt,
+      String? repeatRule,
+      int priority = ReminderPriority.normal}) =>
+      addReminder(title,
+          detail: detail,
+          dueAt: dueAt,
+          repeatRule: repeatRule,
+          priority: priority);
+
+  @override
+  Future<void> editReminder(int id,
+      {String? title,
+      String? detail,
+      DateTime? dueAt,
+      String? repeatRule,
+      bool clearRepeatRule = false,
+      int? priority}) async {
+    _guardWrite();
+    final values = <String, Object?>{};
+    if (title != null) {
+      final clean = title.trim();
+      if (clean.isEmpty) {
+        throw ArgumentError.value(title, 'title', '提醒标题不能为空');
+      }
+      values[columnTitle] = clean;
+    }
+    if (detail != null) values[columnDetail] = detail;
+    if (dueAt != null) values[columnReminderDueAt] = dueAt.millisecondsSinceEpoch;
+    if (repeatRule != null) values[columnRepeatRule] = repeatRule;
+    // 显式清空重复规则——`updateReminder` 做不到（那里 null = 不改）。
+    if (clearRepeatRule) values[columnRepeatRule] = null;
+    if (priority != null) {
+      values[columnPriority] = ReminderPriority.normalize(priority);
+    }
+    if (values.isEmpty) return;
+    values[columnUpdatedAt] = DateTime.now().millisecondsSinceEpoch;
     final db = await open();
+    await db.update(
+      tableReminders,
+      values,
+      where: '$columnId = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  @override
+  Future<void> removeReminder(int id) => deleteReminder(id);
+
+  @override
+  Future<DailyReport?> getDailyReport(String reportDate) async {    final db = await open();
     final rows = await db.query(
       tableDailyReports,
       where: '$columnReportDate = ?',
@@ -3439,6 +3495,29 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     // - 没给 → **相对推进**：从现有 next_due_at（没有就从源条目原到期日）往后推 N 天。
     final int newNext;
     if (dueOn != null) {
+      // V4.1 批次 3（元宝裁定④修订）：**只往后推，不许回拉**。
+      //
+      // 判据 = 「当前下一次提示时间」：
+      // - 已有 next_due_at → 以它为基准；
+      // - 没有 → 回落到源条目的原到期日（这是它现在的到期日）；
+      // - 都没有（无期限提醒）→ 以「现在」为基准。
+      //
+      // 选了**早于**基准的日子 → **忽略这次延期**并报错提示，
+      // 状态行一个字不动（连 defer_count 都不加——这次延期没发生）。
+      //
+      // 为什么校验放数据层而不是只放 UI：UI 只是入口，
+      // 数据层才是**唯一能保证这条规矩成立的地方**。
+      // 只在 UI 拦的话，任何绕过 UI 的调用都能把提示时间往回拉。
+      final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??
+          await _sourceDueAt(db, sourceType, sourceId) ??
+          now;
+      if (dueOn.millisecondsSinceEpoch < anchor) {
+        throw ArgumentError.value(
+          dueOn,
+          'dueOn',
+          '延期只能往后推，不能早于当前提示日期',
+        );
+      }
       newNext = dueOn.millisecondsSinceEpoch;
     } else {
       final anchor = (existing?[columnNextDueAt] as num?)?.toInt() ??

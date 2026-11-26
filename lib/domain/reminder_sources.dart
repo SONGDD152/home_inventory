@@ -79,9 +79,18 @@ class LoanDueReminderSource implements ReminderSource {
         //
         // 系统类没有「创建时设置优先级」的入口（借出是仓储动作带出来的，
         // 不是用户在提醒库里新建的），所以由源自己定。
-        // 这里定**高**（提前 3 天进催办区）：借出到期是「忘了会出事」的事，
-        // 与日程类默认「中」不同——**此口径为 buddy 定，待元宝追认**。
+        // 定**高**（元宝裁定①批准：借出到期是「忘了会出事」的事）。
         priority: ReminderPriority.high,
+        // V4.1 批次 3（元宝裁定① · PM 最终裁定）：
+        // 系统类**提前 2 天**进催办区，不取 buddy 原定的 3 天。
+        //
+        // 为什么用显式覆盖而不是改 priority 推导表：
+        // 裁定②批的是「提前量由 priority 推导：高 3 / 中 1 / 低 0」。
+        // 若把 `leadDaysOf(高)` 改成 2，日程类的高优先级提醒也会
+        // 从 3 天掉到 2 天——那是越权改裁定。所以优先级（排序用）
+        // 与提前量（进区用）在这里**解耦**：优先级仍为「高」，
+        // 提前量由这条源自己指定 2 天。
+        leadDaysOverride: 2,
       ));
     }
     return entries;
@@ -127,6 +136,8 @@ class ScheduleReminderSource implements ReminderSource {
         dayDelta: delta,
         // V4.1 批次 2（元宝裁定①）：优先级 —— 决定催办区排序与提前量。
         priority: item.priority,
+        // V4.1 批次 3：重复规则透出（日程签显示「每天 / 每周…」标记）。
+        repeatRule: item.repeatRule,
       );
     }).toList();
   }

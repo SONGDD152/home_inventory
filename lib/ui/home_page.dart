@@ -12,6 +12,7 @@ import '../data/phrase_parser.dart';
 import '../data/reminder_repository.dart';
 import '../domain/domain_hub.dart';
 import '../domain/overview_reader.dart';
+import '../domain/reminder_editor.dart';
 import '../domain/reminder_source.dart';
 import '../domain/reminder_sources.dart';
 import '../domain/todo_state_writer.dart';
@@ -23,6 +24,7 @@ import 'item_list_page.dart';
 import 'location_list_page.dart';
 import 'loan_list_page.dart';
 import 'overview_page.dart';
+import 'reminder_edit_dialog.dart';
 import 'schedule_page.dart';
 
 /// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
@@ -2283,6 +2285,15 @@ class _HomePageState extends State<HomePage> {
           // V4.1 批次 2：按域各给一个写口——物理分库下 `todo_states`
           // 每库一张，只给当前域的话另一个域的状态读不到。
           todoWriters: _todoWriters(),
+          // V4.1 批次 3：日程签的新建/编辑/删除。
+          //
+          // **写操作在组合根执行**——概览页只发回调，不持写接口。
+          // 这样元宝批过的写边界四锁（「概览页不持仓储类型」）一个字都不用改，
+          // 「概览改不了账」在编译期依然成立。
+          editableScheduleDomains: _editableScheduleDomains(),
+          onCreateReminder: _createReminder,
+          onEditReminder: _editReminder,
+          onDeleteReminder: _deleteReminder,
           switchTimeoutCount: widget.hub!.switchTimeoutCount,
           onOpenDomain: _openDomainSection,
           // V4.1 批次 2：日报入口（修孤儿页）。
@@ -2366,12 +2377,107 @@ class _HomePageState extends State<HomePage> {
       LoanDueReminderSource(lifeRepo, InventoryDomain.life),
       LoanDueReminderSource(workRepo, InventoryDomain.work),
     ];
+    // V4.1 批次 3：**两域都注册日程源**。
+    //
+    // 之前只注册生活域 —— 批次 3 的日程签是**跨域**视图，
+    // 工作域那一组必须存在（表建齐、永远为空 → 显示「该区域暂不支持提醒」），
+    // 否则用户看不到「工作区也在这本日程表里，只是暂时没开放」。
+    //
+    // 工作域的 reminders 表**建齐但永远为空**（能力开关，不是表缺失），
+    // 所以注册它不会带来数据副作用。
     if (lifeRepo is ReminderRepository) {
       // await 会重置类型提升 → 这里先取一份具体类型再注册。
       final reminders = lifeRepo as ReminderRepository;
       sources.add(ScheduleReminderSource(reminders, InventoryDomain.life));
     }
+    if (workRepo is ReminderRepository) {
+      final reminders = workRepo as ReminderRepository;
+      sources.add(ScheduleReminderSource(reminders, InventoryDomain.work));
+    }
     return sources;
+  }
+
+  /// V4.1 批次 3：**开放提醒的域**（日程签能新建/编辑/删除的域）。
+  ///
+  /// 工作域本轮不开放（**能力开关**，不是表缺失）→ 不在里面，
+  /// 它的日程条目只读展示。
+  Set<InventoryDomain> _editableScheduleDomains() {
+    final hub = widget.hub;
+    if (hub == null) return const <InventoryDomain>{};
+    final domains = <InventoryDomain>{};
+    for (final domain in InventoryDomain.values) {
+      if (!domainSupports(domain, DomainCapability.reminders)) continue;
+      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
+      if (instance.repository is ReminderEditor) domains.add(domain);
+    }
+    return domains;
+  }
+
+  /// V4.1 批次 3：各域的**提醒写口**（只写 `reminders` 表，不碰账）。
+  ///
+  /// 按域各取一个——物理分库下 `reminders` 表每库一张，
+  /// 写错库就数据分裂。
+  ///
+  /// **工作域不给写口**（null）：本轮工作域不开放提醒（能力开关），
+  /// 所以工作域的日程条目只读展示，不能新建/编辑/删除。
+  Map<InventoryDomain, ReminderEditor?> _reminderEditors() {
+    final hub = widget.hub;
+    if (hub == null) return const <InventoryDomain, ReminderEditor?>{};
+    final editors = <InventoryDomain, ReminderEditor?>{};
+    for (final domain in InventoryDomain.values) {
+      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
+      final repo = instance.repository;
+      if (!domainSupports(domain, DomainCapability.reminders)) {
+        // 能力开关关闭：显式登记 null（而不是不登记）——
+        // 日程签靠它判断「这个域不支持提醒」。
+        editors[domain] = null;
+        continue;
+      }
+      editors[domain] = repo is ReminderEditor ? repo as ReminderEditor : null;
+    }
+    return editors;
+  }
+
+  /// V4.1 批次 3：新建提醒（**写操作在组合根执行**）。
+  Future<void> _createReminder(InventoryDomain domain, ReminderDraft draft) async {
+    final editor = _reminderEditors()[domain];
+    if (editor == null) {
+      throw StateError('${domain.label}暂不支持提醒');
+    }
+    await editor.createReminder(
+      draft.title,
+      detail: draft.detail,
+      dueAt: draft.dueAt,
+      repeatRule: draft.repeatRule,
+      priority: draft.priority,
+    );
+  }
+
+  /// V4.1 批次 3：编辑提醒。
+  Future<void> _editReminder(
+      InventoryDomain domain, int reminderId, ReminderDraft draft) async {
+    final editor = _reminderEditors()[domain];
+    if (editor == null) {
+      throw StateError('${domain.label}暂不支持提醒');
+    }
+    await editor.editReminder(
+      reminderId,
+      title: draft.title,
+      detail: draft.detail,
+      dueAt: draft.dueAt,
+      repeatRule: draft.repeatRule,
+      clearRepeatRule: draft.repeatRule == null,
+      priority: draft.priority,
+    );
+  }
+
+  /// V4.1 批次 3：删除提醒。
+  Future<void> _deleteReminder(InventoryDomain domain, int reminderId) async {
+    final editor = _reminderEditors()[domain];
+    if (editor == null) {
+      throw StateError('${domain.label}暂不支持提醒');
+    }
+    await editor.removeReminder(reminderId);
   }
 
   /// 仓储主体（V3.13 原样）。

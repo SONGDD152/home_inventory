@@ -423,14 +423,38 @@ void main() {
 
   // ============ 裁定⑤ 日程签只管纵览 + 状态展示 ============
 
-  test('裁定⑤ 日程签不挂提醒交互（源码级：showActions: false）', () {
-    final src = File('lib/ui/overview_page.dart').readAsStringSync();
-    expect(src, contains('showActions: false'),
-        reason: '日程签必须传 showActions: false——不碰提醒交互');
+  test('裁定⑤ 日程签不挂提醒交互（源码级：日程签组件无延期/备注按钮）', () {
+    // V4.1 批次 3：日程签从概览页里**拆成了独立组件**
+    // （`lib/ui/schedule_tab_view.dart`），因为它要带月历 + 时间轴
+    // + 跨域标识 + 增删改，留在概览页里会把这个文件撑爆。
+    //
+    // 所以这条锁从「概览页传 showActions: false」**升级**为
+    // 「日程签组件自己就不含延期/备注交互」——锁的是**行为口径**，
+    // 不是某个实现细节。批次 3 之后日程签勾选写 `todo_states`
+    // （待办状态本身，元宝 B8 双向同步的落点），
+    // 但**不出现**延期 / 备注这两个提醒交互按钮。
+    final src =
+        File('lib/ui/schedule_tab_view.dart').readAsStringSync();
+    expect(src, isNot(contains('overview_defer_')),
+        reason: '日程签不该有延期交互按钮');
+    expect(src, isNot(contains('overview_note_')),
+        reason: '日程签不该有备注交互按钮');
+    expect(src, contains('markDone'),
+        reason: '日程签的勾选写 todo_states——这是待办状态，不是提醒交互');
   });
 
   test('裁定⑤ 日程签仍只读纵览（源码级：概览页不持有仓储类型）', () {
-    final src = File('lib/ui/overview_page.dart').readAsStringSync();
+    // **剥掉注释行**再查——与 v41 的同类锁同一口径。
+    //
+    // 为什么必须剥：这条锁要证明的是「概览页的**代码**里不持有仓储类型」，
+    // 而不是「注释里不许提到这些词」。批次 3 的注释里会说明
+    // 「数据层怎么校验的」，提到实现类名是正常叙述——
+    // 那是**文档**，不是**持有**。
+    //
+    // 不剥注释的话，这条锁测的是「文档用词」而不是「能力边界」，
+    // 逼着写注释的人绕着某个词说话——那是**假边界**，
+    // 真正的边界（代码里能不能拿到写口）反而没人管。
+    final src = _codeOnly('lib/ui/overview_page.dart');
     for (final bad in <String>[
       'InventoryRepository',
       'InventoryDatabase',
@@ -438,6 +462,38 @@ void main() {
     ]) {
       expect(src.contains(bad), isFalse,
           reason: '概览页不该持有仓储类型 $bad');
+    }
+  });
+
+  test('裁定⑤ 概览区不持写口（源码级：概览区任一文件都不许有写接口）',
+      () {
+    // V4.1 批次 3 新增的锁。
+    //
+    // 批次 3 要让日程签能新建/编辑/删除提醒，如果图省事，
+    // 概览区（`lib/ui/overview_page.dart` + `lib/ui/schedule_tab_view.dart`）
+    // 就会直接持一个提醒写接口——那等于**概览区拿到了写能力**，
+    // 元宝批过的四锁之一就破了。
+    //
+    // 所以本批的做法是：概览区只持**回调**，
+    // 写操作由组合根（`home_page.dart`）执行。
+    //
+    // 这条锁把「概览区不许出现写接口类型」**锁死**——
+    // 将来谁想在概览区直接塞一个写口，测试立刻红。
+    const writePorts = <String>[
+      'InventoryRepository',
+      'InventoryDatabase',
+      'ReminderRepository',
+      'ReminderEditor',
+    ];
+    for (final path in const <String>[
+      'lib/ui/overview_page.dart',
+      'lib/ui/schedule_tab_view.dart',
+    ]) {
+      final src = _codeOnly(path);
+      for (final bad in writePorts) {
+        expect(src.contains(bad), isFalse,
+            reason: '概览区不该持有写口 $bad（$path）——写操作归组合根');
+      }
     }
   });
 
@@ -765,4 +821,21 @@ void main() {
     );
     expect(check.value, isTrue, reason: '日程签读到的是同一份状态');
   });
+}
+
+/// 去掉注释行，只留代码——用来做「不持仓储类型」的源码级断言。
+///
+/// 与 v41 的同名辅助**同一实现**（口径一致，不搞两套）。
+String _codeOnly(String path) {
+  final file = File(path);
+  expect(file.existsSync(), isTrue, reason: '应能读到源码 $path');
+  final out = <String>[];
+  for (final line in file.readAsStringSync().split('\n')) {
+    final t = line.trim();
+    if (t.startsWith('///') || t.startsWith('//') || t.startsWith('*')) {
+      continue;
+    }
+    out.add(line);
+  }
+  return out.join('\n');
 }

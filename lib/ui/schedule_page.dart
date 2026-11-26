@@ -4,6 +4,9 @@ import '../data/daily_report_service.dart';
 import '../data/domain.dart';
 import '../data/reminder.dart';
 import '../data/reminder_repository.dart';
+import '../domain/reminder_editor.dart';
+import '../domain/repeat_rule.dart';
+import 'reminder_edit_dialog.dart';
 
 /// V4.0：日程页（提醒列表 + 增删改 + 完成）。
 ///
@@ -60,6 +63,9 @@ class _SchedulePageState extends State<SchedulePage> {
       result.title,
       detail: result.detail,
       dueAt: result.dueAt,
+      // V4.1 批次 3：重复规则在**新建**时就要写进去
+      // （`addReminder` 本来就带这个参数，只是之前 UI 没给入口）。
+      repeatRule: result.repeatRule,
       priority: result.priority,
     );
     await _reload();
@@ -70,12 +76,32 @@ class _SchedulePageState extends State<SchedulePage> {
     if (repo == null) return;
     final result = await _editDialog(existing: item);
     if (result == null) return;
-    await repo.updateReminder(
-      item.id!,
-      title: result.title,
-      detail: result.detail,
-      priority: result.priority,
-    );
+    // V4.1 批次 3：编辑时也要能改重复规则。
+    //
+    // `ReminderRepository.updateReminder` **不支持**改 `repeat_rule`
+    // （它是 V4.0 的接口，改签名会波及所有实现者 → 破旧测试红线），
+    // 所以这里改走批次 3 新增的 `ReminderEditor.editReminder`
+    // ——它专管提醒条目，且支持显式清空重复规则。
+    final editor = repo is ReminderEditor ? repo as ReminderEditor : null;
+    if (editor != null) {
+      await editor.editReminder(
+        item.id!,
+        title: result.title,
+        detail: result.detail,
+        dueAt: result.dueAt,
+        repeatRule: result.repeatRule,
+        clearRepeatRule: result.repeatRule == null,
+        priority: result.priority,
+      );
+    } else {
+      // 拿不到窄写口（测试假仓储等）→ 退回旧路径，重复规则不变。
+      await repo.updateReminder(
+        item.id!,
+        title: result.title,
+        detail: result.detail,
+        priority: result.priority,
+      );
+    }
     await _reload();
   }
 
@@ -114,126 +140,33 @@ class _SchedulePageState extends State<SchedulePage> {
   }
 
   Future<_ReminderDraft?> _editDialog({Reminder? existing}) async {
-    final titleController = TextEditingController(text: existing?.title ?? '');
-    final detailController = TextEditingController(text: existing?.detail ?? '');
-    DateTime? dueAt = existing?.dueAt == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(existing!.dueAt!);
-    // V4.1 批次 2（元宝裁定①）：优先级可设（高 / 中 / 低，默认中）。
-    var priority = ReminderPriority.normalize(existing?.priority);
-    return showDialog<_ReminderDraft>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          key: const Key('reminder_edit_dialog'),
-          title: Text(existing == null ? '新增提醒' : '编辑提醒'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              TextField(
-                key: const Key('reminder_title_field'),
-                controller: titleController,
-                decoration: const InputDecoration(labelText: '标题'),
-              ),
-              TextField(
-                key: const Key('reminder_detail_field'),
-                controller: detailController,
-                decoration: const InputDecoration(labelText: '备注（可空）'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                key: const Key('reminder_due_pick'),
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: context,
-                    initialDate: dueAt ?? DateTime.now(),
-                    firstDate: DateTime.now().subtract(const Duration(days: 365)),
-                    lastDate: DateTime.now().add(const Duration(days: 365 * 3)),
-                  );
-                  if (picked == null) return;
-                  setLocal(() {
-                    dueAt = DateTime(picked.year, picked.month, picked.day, 9);
-                  });
-                },
-                icon: const Icon(Icons.event),
-                label: Text(dueAt == null
-                    ? '选日期（可选）'
-                    : '日期：${dueAt!.month}月${dueAt!.day}日'),
-              ),
-              const SizedBox(height: 12),
-              // 优先级（裁定①）：决定催办区排序 + 提前进区天数。
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text('优先级',
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: Theme.of(context).colorScheme.outline)),
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: <Widget>[
-                  for (final p in ReminderPriority.all) ...<Widget>[
-                    ChoiceChip(
-                      key: Key('reminder_priority_$p'),
-                      label: Text(ReminderPriority.labelOf(p)),
-                      selected: priority == p,
-                      onSelected: (_) => setLocal(() => priority = p),
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 4),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  _priorityHint(priority),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
-                ),
-              ),
-            ],
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              key: const Key('reminder_save'),
-              onPressed: () {
-                final title = titleController.text.trim();
-                if (title.isEmpty) return;
-                Navigator.of(context).pop(_ReminderDraft(
-                  title: title,
-                  detail: detailController.text.trim().isEmpty
-                      ? null
-                      : detailController.text.trim(),
-                  dueAt: dueAt,
-                  priority: priority,
-                ));
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
-      ),
+    // V4.1 批次 3：复用**共用**的提醒编辑弹窗。
+    //
+    // 之前这份弹窗是本文件私有的，概览页的日程签另有一份 →
+    // 两处迟早漂移（一边能设重复一边不能）。现在统一走
+    // `ReminderEditDialog`，两处入口同一套字段。
+    final draft = await ReminderEditDialog.show(context, existing: existing);
+    if (draft == null) return null;
+    return _ReminderDraft(
+      title: draft.title,
+      detail: draft.detail,
+      dueAt: draft.dueAt,
+      priority: draft.priority,
+      repeatRule: draft.repeatRule,
     );
   }
 
-  /// 优先级提示文案（把「提前几天进催办区」讲明白）。
-  static String _priorityHint(int priority) {
-    final days = ReminderPriority.leadDaysOf(priority);
-    if (days <= 0) return '到期当天才进催办区';
-    return '到期前 $days 天进催办区';
-  }
-
-  /// 列表副标题：备注 + 优先级标记（裁定①，一眼看见这条有多急）。
+  /// 列表副标题：备注 + 优先级标记 + 重复规则（裁定① / 批次 3）。
   Widget? _subtitle(Reminder item) {
     final parts = <String>[];
     if (item.detail != null && item.detail!.isNotEmpty) {
       parts.add(item.detail!);
     }
     parts.add('优先级${ReminderPriority.labelOf(item.priority)}');
+    // V4.1 批次 3：重复规则标记（不重复的不显示，别给界面添噪音）。
+    if (item.repeatRule != null) {
+      parts.add(RepeatRule.labelOf(item.repeatRule));
+    }
     return Text(parts.join(' · '));
   }
 
@@ -332,6 +265,7 @@ class _ReminderDraft {
     this.detail,
     this.dueAt,
     this.priority = ReminderPriority.normal,
+    this.repeatRule,
   });
 
   final String title;
@@ -340,4 +274,7 @@ class _ReminderDraft {
 
   /// 优先级（0 低 / 1 中 / 2 高）——元宝裁定①。
   final int priority;
+
+  /// 重复规则（null = 不重复）——批次 3。
+  final String? repeatRule;
 }

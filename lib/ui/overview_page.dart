@@ -7,6 +7,8 @@ import '../domain/reminder_source.dart';
 import '../domain/reminder_sources.dart';
 import '../domain/todo_agenda.dart';
 import '../domain/todo_state_writer.dart';
+import 'reminder_edit_dialog.dart';
+import 'schedule_tab_view.dart';
 
 /// V4.1：概览页（**账目只读 + 待办可写**）。
 ///
@@ -34,6 +36,10 @@ class OverviewPage extends StatefulWidget {
     required this.reader,
     required this.sources,
     this.todoWriters = const <InventoryDomain, TodoStateWriter>{},
+    this.editableScheduleDomains = const <InventoryDomain>{},
+    this.onCreateReminder,
+    this.onEditReminder,
+    this.onDeleteReminder,
     this.switchTimeoutCount = 0,
     this.onOpenDomain,
     this.onOpenReport,
@@ -56,6 +62,38 @@ class OverviewPage extends StatefulWidget {
   /// 「写 `todo_states` 这一张表」，入参仍然只有 sourceType + sourceId，
   /// **拿不到任何仓储句柄** → 「概览改不了账」在编译期依然成立。
   final Map<InventoryDomain, TodoStateWriter> todoWriters;
+
+  /// **开放提醒的域**（批次 3）——只有这些域的日程能新建/编辑/删除。
+  ///
+  /// 工作域本轮不开放提醒（**能力开关**，不是表缺失），
+  /// 所以它不在这个集合里，它的日程条目只读展示。
+  final Set<InventoryDomain> editableScheduleDomains;
+
+  /// 新建提醒（由组合根执行写操作）。
+  ///
+  /// ## 为什么是回调而不是写口
+  ///
+  /// 元宝批过的写边界四锁之一是「概览页不持仓储类型」。
+  /// 如果概览页持一个提醒写接口，就等于**概览区拿到了写能力**——
+  /// 「概览改不了账」就只剩约定、不剩编译期保证。
+  ///
+  /// 所以概览区只**表达意图**（回调），写操作交给组合根
+  /// （`home_page.dart`）执行——那里的角色本来就是持有仓储并分发调用。
+  /// 这与概览页已有的 `onOpenReport` / `onOpenDomain` 是同一个模式。
+  ///
+  /// 回调都带 [InventoryDomain] 参数：物理分库下 `reminders` 表每库一张，
+  /// 写错库就是数据分裂。
+  final Future<void> Function(InventoryDomain domain, ReminderDraft draft)?
+      onCreateReminder;
+
+  /// 编辑提醒（组合根执行写操作）。
+  final Future<void> Function(
+          InventoryDomain domain, int reminderId, ReminderDraft draft)?
+      onEditReminder;
+
+  /// 删除提醒（组合根执行写操作）。
+  final Future<void> Function(InventoryDomain domain, int reminderId)?
+      onDeleteReminder;
 
   /// 切库超时次数（**用户可见**：切库降级不是静默的）。
   final int switchTimeoutCount;
@@ -409,85 +447,57 @@ class _OverviewPageState extends State<OverviewPage>
     if (snapshots.isEmpty && _loading) {
       return const Center(child: Text('加载中…'));
     }
-    return ListView(
-      key: const Key('overview_schedule_tab'),
-      padding: const EdgeInsets.all(16),
-      children: <Widget>[
-        for (final snapshot in snapshots) ...<Widget>[
-          Text(snapshot.domain.label,
-              style: const TextStyle(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          ..._scheduleRows(snapshot.domain),
-          const SizedBox(height: 12),
-        ],
-      ],
+    return ScheduleTabView(
+      entries: _scheduleEntries(),
+      todoWriters: widget.todoWriters,
+      statesByKey: _statesByKey,
+      editableDomains: widget.editableScheduleDomains,
+      onCreateReminder: widget.onCreateReminder,
+      onEditReminder: widget.onEditReminder,
+      onDeleteReminder: widget.onDeleteReminder,
+      onChanged: _reload,
     );
   }
 
-  /// 某域的日程条目（复用 [ScheduleReminderSource]，不另开数据通道）。
-  List<Widget> _scheduleRows(InventoryDomain domain) {
-    ScheduleReminderSource? source;
-    for (final s in widget.sources) {
-      if (s is ScheduleReminderSource && s.domain == domain) {
-        source = s;
-        break;
+  /// 跨域聚合的日程条目（两域排在一起，每条带域标识）。
+  ///
+  /// **只收日程类**（`reminders` 表），不收借出到期——那是系统类，
+  /// 归日报签的催办区管。
+  ///
+  /// 跨域展示（批次 3 ②）：工作域的 `reminders` 表**建齐但永远为空**
+  /// （能力开关，本轮不开放提醒），所以工作域那组会显示「暂无日程」
+  /// 或「该区域暂不支持提醒」——**能看、能区分，但没有可看的内容**。
+  List<ScheduleTabEntry> _scheduleEntries() {
+    final entries = <ScheduleTabEntry>[];
+    for (final domain in InventoryDomain.values) {
+      for (final source in widget.sources) {
+        if (source is! ScheduleReminderSource) continue;
+        if (source.domain != domain) continue;
+        for (final entry in _entriesBySource[source.id] ?? const <OverviewEntry>[]) {
+          if (entry.sourceId == null) continue;
+          entries.add(ScheduleTabEntry(
+            id: entry.id,
+            title: entry.title,
+            domain: domain,
+            reminderId: entry.sourceId!,
+            dueAt: entry.dueAt,
+            priority: entry.priority,
+            repeatRule: entry.repeatRule,
+            done: entry.done,
+          ));
+        }
       }
     }
-    if (source == null) {
-      // 工作区本轮不开放提醒（能力开关，不是表缺失）。
-      return <Widget>[
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Text('${domain.label}暂不支持提醒',
-              key: Key('schedule_unsupported_${domain.id}'),
-              style: const TextStyle(color: Colors.grey)),
-        ),
-      ];
-    }
-    final entries = _entriesBySource[source.id] ?? const <OverviewEntry>[];
-    if (entries.isEmpty) {
-      return <Widget>[
-        const Padding(
-          padding: EdgeInsets.symmetric(vertical: 6),
-          child: Text('暂无日程', style: TextStyle(color: Colors.grey)),
-        ),
-      ];
-    }
-    // 日程签与日报签**共用同一份状态**（元宝 B8 双向同步）：
-    // 两边都是 _TodoEntryRow，都从 _statesByKey 取状态、都写同一个
-    // todo_states —— 所以在任一边勾选，另一边刷新后立刻同步。
-    // 先把 displayName 取出来：闭包里 Dart 的类型提升会失效。
-    final displayName = source.displayName;
-    // 纵览排序：到期日近的在前；没到期日的排最后。
-    final sorted = entries.toList()
-      ..sort((a, b) {
-        const far = 1 << 62;
-        final da = a.dueAt ?? far;
-        final db2 = b.dueAt ?? far;
-        final byDue = da.compareTo(db2);
-        if (byDue != 0) return byDue;
-        return a.title.compareTo(b.title);
-      });
-    return sorted.map((entry) {
-      final state =
-          _statesByKey[TodoAgenda.stateKeyOf(entry.domain, entry.stateKey)];
-      final item = TodoAgendaItem(
-        entry: entry,
-        state: state,
-        sourceDisplayName: displayName,
-        isSystemHint: false,
-      );
-      return _TodoEntryRow(
-        key: Key('schedule_entry_${entry.id}'),
-        item: item,
-        writer: _writerOf(entry.domain),
-        onChanged: _onRowStateChanged,
-        // 裁定⑤：日程签**只管纵览 + 状态展示**，不碰提醒交互
-        // → 延期 / 备注两个按钮不出现（勾选保留，那是待办状态本身，
-        // 也是元宝 B8「双向同步」的落点）。
-        showActions: false,
-      );
-    }).toList();
+    // 排序：到期日近的在前；同一天按域 + 标题。
+    entries.sort((a, b) {
+      const far = 1 << 62;
+      final byDue = (a.dueAt ?? far).compareTo(b.dueAt ?? far);
+      if (byDue != 0) return byDue;
+      final byDomain = a.domain.id.compareTo(b.domain.id);
+      if (byDomain != 0) return byDomain;
+      return a.title.compareTo(b.title);
+    });
+    return entries;
   }
 }
 
@@ -508,7 +518,6 @@ class _TodoEntryRow extends StatefulWidget {
     required this.item,
     required this.writer,
     required this.onChanged,
-    this.showActions = true,
   });
 
   final TodoAgendaItem item;
@@ -516,12 +525,6 @@ class _TodoEntryRow extends StatefulWidget {
 
   /// 状态变化后通知父级刷新共享状态（让另一个签同步）。
   final Future<void> Function() onChanged;
-
-  /// 是否显示「延期 / 备注」两个提醒交互按钮。
-  ///
-  /// **false = 只读纵览**（元宝裁定⑤：日程签只管纵览 + 状态展示，
-  /// 不碰提醒交互）。日报签传 true。
-  final bool showActions;
 
   @override
   State<_TodoEntryRow> createState() => _TodoEntryRowState();
@@ -611,6 +614,13 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已延期，下一次提示：$label')),
       );
+    } on ArgumentError catch (e) {
+      // 裁定④：选了早于当前提示日的日子 → 这次延期被忽略。
+      // 说清为什么没成，别让用户以为延期成功了。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message?.toString() ?? '延期失败')),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -626,7 +636,7 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
     return '${d.year}-$m-$day';
   }
 
-  /// 延期弹窗（裁定③）。
+  /// 延期弹窗（裁定③ + 裁定④修订）。
   ///
   /// 两种方式：
   /// - **延到明天**（默认）：`next_due_at` = 明天 09:00；
@@ -634,9 +644,30 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
   ///
   /// 09:00 是「当天上午九点」——与日程签新建提醒的默认时刻一致，
   /// 也保证「下一次提示」落在**那一天之内**而不是前一天晚上。
+  ///
+  /// ## 裁定④：只往后推，不许回拉
+  ///
+  /// 日期选择器的 `firstDate` 直接设在「当前下一次提示日」——
+  /// 用户**挑不到**更早的日子，不是挑完再被驳回。
+  /// 边界是硬的：数据层还会再校验一次（见 `InventoryDatabase.defer`）。
   Future<_DeferChoice?> _askDefer() async {
     final reasonController = TextEditingController(text: '');
-    var pickedDate = DateTime.now().add(const Duration(days: 1));
+    // 当前下一次提示日 = next_due_at 优先，否则源条目原到期日，
+    // 再没有就以「今天」为基准（只能往后推）。
+    final now = DateTime.now();
+    final anchorMs = _item.nextDueAt ?? _item.sourceDueAt;
+    final anchorDay = anchorMs == null
+        ? DateTime(now.year, now.month, now.day)
+        : DateTime.fromMillisecondsSinceEpoch(anchorMs);
+    // 最早可选日 = 基准日当天（当天不算回拉，往后推就行）。
+    final minDay = DateTime(anchorDay.year, anchorDay.month, anchorDay.day);
+    var pickedDate = DateTime(now.year, now.month, now.day)
+        .add(const Duration(days: 1));
+    if (pickedDate.isBefore(minDay)) pickedDate = minDay;
+    // 「延到明天」是否合法：明天必须不早于基准日。
+    final tomorrow = DateTime(now.year, now.month, now.day)
+        .add(const Duration(days: 1));
+    final tomorrowIsValid = !tomorrow.isBefore(minDay);
     var useSpecificDate = false;
     return showDialog<_DeferChoice>(
       context: context,
@@ -659,7 +690,17 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
                       : Icons.radio_button_checked,
                   size: 18,
                 ),
-                title: const Text('延到明天'),
+                // 裁定④：「延到明天」也可能是**回拉**——条目已经延到 3 天后，
+                // 再延到明天就是往前拉。所以这一步先算出「明天」相对
+                // 基准日的位置，不合法就把这个选项禁用。
+                title: Text(
+                  tomorrowIsValid ? '延到明天' : '延到明天（早于当前提示日）',
+                  key: const Key('overview_defer_opt_tomorrow_text'),
+                  style: TextStyle(
+                    color: tomorrowIsValid ? null : Colors.grey,
+                  ),
+                ),
+                enabled: tomorrowIsValid,
               ),
               ListTile(
                 key: const Key('overview_defer_opt_date'),
@@ -674,14 +715,15 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
                 ),
                 title: const Text('延到具体日期'),
               ),
-              if (useSpecificDate)
+              if (useSpecificDate) ...<Widget>[
                 OutlinedButton.icon(
                   key: const Key('overview_defer_pick_date'),
                   onPressed: () async {
                     final picked = await showDatePicker(
                       context: ctx,
                       initialDate: pickedDate,
-                      firstDate: DateTime.now(),
+                      // 裁定④：只往后推 → 早于当前提示日的日子**挑不到**。
+                      firstDate: minDay,
                       lastDate: DateTime.now().add(const Duration(days: 365 * 3)),
                     );
                     if (picked == null) return;
@@ -690,6 +732,14 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
                   icon: const Icon(Icons.event),
                   label: Text('延期到 ${_fmtDay(pickedDate)}'),
                 ),
+                const SizedBox(height: 4),
+                // 明说规矩，别让用户以为是自己选错了。
+                Text(
+                  '只能往后推，最早 ${_fmtDay(minDay)}',
+                  key: const Key('overview_defer_min_hint'),
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
               const SizedBox(height: 8),
               TextField(
                 key: const Key('overview_defer_reason_field'),
@@ -711,7 +761,7 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
               onPressed: () {
                 final target = useSpecificDate
                     ? pickedDate
-                    : DateTime.now().add(const Duration(days: 1));
+                    : tomorrow;
                 Navigator.of(ctx).pop(_DeferChoice(
                   dueOn: DateTime(target.year, target.month, target.day, 9),
                   reason: reasonController.text.trim(),
@@ -866,7 +916,7 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
                   color: dimmed ? Colors.grey : null,
                   decoration: dimmed ? TextDecoration.lineThrough : null,
                 )),
-        trailing: (_writable && widget.showActions)
+        trailing: _writable
             ? Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[

@@ -24,6 +24,9 @@ class OverviewEntry {
     this.handleNote,
     // ── V4.1 批次 2 新增 ──
     this.priority = ReminderPriority.normal,
+    // ── V4.1 批次 3 新增 ──
+    this.leadDaysOverride,
+    this.repeatRule,
   });
 
   /// 条目唯一 id（同一来源内唯一即可）。
@@ -74,7 +77,37 @@ class OverviewEntry {
 
   /// 提前进催办区的天数（裁定②）——由优先级推导：
   /// 高 = 提前 3 天，中 = 提前 1 天，低 = 不提前。
-  int get leadDays => ReminderPriority.leadDaysOf(priority);
+  ///
+  /// ## V4.1 批次 3：为什么多一个「显式覆盖」
+  ///
+  /// 元宝裁定①与裁定②在**系统类**上会打架：
+  /// - 裁定①：系统类（借出到期）优先级 = **高**；
+  /// - 裁定②：提前量由 priority 推导，**高 = 提前 3 天**。
+  ///
+  /// 但 PM 最终裁定明确：「系统类提前量取 **2 天**，不取 buddy 原定的 3 天」。
+  ///
+  /// 如果为了满足「系统类提前 2 天」去改 `leadDaysOf(高)` = 2，
+  /// 那**日程类的高优先级提醒也会从 3 天变成 2 天**——
+  /// 裁定②批的是「高 3 / 中 1 / 低 0」，一并改掉就是越权改裁定。
+  ///
+  /// 所以这里加一个**显式覆盖字段**：默认走 priority 推导（裁定②不变），
+  /// 只有系统类那条由源自己指定 2 天（裁定①的 PM 最终裁定）。
+  /// **优先级与提前量解耦**——这也是为什么不能靠改 priority 推导表来实现。
+  final int? leadDaysOverride;
+
+  /// 重复规则（`daily` / `weekly` / `monthly` / `yearly` / null = 不重复）。
+  ///
+  /// V4.1 批次 3：日程签的条目要显示「每天 / 每周…」标记，
+  /// 所以源要把它透出来（`reminders.repeat_rule` 列本就在，
+  /// 只是之前没有任何 UI 用它）。
+  final String? repeatRule;
+
+  /// 实际生效的提前进区天数。
+  ///
+  /// 有显式覆盖就用覆盖（系统类 = 2 天），
+  /// 没有就按优先级推导（裁定②：高 3 / 中 1 / 低 0）。
+  int get leadDays =>
+      leadDaysOverride ?? ReminderPriority.leadDaysOf(priority);
 
   /// 与 `todo_states` 配对的业务键（`'{sourceType}_{sourceId}'`）。
   ///

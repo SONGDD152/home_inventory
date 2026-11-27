@@ -307,32 +307,51 @@ class _OverviewPageState extends State<OverviewPage>
   ///
   /// 催办区因此**上移铺满**腾出的空间。
   Widget _buildReportTab() {
-    return RefreshIndicator(
-      onRefresh: _reload,
-      child: ListView(
-        key: const Key('overview_page'),
-        padding: const EdgeInsets.all(16),
-        children: <Widget>[
-          if (widget.switchTimeoutCount > 0)
-            Card(
-              key: const Key('overview_switch_timeout'),
-              color: Colors.orange.shade50,
-              child: ListTile(
-                leading: const Icon(Icons.warning_amber_outlined),
-                title: Text('切库超时 ${widget.switchTimeoutCount} 次'),
-                subtitle: const Text('切换区域时旧账有操作未收尾，已自动修复连接。'),
-              ),
+    // ── V4.1.2 真机复验整改：日报签拆成「生活区 / 工作区」**两个独立滚动框** ──
+    //
+    // ## 产品口径（元宝 2026-11-27 需求澄清，PM 转发确认）
+    //
+    // 「像聊天框一样滑动」= 两块**各有滚动边界、各滑各的**：
+    // 手指在生活区框内上滑只翻生活区条目，在工作区框内上滑只翻工作区条目，
+    // 互不带动，**不是整页统一滚到底**。
+    //
+    // ## 原来为什么错
+    //
+    // 整页一个 `ListView` 包住两块 → 一屏装不下时只滚整页，
+    // 工作区 3 条被截在屏外、拖不到；PM 真机判定不通过。
+    //
+    // ## 现在的结构
+    //
+    // 顶部固定（超时卡/加载/错误/「催办」标题行）不滚；
+    // 下面两块各拿一半剩余高度（`Expanded` 提供**有界高度**），
+    // 每块内部自带独立 `ListView` → 各自可滚、互不干扰。
+    // **`Expanded` 是关键**：没有有界高度，内层 ListView 会无限高、滚不起来。
+    final blocks = _agendaBlocks();
+    return Column(
+      key: const Key('overview_page'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        if (widget.switchTimeoutCount > 0)
+          Card(
+            key: const Key('overview_switch_timeout'),
+            color: Colors.orange.shade50,
+            child: ListTile(
+              leading: const Icon(Icons.warning_amber_outlined),
+              title: Text('切库超时 ${widget.switchTimeoutCount} 次'),
+              subtitle: const Text('切换区域时旧账有操作未收尾，已自动修复连接。'),
             ),
-          // 静态文字而不是持续转的 CircularProgressIndicator：
-          // 持续动画会让 widget 测试的 pumpAndSettle 永远等不到静止帧。
-          if (_loading) const Center(child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text('加载中…'),
-          )),
-          if (_error != null)
-            Text('读取失败：$_error', key: const Key('overview_error')),
-          const SizedBox(height: 8),
-          Row(
+          ),
+        // 静态文字而不是持续转的 CircularProgressIndicator：
+        // 持续动画会让 widget 测试的 pumpAndSettle 永远等不到静止帧。
+        if (_loading) const Center(child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('加载中…'),
+        )),
+        if (_error != null)
+          Text('读取失败：$_error', key: const Key('overview_error')),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Row(
             children: <Widget>[
               const Expanded(
                 child: Text('催办',
@@ -349,14 +368,25 @@ class _OverviewPageState extends State<OverviewPage>
                 ),
             ],
           ),
-          const SizedBox(height: 4),
-          // 催办区 = 按**区域**分块（整改 4：只分生活区/工作区两块）。
-          for (final block in _agendaBlocks()) ...<Widget>[
-            const SizedBox(height: 8),
-            _buildAgendaBlock(block),
-          ],
+        ),
+        const SizedBox(height: 4),
+        // 催办区 = 按**区域**分块（整改 4：只分生活区/工作区两块，恒为 2）。
+        // 每块 Expanded → 有界高度 → 块内 ListView 各自滚动。
+        for (final block in blocks) ...<Widget>[
+          Expanded(child: _buildAgendaBox(block)),
         ],
-      ),
+      ],
+    );
+  }
+
+  /// 单个区域的**独立滚动框**（聊天框式，各滑各的）。
+  ///
+  /// 只有标题行固定在框顶，条目区是一块 `ListView`：
+  /// 本框内容超出框高时在本框内上翻，不带动另一框、也不整页滚动。
+  Widget _buildAgendaBox(_AgendaBlock block) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: _buildAgendaBlock(block),
     );
   }
 
@@ -464,53 +494,78 @@ class _OverviewPageState extends State<OverviewPage>
   Widget _buildAgendaBlock(_AgendaBlock block) {
     final items = block.items;
     final domain = block.domain;
-    return ExpansionTile(
-      key: Key('overview_block_${domain.id}'),
-      initiallyExpanded: true,
-      tilePadding: EdgeInsets.zero,
-      childrenPadding: const EdgeInsets.only(bottom: 4),
-      leading: Icon(
-        domain == InventoryDomain.life
-            ? Icons.home_outlined
-            : Icons.business_outlined,
-        size: 20,
-        color: Colors.grey,
-      ),
-      title: Text(domain.label,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-      subtitle: Text(items.isEmpty ? '暂无待办' : '共 ${items.length} 条待办',
-          style: const TextStyle(fontSize: 12)),
-      children: items.isEmpty
-          ? <Widget>[
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
-                child: Text('暂无待办', style: TextStyle(color: Colors.grey)),
-              ),
-              // 整改 1：统计卡整块撤掉后，原先挂在卡里的
-              // 「去工作区建首个位置」引导改挂到**工作区的空催办块**上——
-              // 引导语还在（不丢入口），但它现在属于「催办」这一屏，
-              // 而不是混在账目数字里。
-              if (domain == InventoryDomain.work &&
-                  widget.onOpenDomain != null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    key: const Key('overview_empty_goto_work'),
-                    onPressed: () => widget.onOpenDomain!(InventoryDomain.work),
-                    icon: const Icon(Icons.arrow_forward),
-                    label: const Text('去工作区建首个位置'),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 本框高度由外层 `Expanded` 给定（有界）。标题行（icon + 标题 +
+        // 副标题 + childrenPadding）约占 84px，剩下的高度才是条目滚动区。
+        // **`ListView` 必须有有界高度才会滚**——无界时它会撑到内容那么高，
+        // 表现为「截在屏外、拖不动」，正是真机复验的不通过现象。
+        // 标题行用 dense ListTile（约 64px）+ childrenPadding 4 → 预留 72px。
+        const headerReserve = 72.0;
+        final listHeight =
+            (constraints.maxHeight - headerReserve).clamp(0.0, double.infinity);
+        return ExpansionTile(
+          key: Key('overview_block_${domain.id}'),
+          initiallyExpanded: true,
+          tilePadding: EdgeInsets.zero,
+          dense: true,
+          childrenPadding: const EdgeInsets.only(bottom: 4),
+          leading: Icon(
+            domain == InventoryDomain.life
+                ? Icons.home_outlined
+                : Icons.business_outlined,
+            size: 20,
+            color: Colors.grey,
+          ),
+          title: Text(domain.label,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          subtitle: Text(items.isEmpty ? '暂无待办' : '共 ${items.length} 条待办',
+              style: const TextStyle(fontSize: 12)),
+          children: items.isEmpty
+              ? <Widget>[
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Text('暂无待办', style: TextStyle(color: Colors.grey)),
                   ),
-                ),
-            ]
-          : items
-              .map((item) => _TodoEntryRow(
-                    key: Key('overview_entry_${item.entry.id}'),
-                    item: item,
-                    // 按条目所属域取写口——物理分库下每库一张 todo_states。
-                    writer: _writerOf(item.entry.domain),
-                    onChanged: _onRowStateChanged,
-                  ))
-              .toList(),
+                  // 整改 1：统计卡整块撤掉后，原先挂在卡里的
+                  // 「去工作区建首个位置」引导改挂到**工作区的空催办块**上——
+                  // 引导语还在（不丢入口），但它现在属于「催办」这一屏，
+                  // 而不是混在账目数字里。
+                  if (domain == InventoryDomain.work &&
+                      widget.onOpenDomain != null)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const Key('overview_empty_goto_work'),
+                        onPressed: () =>
+                            widget.onOpenDomain!(InventoryDomain.work),
+                        icon: const Icon(Icons.arrow_forward),
+                        label: const Text('去工作区建首个位置'),
+                      ),
+                    ),
+                ]
+              : <Widget>[
+                  SizedBox(
+                    height: listHeight,
+                    child: ListView(
+                      key: Key('overview_block_list_${domain.id}'),
+                      padding: const EdgeInsets.only(left: 56, right: 8),
+                      // 非懒加载：所有条目都在 widget 树上（折叠/查找断言依赖），
+                      // 但 scrollable 有界 → 超出框高的部分可在框内上翻。
+                      children: items
+                          .map((item) => _TodoEntryRow(
+                                key: Key('overview_entry_${item.entry.id}'),
+                                item: item,
+                                // 按条目所属域取写口——物理分库下每库一张 todo_states。
+                                writer: _writerOf(item.entry.domain),
+                                onChanged: _onRowStateChanged,
+                              ))
+                          .toList(),
+                    ),
+                  ),
+                ],
+        );
+      },
     );
   }
 
@@ -1031,16 +1086,21 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
             ? Row(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
+                  // V4.1.2 真机整改：原用 `Icons.more_time` /
+                  // `Icons.sticky_note_2_outlined`（较新的 M3 glyph），
+                  // 真机上字体回退成竖排「仑」状怪字（PM 2026-11-27 截图）。
+                  // 换成 MaterialIcons 经典 glyph：access_time / comment，
+                  // 与项目 V3.5「M3 图标真机不渲染」教训同类处置。
                   IconButton(
                     key: Key('overview_defer_${entry.id}'),
                     tooltip: '延期',
-                    icon: const Icon(Icons.more_time, size: 20),
+                    icon: const Icon(Icons.access_time, size: 20),
                     onPressed: _defer,
                   ),
                   IconButton(
                     key: Key('overview_note_${entry.id}'),
                     tooltip: '备注',
-                    icon: const Icon(Icons.sticky_note_2_outlined, size: 20),
+                    icon: const Icon(Icons.comment, size: 20),
                     onPressed: _editNote,
                   ),
                 ],

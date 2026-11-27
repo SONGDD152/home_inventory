@@ -789,7 +789,63 @@ if (doneAt != null && doneAt < dayStart) return false;
   源码 + `.git` + 未提交改动全丢 → 从 GitHub SSH 克隆取回（`fa7f7ea` 批次 5 提交齐全，`git fsck` 干净）。
 - 后续所有改动 / 出包 / 简报均基于该路径；**简报「环境与路径」栏已写明供 PM 核验**。
 
+### V4.1.2 真机复验整改包留档（2026-11-27）· V4.1.1 真机复验打回修复
+
+> **触发**：V4.1.1（versionCode 26）上线装机后，PM 2026-11-27 20:11/20:12
+> 真机截图复验**不通过、不关账**（元宝代整理回执，PM 转发）：
+> ① 日程页列表底部截断、拖不动；② 日报催办整页滚不动、工作区 3 条被裁；
+> ③ 工作区条目右侧出现竖排「仑」状怪字。
+> 按铁律「已上线版本不做同号覆盖式热修」→ **升号重发：versionCode 27、versionName 4.1.2**。
+> 本版**已出包、已上线**；测试 **626/626** 全绿（622 旧 + v49 四条新）；
+> `flutter analyze` **0 error / 0 warning**（5 条既有 deprecated info）。
+
+### 产品口径澄清（元宝 2026-11-27 需求澄清，PM 转发确认）
+
+- **「像聊天框一样滑动」= 日报签内生活区 / 工作区各是一个独立滚动容器**：
+  手指在生活区块内上滑只翻生活区条目、在工作区块内上滑只翻工作区条目，
+  **两框互不带动、各有滚动边界**；**不是整页统一滚到底**。
+- 此前实现理解成整页滚动 → 方向错，导致工作区 3 条被截在屏外拖不到。
+
+### 整改逐条处置
+
+| # | 真机现象 | 处置 | 落地位置 |
+|---|---|---|---|
+| 1 | 日报催办整页滚不动、工作区 3 条被裁 | ✅ 日报签从「整页一个 ListView」改为 Column：顶部固定 + **两个 `Expanded` 块**，每块自带独立 `ListView`（`overview_block_list_<域>`），有界高度 → 各滑各的 | `lib/ui/overview_page.dart` `_buildReportTab()` / `_buildAgendaBlock()` |
+| 2 | 工作区条目右侧竖排「仑」状怪字 | ✅ 原 `Icons.more_time` / `Icons.sticky_note_2_outlined`（较新 M3 glyph，真机字体回退）换成经典 `Icons.access_time` / `Icons.comment`；沿用 V3.5「M3 图标真机不渲染」教训 | `lib/ui/overview_page.dart` `_TodoEntryRow` trailing |
+| 3 | 日程页列表底部截断拖不动 | ✅ 日程签保持 v47 的唯一滚动容器 `ListView.builder` 结构（v47 三条回归全绿）；PM 复验口径「日程新建 5 条后拖列表」照旧 | `lib/ui/schedule_tab_view.dart`（未改，回归锁通过） |
+
+**边界**：顶部「概览/生活/工作」切换器与双签不动、催办恒 2 块、新建提醒必选区、
+两域物理分库、schema 仍 v13（**零新增表零新增列**）、知识库停文档层、改名未启动。
+
+### 回归测试
+
+- 新增 `test/v49_dual_scroll_boxes_test.dart` **4 条**：① 拖生活区框不带动工作区框 ② 反向对称 ③ 折叠一块后另一框仍能滚 ④ 源码级（剥注释 codeOnly）锁两框结构 + 经典图标（无 M3 怪字）。
+- 旧测试改断言保行数（一条未删）：`test/v48_domain_isolation_test.dart`「整改4：块内混合」——
+  原来断言两条同屏可见，新口径下每框高度有界、第二条需**框内滚一下**才 build，
+  改为「初始在框外 → 框内 drag → 同块可见」，块内混合语义不变。
+- **总数 622（旧）+ 4（新）= 626/626 全绿**。
+
+### APK 与签名核验
+
+| 项 | 值 |
+|---|---|
+| 大小 | **54,651,330 字节**（52.1 MB） |
+| sha256 | `e21d2add931f7c4967aad1d5bad8201c47cccbbf7173ea8282ed84c1dfd526c3` |
+| aapt2 实测 | `versionCode='27' versionName='4.1.2'`（与 `pubspec.yaml` 的 `4.1.2+27` 一致） |
+| 签名指纹 | **`c1647f33…`（与线上 V4.0/V4.1/V4.1.1 一致 → 可覆盖安装）** |
+| v2/v3 签名 | v2 = true，v3 = false（与上版同形态） |
+
+### 下载页上线
+
+- 地址 **https://home-inventory-apk-14912.app.workbuddy.host/?sharecode=P4WQ4OYEZN**（链接/sharecode 永不变）。
+- APK 存放名 `home-inventory-v412.apk`；直链带 `?sharecode=P4WQ4OYEZN`。
+- 重新发布后实测：页面 `HTTP=200`、标题「家庭仓储 V4.1.2 · 下载」、含 `4.1.2+27` / `626/626` / 正确 sha256；
+  APK 直链 `HTTP=200`、`size=54651330`、**线上 sha256 与本地完全一致**；不带 sharecode 直链 `HTTP=403`（校验生效）。
+- 二维码 `qrcode.make(url, box_size=12, border=3)` → 516×516，zxingcpp 解码回原文一致。
+- 历史索引补入 V4.1.1 一条；V4.1.1 原页备份 `index-v411-backup.html`。
+
 ### 下一版
 
-- **V4.2 知识库**，versionCode 顺延 **27**（不得跳号）。
+- **V4.2 知识库**，versionCode 顺延 **28**（不得跳号）。
 - **红线：本版简报交齐前不动 V4.2 一行代码；改名任务（展示层 + 包名 `com.danfeng.xiaobenben`）是 V4.1 收官后单开的事，本版未动。**
+- **真机锁③仍未关账**：等 PM 复验三下（生活区块内上滑 / 工作区块内上滑各滑各的 / 日程新建 5 条后拖列表），AI 不代签。

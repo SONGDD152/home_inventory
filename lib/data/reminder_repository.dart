@@ -49,8 +49,8 @@ abstract class ReminderRepository {
   /// V4.1.3：从回收站恢复提醒（is_deleted 归 0、deleted_at 清空）。
   Future<void> restoreReminder(int id);
 
-  /// V4.1.3：彻底删除回收站里的提醒（物理删除，不可恢复）。
-  /// UI 必须二次确认后才调；本方法只做数据层硬删。
+  /// V4.1.3：彻底删除提醒（物理删除，不可恢复；回收站内外都适用）。
+  /// UI 必须二次确认后才调；数据层连对应 todo_states 一起清掉，不留孤儿。
   Future<void> purgeReminder(int id);
 
   /// 取某天的日报（没有则返回 null）。

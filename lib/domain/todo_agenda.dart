@@ -190,6 +190,11 @@ class TodoAgendaItem {
   /// 是否已处理（划线灰化）。
   bool get isDone => state?.isDone ?? false;
 
+  /// V4.1.4：用户主动标记的「进行中」（半框）。
+  ///
+  /// 不是 done → 照常进催办区；导出四区里单独归「今日进行中」。
+  bool get isInProgress => state?.isInProgress ?? false;
+
   /// 是否已延期（三态之一）。
   bool get isDeferred => state?.isDeferred ?? false;
 

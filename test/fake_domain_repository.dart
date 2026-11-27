@@ -528,6 +528,31 @@ class FakeDomainRepository
   }
 
   @override
+  Future<void> setTodoStatus(
+      String sourceType, int sourceId, String status) async {
+    if (!TodoStatus.toggleCycle.contains(status)) return;
+    if (status == TodoStatus.done) {
+      await markDone(sourceType, sourceId, done: true);
+      return;
+    }
+    final key = TodoState.entryKeyOf(sourceType, sourceId);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final old = _todoStates[key];
+    _todoStates[key] = TodoState(
+      id: old?.id,
+      sourceType: sourceType,
+      sourceId: sourceId,
+      status: status,
+      doneAt: null,
+      deferCount: old?.deferCount ?? 0,
+      handleNote: old?.handleNote,
+      nextDueAt: old?.nextDueAt,
+      createdAt: old?.createdAt ?? now,
+      updatedAt: now,
+    );
+  }
+
+  @override
   Future<void> defer(String sourceType, int sourceId,
       {String? reason, int days = 1, DateTime? dueOn}) async {
     final key = TodoState.entryKeyOf(sourceType, sourceId);

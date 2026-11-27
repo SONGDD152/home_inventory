@@ -1,7 +1,7 @@
 name: home_inventory
 description: 家庭仓储 APP 第一阶段数据层：物品位置的本地持久化。不含语音与界面。
 publish_to: none
-version: 4.1.3+28
+version: 4.1.4+29
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -16,6 +16,9 @@ dependencies:
   path_provider: ^2.1.5
   # V3.6 Excel 导出：纯 Dart 包（无原生插件），不触碰 lifecycle override 冲突区。
   excel: ^4.0.6
+  # V4.1.4 月历阴历/节日/节气：纯 Dart 无第三方依赖，本地算不联网。
+  # 依赖解析后必须 diff pubspec.lock，除本包外零变动（护 lifecycle 2.0.24 override）。
+  lunar: ^1.7.9
 
 # lifecycle 2.0.35 要求 compileSdk>=36，与 file_picker 8.3.7（android-34）包内冲突；
 # 锁定 2.0.24（compileSdk 34，硬编码）使二者一致，API 无差异。

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../data/domain.dart';
 import '../data/reminder.dart';
 import '../data/todo_state.dart';
+import '../domain/lunar_label.dart';
 import '../domain/repeat_rule.dart';
 import '../domain/todo_agenda.dart';
 import '../domain/todo_state_writer.dart';
@@ -105,6 +106,9 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   /// 月历是否展开（默认收起，概览页空间宝贵）。
   bool _calendarExpanded = false;
 
+  /// V4.1.4：是否显示农历/节日小字（默认开，可关避免格子过挤）。
+  bool _showLunar = true;
+
   /// 选中的日期（null = 不筛选，显示全部）。
   DateTime? _selectedDay;
 
@@ -124,11 +128,25 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   /// 状态行不存在时才回落到条目自带的 `done`
   /// （`reminders.status`；注意勾选流程维护的是 `todo_states`，
   /// 那一列目前不由勾选写）。
-  bool _isDone(ScheduleTabEntry entry) {
-    final state = widget.statesByKey[
-        TodoAgenda.stateKeyOf(entry.domain, TodoState.entryKeyOf(
-            TodoSourceType.scheduleReminder, entry.reminderId))];
-    return state?.isDone ?? entry.done;
+  /// 该条目的 `todo_states` 状态行（null = 从未处理过）。
+  TodoState? _stateOf(ScheduleTabEntry entry) => widget.statesByKey[
+      TodoAgenda.stateKeyOf(entry.domain, TodoState.entryKeyOf(
+          TodoSourceType.scheduleReminder, entry.reminderId))];
+
+  bool _isDone(ScheduleTabEntry entry) =>
+      _stateOf(entry)?.isDone ?? entry.done;
+
+  /// V4.1.4：三态当前值——空框 pending / 半框 in_progress / 满框 done。
+  /// 状态行不存在时回落到条目自带的 done。
+  String _statusOf(ScheduleTabEntry entry) {
+    final state = _stateOf(entry);
+    if (state == null) {
+      return entry.done ? TodoStatus.done : TodoStatus.pending;
+    }
+    // 系统自动延期的 deferred 不参与三态勾选循环，展示为空框。
+    return state.isDone
+        ? TodoStatus.done
+        : (state.isInProgress ? TodoStatus.inProgress : TodoStatus.pending);
   }
 
   @override
@@ -289,7 +307,23 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           if (_calendarExpanded)
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-              child: _buildCalendarGrid(days),
+              child: Column(
+                children: <Widget>[
+                  // V4.1.4：农历/节日显示开关（默认开）。
+                  Row(
+                    children: <Widget>[
+                      const Text('显示农历/节日',
+                          style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      Switch(
+                        key: const Key('schedule_lunar_toggle'),
+                        value: _showLunar,
+                        onChanged: (v) => setState(() => _showLunar = v),
+                      ),
+                    ],
+                  ),
+                  _buildCalendarGrid(days),
+                ],
+              ),
             ),
         ],
       ),
@@ -311,7 +345,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
       ));
     }
     for (var i = 0; i < leading; i++) {
-      cells.add(const SizedBox(height: 32));
+      cells.add(const SizedBox(height: 44));
     }
     for (var d = 1; d <= totalDays; d++) {
       final date = DateTime(_month.year, _month.month, d);
@@ -320,6 +354,8 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           _selectedDay!.year == date.year &&
           _selectedDay!.month == date.month &&
           _selectedDay!.day == date.day;
+      // V4.1.4：农历/节日小字（关闭时不算、不渲染）。
+      final lunarText = _showLunar ? LunarLabel.of(date) : null;
       cells.add(InkWell(
         key: Key('schedule_cal_day_$d'),
         onTap: () {
@@ -329,7 +365,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           });
         },
         child: Container(
-          height: 32,
+          height: 44,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             color: selected ? Colors.blue.shade100 : null,
@@ -337,6 +373,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: <Widget>[
               Text('$d',
                   style: TextStyle(
@@ -344,6 +381,25 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
                     fontWeight: has ? FontWeight.bold : FontWeight.normal,
                     color: has ? Colors.blue.shade900 : null,
                   )),
+              // 小字一行：节日/节气/农历（字号 9，超长省略）。
+              if (lunarText != null)
+                Text(
+                  lunarText,
+                  key: Key('schedule_cal_lunar_$d'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: (_showLunar &&
+                            (lunarText == '元旦' ||
+                                lunarText == '春节' ||
+                                lunarText == '中秋' ||
+                                lunarText == '劳动节' ||
+                                lunarText == '国庆节'))
+                        ? Colors.red.shade700
+                        : Colors.grey.shade700,
+                  ),
+                ),
               if (has)
                 Container(
                   width: 4,
@@ -545,8 +601,15 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
         onLongPress: editable ? () => _deleteFlow(entry) : null,
         leading: Checkbox(
           key: Key('overview_check_${entry.id}'),
-          value: done,
-          onChanged: (v) => _toggle(entry, v ?? false),
+          // V4.1.4 三态：tristate 的 null 态横线由 Flutter 绘制引擎画
+          // （不依赖字体 glyph → 真机不会出「仑」状怪字）。
+          tristate: true,
+          value: _statusOf(entry) == TodoStatus.done
+              ? true
+              : (_statusOf(entry) == TodoStatus.inProgress ? null : false),
+          // 循环由我们控制（空→半→满→空），忽略 Flutter 传入的 v。
+          // 与原版一致无条件挂（_cycle 内部 writer 为 null 时自行返回）。
+          onChanged: (_) => _cycle(entry),
         ),
         title: Row(
           children: <Widget>[
@@ -629,14 +692,17 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     );
   }
 
-  Future<void> _toggle(ScheduleTabEntry entry, bool done) async {
+  /// V4.1.4：三态循环——空框 → 半框(in_progress) → 满框(done) → 空框。
+  /// 走 setTodoStatus 写口（UI 只持回调）；markDone 旧路径保留兼容。
+  Future<void> _cycle(ScheduleTabEntry entry) async {
     final writer = widget.todoWriters[entry.domain];
     if (writer == null) return;
+    final next = TodoStatus.next(_statusOf(entry));
     try {
-      await writer.markDone(
+      await writer.setTodoStatus(
         TodoSourceType.scheduleReminder,
         entry.reminderId,
-        done: done,
+        next,
       );
       if (widget.onChanged != null) await widget.onChanged!();
     } catch (e) {

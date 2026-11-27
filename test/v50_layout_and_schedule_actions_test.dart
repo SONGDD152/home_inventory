@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:home_inventory/data/domain.dart';
-import 'package:home_inventory/data/reminder.dart';
 import 'package:home_inventory/data/todo_state.dart';
 import 'package:home_inventory/domain/overview_reader.dart';
 import 'package:home_inventory/domain/reminder_source.dart';

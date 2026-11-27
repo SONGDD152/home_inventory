@@ -721,16 +721,24 @@ class _TodoEntryRow extends StatefulWidget {
 }
 
 class _TodoEntryRowState extends State<_TodoEntryRow> {
-  late bool _done = widget.item.isDone;
+  // V4.1.4 三态：pending 空框 / in_progress 半框 / done 满框。
+  late String _status = widget.item.isDone
+      ? TodoStatus.done
+      : (widget.item.isInProgress ? TodoStatus.inProgress : TodoStatus.pending);
   late int _deferCount = widget.item.deferCount;
   late String? _note = widget.item.handleNote;
+
+  /// 完成态（下游划线灰化 / 延期视觉沿用）。
+  bool get _done => _status == TodoStatus.done;
 
   @override
   void didUpdateWidget(covariant _TodoEntryRow oldWidget) {
     super.didUpdateWidget(oldWidget);
     final s = widget.item.state;
     if (s == null) return;
-    _done = s.isDone;
+    _status = s.isDone
+        ? TodoStatus.done
+        : (s.isInProgress ? TodoStatus.inProgress : TodoStatus.pending);
     _deferCount = s.deferCount;
     _note = s.handleNote;
   }
@@ -748,6 +756,7 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
       _item.entry.sourceType != null &&
       _item.entry.sourceId != null;
 
+  /// V4.1.4：三态循环——空→半→满→空；走 setTodoStatus（UI 只持回调）。
   Future<void> _toggle() async {
     final writer = widget.writer;
     final entry = _item.entry;
@@ -756,18 +765,20 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
         entry.sourceId == null) {
       return;
     }
-    final next = !_done;
+    final next = TodoStatus.next(_status);
+    final prev = _status;
     // 乐观更新：先改本地状态（只重建这一行），写库失败再回滚。
     setState(() {
-      _done = next;
+      _status = next;
     });
     try {
-      await writer.markDone(entry.sourceType!, entry.sourceId!, done: next);
+      await writer.setTodoStatus(
+          entry.sourceType!, entry.sourceId!, next);
       await widget.onChanged();
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _done = !next;
+        _status = prev;
       });
     }
   }
@@ -1072,7 +1083,11 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
         // 一整行从左往右排；文字区 Expanded 占满剩余宽度、单行不折字。
         leading: Checkbox(
           key: Key('overview_check_${entry.id}'),
-          value: _done,
+          // V4.1.4 三态：tristate 的 null 横线由绘制引擎画，避开 M3 glyph 坑。
+          tristate: true,
+          value: _status == TodoStatus.done
+              ? true
+              : (_status == TodoStatus.inProgress ? null : false),
           onChanged: _writable ? (_) => _toggle() : null,
         ),
         title: Row(

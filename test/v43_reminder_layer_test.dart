@@ -817,7 +817,10 @@ void main() {
       (tester) async {
     final env = await pumpOverview(tester);
 
-    // 在日报签勾掉。
+    // V4.1.4 三态：在日报签点两次（空→半→满）到完成态。
+    await tester.tap(
+        find.byKey(const Key('overview_check_reminder_life_1')));
+    await tester.pumpAndSettle();
     await tester.tap(
         find.byKey(const Key('overview_check_reminder_life_1')));
     await tester.pumpAndSettle();

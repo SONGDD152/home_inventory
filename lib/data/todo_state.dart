@@ -61,6 +61,9 @@ class TodoState {
 
   bool get isPending => status == TodoStatus.pending;
 
+  /// V4.1.4：用户主动标记的「进行中」中间态。
+  bool get isInProgress => status == TodoStatus.inProgress;
+
   /// 派生的条目键：与 UI 侧 [OverviewEntry.id] 对齐。
   String get entryKey => TodoState.entryKeyOf(sourceType, sourceId);
 
@@ -155,14 +158,34 @@ class TodoSourceType {
 class TodoStatus {
   const TodoStatus._();
 
-  /// 未处理。
+  /// 未处理（空框）。
   static const String pending = 'pending';
 
-  /// 已处理（划线 + 灰化，可撤销）。
+  /// 进行中（半框）——V4.1.4 新增，用户主动标记。
+  ///
+  /// 与 [deferred] 语义不重叠：in_progress 是**用户主动**标记「做了一半」，
+  /// deferred 是**系统自动**标记「超期顺延」。两者并存，各走各的路。
+  static const String inProgress = 'in_progress';
+
+  /// 已处理 / 完成（满框，划线 + 灰化，可撤销）。
   static const String done = 'done';
 
-  /// 已延期（延期次数 +1）。
+  /// 已延期（延期次数 +1）——系统自动标记超期，保留不动。
   static const String deferred = 'deferred';
+
+  /// 三态勾选循环：空框 → 半框 → 满框 → 回空框。
+  static const List<String> toggleCycle = <String>[
+    pending,
+    inProgress,
+    done,
+  ];
+
+  /// 下一个勾选态（循环）。
+  static String next(String status) {
+    final i = toggleCycle.indexOf(status);
+    if (i < 0) return pending; // 未知态（含 deferred）→ 点一下回到空框。
+    return toggleCycle[(i + 1) % toggleCycle.length];
+  }
 }
 
 /// V4.1：`todo_states` 表的列名常量。

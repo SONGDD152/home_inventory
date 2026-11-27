@@ -385,6 +385,12 @@ void main() {
     );
     expect(check.value, isFalse);
 
+    // V4.1.4 三态：点一次=进行中(半框)，再点一次=完成(满框)。
+    await tester.tap(find.byKey(const Key('overview_check_reminder_life_1')));
+    await tester.pumpAndSettle();
+    final mid = await life.loadStates();
+    expect(mid.first.isInProgress, isTrue, reason: '第一次点击进中间态');
+
     await tester.tap(find.byKey(const Key('overview_check_reminder_life_1')));
     await tester.pumpAndSettle();
 

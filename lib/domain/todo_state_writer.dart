@@ -57,6 +57,18 @@ abstract interface class TodoStateWriter implements TodoStateReader {
   /// 撤销完成**不回收**已建的下一实例（排期不回滚）。
   Future<void> markDone(String sourceType, int sourceId, {bool done = true});
 
+  /// V4.1.4：写入三态状态（pending / in_progress / done）。
+  ///
+  /// 与 [markDone] 并存、不改旧签名（旧测试兼容）。入参只有
+  /// `sourceType`（字符串）+ `sourceId`（整数）+ `status`（字符串），
+  /// **拿不到任何仓储句柄**——写边界铁律不变。
+  ///
+  /// - 写 `in_progress` / `pending`：`done_at` 清 null（不是完成）；
+  /// - 写 `done`：`done_at` 记当前毫秒时间戳，并**复用 [markDone] 的
+  ///   重复规则展开**（数据层唯一实现，两签同源）；
+  /// - `deferred` 由系统延期路径写，**不经过本方法**（用户三态不碰它）。
+  Future<void> setTodoStatus(String sourceType, int sourceId, String status);
+
   /// 延期：延期次数 **+1**（按「次」累计，跨天不重置），
   /// 写入延期原因，并把下一次提示时间往后推。
   ///

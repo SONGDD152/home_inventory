@@ -881,8 +881,58 @@ if (doneAt != null && doneAt < dayStart) return false;
 | aapt2 实测 | `versionCode='28' versionName='4.1.3'`（与 `pubspec.yaml` 的 `4.1.3+28` 一致） |
 | 签名指纹 | `c1647f33…`（与线上 V4.0/V4.1/V4.1.1/V4.1.2 一致 → 可覆盖安装） |
 
+### V4.1.4 功能版留档（2026-11-28）· PM 拍板三项打包
+
+> **触发**：PM 2026-11-28 拍板「催办三态 + 日报导出四区 + 月历阴历节日」打包，随下版升号。
+> 经两轮落点核对（冲突核对 → 五点拍死）后施工。按铁律升号 **28 → 29**（versionName 4.1.4；
+> V4.2 知识库顺延 +30）。**已出包、已上线**；测试 **642/642 全绿**（631 旧 + v51 十一条新）；
+> `flutter analyze` **0 error / 0 warning**（5 条既有 deprecated info）。
+
+### PM 拍死的五点（施工前）
+
+1. **版号** +29；PM 更正上一句「不占 +29」口误，按「当前+1不复用」办；V4.2 顺延 +30。
+2. **明日前瞻**严格 `dateOnly(due_at)==明天 && status==pending`，只共用 dateOnly/排序/pending 判定，**不套 isInAgenda 提前量**。
+3. **三态写口**新增 `setTodoStatus(sourceType,sourceId,status)`，`markDone` 保留兼容；UI 只持回调不持写口。
+4. **半框图标**用 tristate Checkbox（横线由绘制引擎画，避开 M3 glyph 真机怪字）。
+5. **复验**本版出包后一次关账，V4.1.3（+28）那几下一起点。
+
+### 落地逐条
+
+| # | 需求 | 处置 | 落点 |
+|---|---|---|---|
+| 1 | 三态勾选 | ✅ `TodoStatus` 加 `in_progress`（pending/in_progress/done 循环），`deferred` 保留给系统超期标记；`Checkbox(tristate:true)` value=null 画横线；两签勾选都走 `setTodoStatus` | `todo_state.dart` / `todo_state_writer.dart` / `inventory_database.dart` / `overview_page.dart` / `schedule_tab_view.dart` |
+| 2 | 进行中明天仍在催办 | ✅ `in_progress` 的 `doneAt=null`，`TodoAgenda.isInAgenda` 第①条自然让它继续进；不进完成区 | `todo_agenda.dart`（`isInProgress` getter） |
+| 3 | 提前打勾 | ✅ `setTodoStatus(done)` 委托 `markDone`：`done_at` 记今天毫秒、次日被 `doneAt < dayStart` 挡掉；重复日程展开逻辑唯一实现 | `inventory_database.dart` |
+| 4 | 日报四区导出 | ✅ `DailyReportService._loadAllItems()` 唯一取数口（同源不另开查询），`loadFourSections` 按四段过滤；md/docx 都改；界面两框不动 | `daily_report_service.dart` |
+| 5 | 明日前瞻只读 | ✅ 严格明天一天、不套提前量；导出标注「明日待办（只读）」 | 同上 |
+| 6 | 月历阴历 | ✅ 加 `lunar: ^1.7.9`（纯 Dart 无第三方依赖）；`LunarLabel.of()` 纯函数：节日名 > 节气 > 农历初一(带月) > 农历日；格子加小字 + 「显示农历/节日」开关默认开 | `pubspec.yaml` / `lib/domain/lunar_label.dart` / `schedule_tab_view.dart` |
+
+**边界**：schema 仍 **v13 零新增列零新增表**（in_progress 是枚举值不是列）；两域物理分库；界面两框各滑各的、催办恒两块、隐藏已完成默认开全不动；
+`pubspec.lock` diff 仅新增 lunar 一段（lifecycle 2.0.24 override 未破）；改名未启动、知识库停文档层。
+
+### 回归测试
+
+- 新增 `test/v51_tristate_export_lunar_test.dart` **11 条**：公历节日/农历节日/初一带月/闰月换算（纯函数）、三态循环与写口（deferred 不被覆盖、done 记时间戳）、四区严格口径（含"高优先级后天到期不进明天区"防提前量）、四段顺序与文本、源码级锁。
+- 旧测试改断言保行数（一条未删）：`v43`「双签同步」与 `v44`「日程签勾选→日报签」由点一次改点两次（空→半→满）到完成态，新增中间态断言。
+- **631（旧）+ 11（新）= 642/642 全绿**。
+
+### APK 与签名核验
+
+| 项 | 值 |
+|---|---|
+| 大小 | **55,421,594 字节**（52.8 MB；比上版 +0.8MB 是 lunar 包） |
+| sha256 | `bcbb85a51ac15df769101a6751fd3f7f8ef2ffa573ddc5e8abeeb6c70cd707e3` |
+| aapt2 实测 | `versionCode='29' versionName='4.1.4'`（与 `pubspec.yaml` 一致） |
+| 签名指纹 | `c1647f33…`（与历版一致 → 可覆盖安装） |
+| 线上核验 | 页面 HTTP=200 含 4.1.4+29 / 642/642 / 正确 sha；APK 直链带 sharecode HTTP=200、size=55421594、线上 sha 与本地逐字一致；不带 sharecode HTTP=403 |
+
+### 下载页上线
+
+地址 **https://home-inventory-apk-14912.app.workbuddy.host/?sharecode=P4WQ4OYEZN**（链接/sharecode 永不变）；
+APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 zxingcpp 解码一致；
+历史索引补 V4.1.3、原页备份 `index-v413-backup.html`。
+
 ### 下一版
 
-- **V4.2 知识库**，versionCode 顺延 **29**（不得跳号）。
-- **红线：本版简报交齐前不动 V4.2 一行代码；改名任务（展示层 + 包名 `com.danfeng.xiaobenben`）是 V4.1 收官后单开的事，本版未动。**
-- **真机锁③仍未关账**：等 PM 复验（日报两框各滑各的 + 条目单行靠左 / 日程点条目改标题 / 左滑或长按删除各试一次 / 隐藏已完成开关 / 日程新建 5 条后拖列表），AI 不代签。
+- **改名**（展示名「小本本」+ 包名 `com.danfeng.xiaobenben`）→ **V4.2 知识库**，versionCode **30**（不得跳号）。
+- **真机一次关账**：本版四项（三态切换/导出四区/月历农历/开关）+ V4.1.3 四下（两框各滑各的+条目靠左/点条目改标题/删一次/隐藏已完成），AI 不代签。关账后才启动改名。

@@ -3549,6 +3549,46 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     }
   }
 
+  @override
+  Future<void> setTodoStatus(
+      String sourceType, int sourceId, String status) async {
+    // 只认三态；非法值（含 deferred）直接忽略——deferred 只走系统延期路径。
+    if (!TodoStatus.toggleCycle.contains(status)) return;
+    // 完成态委托 markDone：重复规则展开逻辑唯一实现，两签同源。
+    if (status == TodoStatus.done) {
+      await markDone(sourceType, sourceId, done: true);
+      return;
+    }
+    // 非完成态（pending / in_progress）：写状态 + 清 done_at，
+    // 保留 defer_count / handle_note / next_due_at（那是历史）。
+    _guardWrite();
+    final db = await open();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final existing = await _readTodoStateRow(db, sourceType, sourceId);
+    if (existing == null) {
+      await db.insert(tableTodoStates, <String, Object?>{
+        columnSourceType: sourceType,
+        columnSourceId: sourceId,
+        columnStatus: status,
+        columnDoneAt: null,
+        columnDeferCount: 0,
+        columnCreatedAt: now,
+        columnUpdatedAt: now,
+      });
+    } else {
+      await db.update(
+        tableTodoStates,
+        <String, Object?>{
+          columnStatus: status,
+          columnDoneAt: null,
+          columnUpdatedAt: now,
+        },
+        where: '$columnId = ?',
+        whereArgs: <Object?>[existing[columnId]],
+      );
+    }
+  }
+
   /// V4.1 批次 4（元宝裁定② · 甲方案）：完成一条带重复规则的日程后，
   /// 自动新建**下一实例**；旧实例**保留为历史**（日报看得到「今天做完了什么」）。
   ///

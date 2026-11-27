@@ -124,16 +124,41 @@ class DailyReportService {
     buffer.writeln('# 家庭仓储日报 · $key');
     buffer.writeln();
 
-    // ① 催办条目（已完成 / 未完成）——与概览日报签同源。
-    final agenda = await loadAgenda(date);
-    final done = agenda.where((i) => i.isDone).toList();
-    final pending = agenda.where((i) => !i.isDone).toList();
+    // ① 催办四区——与概览日报签同源（共用 _loadAllItems，不另开查询）。
+    final sections = await loadFourSections(date);
 
-    buffer.writeln('## 已完成');
-    if (done.isEmpty) {
-      buffer.writeln('- 今日没有已处理的条目');
+    // 第一段：今日待办未完成（标题保留 `## 未完成` 字面，兼容旧导出断言）。
+    buffer.writeln('## 未完成 · 今日待办未完成');
+    if (sections.pending.isEmpty) {
+      buffer.writeln('- 今日没有待办未完成的条目');
     } else {
-      for (final item in done) {
+      for (final item in sections.pending) {
+        // 标红标记：Markdown 无颜色语法，用 `!!` 前缀；
+        // .docx 走 OOXML 真红色（见 buildDocx）。
+        buffer.writeln('!!- [ ] ${item.entry.title}'
+            '${item.summary.isEmpty ? '' : '｜${item.summary}'}');
+      }
+    }
+    buffer.writeln();
+
+    // 第二段：今日进行中（用户主动标记的中间态）。
+    buffer.writeln('## 今日进行中');
+    if (sections.inProgress.isEmpty) {
+      buffer.writeln('- 今日没有进行中的条目');
+    } else {
+      for (final item in sections.inProgress) {
+        buffer.writeln('- [~] ${item.entry.title}'
+            '${item.summary.isEmpty ? '' : '｜${item.summary}'}');
+      }
+    }
+    buffer.writeln();
+
+    // 第三段：今日完成（标题含「已完成」字面，兼容旧断言）。
+    buffer.writeln('## 已完成 · 今日完成');
+    if (sections.done.isEmpty) {
+      buffer.writeln('- 今日没有已完成的条目');
+    } else {
+      for (final item in sections.done) {
         final time = formatTime(item.doneAt);
         buffer.writeln('- [x] ${item.entry.title}'
             '${time.isEmpty ? '' : '（处理于 $time）'}'
@@ -142,14 +167,13 @@ class DailyReportService {
     }
     buffer.writeln();
 
-    buffer.writeln('## 未完成');
-    if (pending.isEmpty) {
-      buffer.writeln('- 今日没有未处理的条目');
+    // 第四段：明日前瞻（严格明天一天、只读，导出标注「明日待办」）。
+    buffer.writeln('## 明日前瞻 · 明日待办（只读）');
+    if (sections.tomorrow.isEmpty) {
+      buffer.writeln('- 明天没有待办条目');
     } else {
-      for (final item in pending) {
-        // 标红标记：Markdown 无颜色语法，用 `!!` 前缀；
-        // .docx 走 OOXML 真红色（见 buildDocx）。
-        buffer.writeln('!!- [ ] ${item.entry.title}'
+      for (final item in sections.tomorrow) {
+        buffer.writeln('- [ ] ${item.entry.title}'
             '${item.summary.isEmpty ? '' : '｜${item.summary}'}');
       }
     }
@@ -198,10 +222,11 @@ class DailyReportService {
     return buffer.toString();
   }
 
-  /// 读取某日的催办条目（条目 + 状态配对），**口径与界面同源**。
+  /// 取全部催办条目（source + state 配对 + 排序），**不做日期过滤**。
   ///
-  /// [date] = 报告日期。判定用该日 23:59 作为基准（日报讲的是「那天的事」）。
-  Future<List<TodoAgendaItem>> loadAgenda(DateTime date) async {
+  /// V4.1.4：这是「同源」的唯一取数口——`loadAgenda`（界面/旧导出）与
+  /// 四区导出都基于它，不另开数据库查询。四区只在其上按状态/日期过滤。
+  Future<List<TodoAgendaItem>> _loadAllItems() async {
     if (todoSources.isEmpty) return const <TodoAgendaItem>[];
     // 状态：**逐域读**（todo_states 每库一张表），合并时 key 带域前缀。
     final states = <String, TodoState>{};
@@ -220,26 +245,75 @@ class DailyReportService {
             state;
       }
     }
-    final basis = DateTime(date.year, date.month, date.day, 23, 59, 59);
     final items = <TodoAgendaItem>[];
     for (final source in todoSources) {
       final isSystem = source.id.startsWith('loan_due_');
       for (final entry in await source.loadEntries()) {
         final state =
             states[TodoAgenda.stateKeyOf(entry.domain, entry.stateKey)];
-        final item = TodoAgendaItem(
+        items.add(TodoAgendaItem(
           entry: entry,
           state: state,
           sourceDisplayName: source.displayName,
           isSystemHint: isSystem,
-        );
-        if (!item.isInAgenda(basis)) continue;
-        items.add(item);
+        ));
       }
     }
     // 排序口径与界面同源（裁定①：优先级高 → 中 → 低）。
     TodoAgenda.sortByPriority(items);
     return items;
+  }
+
+  /// 读取某日的催办条目（条目 + 状态配对），**口径与界面同源**。
+  ///
+  /// [date] = 报告日期。判定用该日 23:59 作为基准（日报讲的是「那天的事」）。
+  Future<List<TodoAgendaItem>> loadAgenda(DateTime date) async {
+    final all = await _loadAllItems();
+    if (all.isEmpty) return all;
+    final basis = DateTime(date.year, date.month, date.day, 23, 59, 59);
+    return all.where((i) => i.isInAgenda(basis)).toList();
+  }
+
+  /// V4.1.4：日报导出四区（纯导出层，界面两框不动）。
+  ///
+  /// 四段顺序：今日待办未完成 → 今日进行中 → 今日完成 → 明日前瞻。
+  /// 全部基于 [_loadAllItems] 同源取数，不另开查询。
+  Future<FourSections> loadFourSections(DateTime date) async {
+    final all = await _loadAllItems();
+    final today = TodoAgenda.dateOnly(date.millisecondsSinceEpoch);
+    final tomorrow =
+        TodoAgenda.dateOnly(DateTime(date.year, date.month, date.day + 1)
+            .millisecondsSinceEpoch);
+
+    int? dayOf(TodoAgendaItem i) {
+      final due = i.sourceDueAt;
+      return due == null ? null : TodoAgenda.dateOnly(due);
+    }
+
+    // ① 今日待办未完成：due_at=今天 + 未处理（pending，含从未处理）。
+    final pending = all
+        .where((i) => !i.isDone && !i.isInProgress && dayOf(i) == today)
+        .toList();
+    // ② 今日进行中：status=in_progress（用户主动标记，不限到期日）。
+    final inProgress = all.where((i) => i.isInProgress).toList();
+    // ③ 今日完成：done_at=今天（毫秒时间戳按自然日折）。
+    final done = all
+        .where((i) =>
+            i.doneAt != null &&
+            TodoAgenda.dateOnly(i.doneAt!) == today)
+        .toList();
+    // ④ 明日前瞻：严格 dateOnly(due_at)==明天 + pending，只读展示。
+    //    只共用 dateOnly / 排序 / pending 判定，不套 isInAgenda 的提前量。
+    final tomorrowPreview = all
+        .where((i) =>
+            !i.isDone && !i.isInProgress && dayOf(i) == tomorrow)
+        .toList();
+    return FourSections(
+      pending: pending,
+      inProgress: inProgress,
+      done: done,
+      tomorrow: tomorrowPreview,
+    );
   }
 
   /// 两域概览快照。
@@ -260,34 +334,58 @@ class DailyReportService {
   /// 未完成清单**真标红**（OOXML `<w:color w:val="FF0000"/>`）。
   Future<Uint8List> buildDocx(DateTime date) async {
     final key = formatDate(date);
-    final agenda = await loadAgenda(date);
-    final done = agenda.where((i) => i.isDone).toList();
-    final pending = agenda.where((i) => !i.isDone).toList();
+    final sections = await loadFourSections(date);
 
     final lines = <DocxLine>[];
-    lines.add(const DocxLine('已完成'));
-    if (done.isEmpty) {
-      lines.add(const DocxLine('· 今日没有已处理的条目'));
+    // 第一段：今日待办未完成（标红）。
+    lines.add(const DocxLine('未完成 · 今日待办未完成'));
+    if (sections.pending.isEmpty) {
+      lines.add(const DocxLine('· 今日没有待办未完成的条目'));
     } else {
-      for (final item in done) {
-        final time = formatTime(item.doneAt);
-        lines.add(DocxLine('□ ${item.entry.title}'
-            '${time.isEmpty ? '' : '（处理于 $time）'}'
-            '${item.summary.isEmpty ? '' : '｜${item.summary}'}'));
-      }
-    }
-    lines.add(const DocxLine(''));
-    lines.add(const DocxLine('未完成'));
-    if (pending.isEmpty) {
-      lines.add(const DocxLine('· 今日没有未处理的条目'));
-    } else {
-      for (final item in pending) {
-        // **标红**：未处理条目在 Word/WPS 里显示为红色加粗。
+      for (final item in sections.pending) {
         lines.add(DocxLine(
           '□ ${item.entry.title}'
           '${item.summary.isEmpty ? '' : '｜${item.summary}'}',
           red: true,
         ));
+      }
+    }
+    lines.add(const DocxLine(''));
+
+    // 第二段：今日进行中。
+    lines.add(const DocxLine('今日进行中'));
+    if (sections.inProgress.isEmpty) {
+      lines.add(const DocxLine('· 今日没有进行中的条目'));
+    } else {
+      for (final item in sections.inProgress) {
+        lines.add(DocxLine('◐ ${item.entry.title}'
+            '${item.summary.isEmpty ? '' : '｜${item.summary}'}'));
+      }
+    }
+    lines.add(const DocxLine(''));
+
+    // 第三段：今日完成。
+    lines.add(const DocxLine('已完成 · 今日完成'));
+    if (sections.done.isEmpty) {
+      lines.add(const DocxLine('· 今日没有已完成的条目'));
+    } else {
+      for (final item in sections.done) {
+        final time = formatTime(item.doneAt);
+        lines.add(DocxLine('■ ${item.entry.title}'
+            '${time.isEmpty ? '' : '（处理于 $time）'}'
+            '${item.summary.isEmpty ? '' : '｜${item.summary}'}'));
+      }
+    }
+    lines.add(const DocxLine(''));
+
+    // 第四段：明日前瞻（只读）。
+    lines.add(const DocxLine('明日前瞻 · 明日待办（只读）'));
+    if (sections.tomorrow.isEmpty) {
+      lines.add(const DocxLine('· 明天没有待办条目'));
+    } else {
+      for (final item in sections.tomorrow) {
+        lines.add(DocxLine('□ ${item.entry.title}'
+            '${item.summary.isEmpty ? '' : '｜${item.summary}'}'));
       }
     }
     lines.add(const DocxLine(''));
@@ -335,4 +433,26 @@ class DailyReportService {
       lines: lines,
     );
   }
+}
+
+/// V4.1.4：日报导出四区数据（纯导出层的中间结构）。
+class FourSections {
+  const FourSections({
+    required this.pending,
+    required this.inProgress,
+    required this.done,
+    required this.tomorrow,
+  });
+
+  /// 今日待办未完成（due_at=今天 + pending）。
+  final List<TodoAgendaItem> pending;
+
+  /// 今日进行中（status=in_progress）。
+  final List<TodoAgendaItem> inProgress;
+
+  /// 今日完成（done_at=今天）。
+  final List<TodoAgendaItem> done;
+
+  /// 明日前瞻（严格 due_at=明天 + pending，只读）。
+  final List<TodoAgendaItem> tomorrow;
 }

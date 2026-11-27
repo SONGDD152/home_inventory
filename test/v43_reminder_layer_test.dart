@@ -404,9 +404,18 @@ void main() {
   // ============ 裁定④ 催办区分组：图标区分 + 可折叠 ============
 
   test('裁定④ 催办区按源分组且分组可折叠（源码级）', () {
+    // **V4.1.1 整改 4：分组依据从「源」改成「区域」。**
+    //
+    // PM 2026-11-27 拍板：催办列表**只按区域分成两块**
+    // （生活区 / 工作区），不拆成四块，也不要三级分类/子标签/额外筛选。
+    //
+    // 所以这条锁的**分组 key** 跟着改：`overview_group_<源id>` →
+    // `overview_block_<区域id>`。折叠能力（ExpansionTile）与
+    // 系统类/日程类的**图标区分**都保留——图标区分是「条目级」的，
+    // 不是「分组级」的，与整改 4 不冲突。
     final src = File('lib/ui/overview_page.dart').readAsStringSync();
     expect(src, contains('ExpansionTile'), reason: '分组必须可折叠');
-    expect(src, contains('overview_group_'), reason: '分组要有稳定 key');
+    expect(src, contains('overview_block_'), reason: '分组要有稳定 key');
     expect(src, contains('inventory_2_outlined'),
         reason: '系统类与日程类必须图标区分');
     expect(src, contains('event_note'));
@@ -634,8 +643,15 @@ void main() {
     expect(find.text('加载中…'), findsNothing,
         reason: '概览页必须真的去读数据——'
             '批次 1 交付时漏了 initState 触发加载，页面永远停在「加载中…」');
-    expect(find.byKey(const Key('overview_domain_life')), findsOneWidget);
-    expect(find.byKey(const Key('overview_domain_work')), findsOneWidget);
+    // **V4.1.1 整改 1：概览统计卡整块撤掉**（PM 真机红框指定）。
+    // 原断言是「两张统计卡都在」；现在改成「统计卡不在了」，
+    // 并且**催办区必须顶上来**（不能撤了卡却留下一片空白）。
+    expect(find.byKey(const Key('overview_domain_life')), findsNothing,
+        reason: '整改1：日报签不再展示生活区统计卡');
+    expect(find.byKey(const Key('overview_domain_work')), findsNothing,
+        reason: '整改1：日报签不再展示工作区统计卡');
+    expect(find.byKey(const Key('overview_block_life')), findsOneWidget,
+        reason: '整改1：撤掉统计卡后，催办区要顶上来');
   });
 
   testWidgets('widget 裁定③：点延期 → 选「延到明天」→ 写入 next_due_at',
@@ -715,26 +731,25 @@ void main() {
       (tester) async {
     await pumpOverview(tester);
 
-    // 两个分组都在。
-    expect(find.byKey(const Key('overview_group_loan_due_life')), findsOneWidget);
-    expect(find.byKey(const Key('overview_group_schedule_reminders_life')),
-        findsOneWidget);
+    // **V4.1.1 整改 4：分组改成「按区域」，恒为两块**
+    // （生活区 / 工作区）——不再按源拆成四块。
+    expect(find.byKey(const Key('overview_block_life')), findsOneWidget);
+    expect(find.byKey(const Key('overview_block_work')), findsOneWidget);
     // 默认展开：条目可见。
     expect(find.byKey(const Key('overview_entry_reminder_life_1')),
         findsOneWidget);
 
     // 点分组标题折起来。
-    await tester.tap(find.text('生活区·日程提醒'));
+    await tester.tap(find.text('生活区'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('overview_entry_reminder_life_1')),
         findsNothing,
         reason: '折叠后这一组的条目不该再渲染');
-    // 另一个组不受影响。
-    expect(find.byKey(const Key('overview_group_loan_due_life')),
-        findsOneWidget);
+    // 另一个块不受影响。
+    expect(find.byKey(const Key('overview_block_work')), findsOneWidget);
 
     // 再点开。
-    await tester.tap(find.text('生活区·日程提醒'));
+    await tester.tap(find.text('生活区'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('overview_entry_reminder_life_1')),
         findsOneWidget);

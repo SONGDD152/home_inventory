@@ -509,7 +509,8 @@ void main() {
     expect(hub.currentDomain, InventoryDomain.life);
   });
 
-  testWidgets('V4.0 语音：工作区不支持提醒 → 报错并给引导按钮', (tester) async {
+  testWidgets('V4.0 语音：工作区提醒 → 落工作库（整改3：能力已开放）',
+      (tester) async {
     final domains = fakeDomains();
     final hub = DomainHub(life: domains.life, work: domains.work);
 
@@ -527,20 +528,15 @@ void main() {
     await tester.tap(find.byKey(const Key('submit_button')));
     await tester.pumpAndSettle();
 
-    // 引导弹窗（不是静默记到生活库）。
-    expect(find.byKey(const Key('cross_domain_dialog')), findsOneWidget);
-    expect(find.textContaining('工作区暂不支持提醒'), findsOneWidget);
+    // **V4.1.1 整改 3：工作域开放提醒** → 不再弹「暂不支持」引导，
+    // 语音直接落**工作库**。
     final lifeReminders = domains.life.repository as ReminderRepository;
     final workReminders = domains.work.repository as ReminderRepository;
+    expect((await workReminders.getReminders()).length, 1,
+        reason: '整改3：工作区语音提醒应落工作库');
     expect((await lifeReminders.getReminders()).length, 0,
-        reason: '没落库前不能有任何写入');
-    expect((await workReminders.getReminders()).length, 0);
-
-    // 点【切换到生活区】→ 切域 + 预填该条提醒。
-    await tester.tap(find.byKey(const Key('cross_domain_switch')));
-    await tester.pumpAndSettle();
+        reason: '核心口径不变：不能静默记到生活库');
+    // 界面不切域（仍在生活区）。
     expect(hub.currentDomain, InventoryDomain.life);
-    final field = tester.widget<TextField>(find.byKey(const Key('phrase_field')));
-    expect(field.controller!.text, contains('提醒我'));
   });
 }

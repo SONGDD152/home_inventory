@@ -117,17 +117,131 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
+    // V4.1.1 整改 2：**唯一滚动容器**。
+    //
+    // ## 之前的毛病（PM 2026-11-27 真机手点发现）
+    //
+    // 提醒超过一屏后**拖不动**，下方内容够不着。
+    //
+    // 根因有两层：
+    // ① **摊平式 children**——`_buildTimeline()` 把所有条目摊平进
+    //    `ListView.children`，条目一多就顶出一屏，而外层 `TabBarView`
+    //    的 `PageView` 与内层 `ListView` **同时抢垂直拖动手势** →
+    //    真机上 `PageView` 先赢下手势竞技场 → 拖不动。
+    // ② **条目全量构建**——摊平的 children 无法回收。
+    //
+    // ## 现在的做法
+    //
+    // - 整个日程签**只有一个滚动容器**（这个 `ListView`），
+    //   内部不再有第二个能抢手势的滚动视图；
+    // - 时间轴改 `ListView.builder` **惰性构建**，只建可见的那些；
+    // - 月历卡 / 新建按钮 / 隐藏开关用 `header` 参数挂上——
+    //   它们随内容一起滚，但**不占用滚动容器之外的独立视口**。
+    final timeline = _timelineSlots();
+    return ListView.builder(
       key: const Key('overview_schedule_tab'),
       padding: const EdgeInsets.all(16),
-      children: <Widget>[
-        _buildCalendarCard(),
-        const SizedBox(height: 12),
-        _buildAddButton(),
-        _buildDoneToggle(),
-        const SizedBox(height: 8),
-        ..._buildTimeline(),
-      ],
+      itemCount: timeline.length + 1,
+      itemBuilder: (context, index) {
+        // index 0 = 固定头部（月历卡 + 新建按钮 + 隐藏开关）。
+        if (index == 0) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              _buildCalendarCard(),
+              const SizedBox(height: 12),
+              _buildAddButton(),
+              _buildDoneToggle(),
+              const SizedBox(height: 8),
+            ],
+          );
+        }
+        final slot = timeline[index - 1];
+        switch (slot.kind) {
+          case _TimelineKind.header:
+            return _buildTimelineHeader(slot.label);
+          case _TimelineKind.entry:
+            return _buildEntryRow(slot.entry!);
+          case _TimelineKind.empty:
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                _selectedDay == null ? '还没有日程，点上方新建' : '这天没有日程',
+                key: const Key('schedule_empty'),
+                style: const TextStyle(color: Colors.grey),
+              ),
+            );
+        }
+      },
+    );
+  }
+
+  /// 时间轴的**扁平索引表**（只存索引，不存 Widget）。
+  ///
+  /// ## 为什么是「索引」而不是「Widget 列表」
+  ///
+  /// 惰性构建的前提是：**看不见的条目根本不构 Widget**。
+  /// 所以这里只算出「第几组、第几条」这样的定位信息，
+  /// 真正的 Widget 留给 [ListView.builder] 的 `itemBuilder` 现建。
+  ///
+  /// 摊平式 children 做不到这一点——所有条目在 `build` 时就全建好了。
+  List<_TimelineSlot> _timelineSlots() {
+    final groups = _timelineGroups();
+    if (groups.isEmpty) {
+      return <_TimelineSlot>[_TimelineSlot.empty()];
+    }
+    final slots = <_TimelineSlot>[];
+    for (final g in groups) {
+      slots.add(_TimelineSlot.header(g.label));
+      for (final entry in g.entries) {
+        slots.add(_TimelineSlot.entry(entry));
+      }
+    }
+    return slots;
+  }
+
+  /// 按到期日分组的条目（不含 Widget，只做筛选与分组）。
+  ///
+  /// 「隐藏已完成」开关与月历选日筛选都在这里生效——
+  /// **筛选口径与渲染分离**，所以惰性构建不会改变「哪些条目该出现」。
+  List<_TimelineGroup> _timelineGroups() {
+    final groups = <String, List<ScheduleTabEntry>>{};
+    for (final entry in widget.entries) {
+      // 「隐藏已完成」开关生效处（历史实例可折叠）。
+      if (_hideDone && _isDone(entry)) continue;
+      if (_selectedDay != null) {
+        if (entry.dueAt == null) continue;
+        final d = _dayOf(entry.dueAt!);
+        if (d.year != _selectedDay!.year ||
+            d.month != _selectedDay!.month ||
+            d.day != _selectedDay!.day) {
+          continue;
+        }
+      }
+      final key = entry.dueAt == null
+          ? '无期限'
+          : _fmtDay(entry.dueAt!);
+      groups.putIfAbsent(key, () => <ScheduleTabEntry>[]).add(entry);
+    }
+    final keys = groups.keys.toList()..sort();
+    return <_TimelineGroup>[
+      for (final key in keys) _TimelineGroup(key, groups[key]!),
+    ];
+  }
+
+  /// 时间轴的分组标题（到期日）。
+  Widget _buildTimelineHeader(String label) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 10, 0, 2),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.schedule, size: 14, color: Colors.grey),
+          const SizedBox(width: 4),
+          Text(label,
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold, color: Colors.grey)),
+        ],
+      ),
     );
   }
 
@@ -299,8 +413,12 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
 
   /// 新建按钮。
   ///
-  /// 只列**开放提醒的域**（工作域本轮不开放），
-  /// 让用户建在能建的地方——不给一个点了就报错的入口。
+  /// **整改 3：不再「默认落第一个域」**——
+  /// 之前这里直接 `domains.first`（= 生活区），用户没有任何选择余地：
+  /// 工作区无入口可选，新建的提醒**一律带「生活」标签**（分区破口）。
+  ///
+  /// 现在把**可选的域列表**交给弹窗，让用户在建的时候就明确表态
+  /// 落哪本账；不选**不能存**。
   Widget _buildAddButton() {
     final domains = InventoryDomain.values
         .where((d) => widget.editableDomains.contains(d))
@@ -317,20 +435,38 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
       alignment: Alignment.centerLeft,
       child: TextButton.icon(
         key: const Key('schedule_add'),
-        onPressed: () => _addReminder(domains.first),
+        onPressed: () => _addReminder(domains),
         icon: const Icon(Icons.add),
-        label: Text(domains.length == 1
-            ? '新建提醒'
-            : '新建提醒（${domains.first.label}）'),
+        // 有多个可选区时，提示「建在哪由你选」——不给默认落区的错觉。
+        label: Text(domains.length == 1 ? '新建提醒' : '新建提醒（选区域）'),
       ),
     );
   }
 
-  Future<void> _addReminder(InventoryDomain domain) async {
-    final draft = await ReminderEditDialog.show(context);
+  /// 新建提醒（整改 3：区域由用户在弹窗里选）。
+  ///
+  /// [domains] = 可选的域（**开放提醒的域**）。
+  /// 选中的域随 [ReminderDraft.domain] 回来，交给回调按域写库——
+  /// 物理分库下 `reminders` 表每库一张，落错库就是数据分裂。
+  Future<void> _addReminder(List<InventoryDomain> domains) async {
+    final draft = await ReminderEditDialog.show(
+      context,
+      domainOptions: domains,
+      // **不预选**（整改 3：去掉默认落区）。
+    );
     if (draft == null) return;
     final handler = widget.onCreateReminder;
     if (handler == null) return;
+    // 兜底：只有一个可选域时，它就是落区（用户没得选，不必再问）。
+    final domain = draft.domain ??
+        (domains.length == 1 ? domains.first : null);
+    if (domain == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('还没选要放在哪个区')),
+      );
+      return;
+    }
     try {
       await handler(domain, draft);
       if (widget.onChanged != null) await widget.onChanged!();
@@ -343,58 +479,6 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   }
 
   // ─────────────────────── 时间轴 ───────────────────────
-
-  List<Widget> _buildTimeline() {
-    // 按到期日分组（无期限的排最后）。
-    final groups = <String, List<ScheduleTabEntry>>{};
-    for (final entry in widget.entries) {
-      // 「隐藏已完成」开关生效处（历史实例可折叠）。
-      if (_hideDone && _isDone(entry)) continue;
-      if (_selectedDay != null) {
-        if (entry.dueAt == null) continue;
-        final d = _dayOf(entry.dueAt!);
-        if (d.year != _selectedDay!.year ||
-            d.month != _selectedDay!.month ||
-            d.day != _selectedDay!.day) {
-          continue;
-        }
-      }
-      final key = entry.dueAt == null
-          ? '无期限'
-          : _fmtDay(entry.dueAt!);
-      groups.putIfAbsent(key, () => <ScheduleTabEntry>[]).add(entry);
-    }
-    final keys = groups.keys.toList()..sort();
-    if (groups.isEmpty) {
-      return <Widget>[
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Text(
-            _selectedDay == null ? '还没有日程，点上方新建' : '这天没有日程',
-            key: const Key('schedule_empty'),
-            style: const TextStyle(color: Colors.grey),
-          ),
-        ),
-      ];
-    }
-    return <Widget>[
-      for (final key in keys) ...<Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(0, 10, 0, 2),
-          child: Row(
-            children: <Widget>[
-              const Icon(Icons.schedule, size: 14, color: Colors.grey),
-              const SizedBox(width: 4),
-              Text(key,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.grey)),
-            ],
-          ),
-        ),
-        for (final entry in groups[key]!) _buildEntryRow(entry),
-      ],
-    ];
-  }
 
   Widget _buildEntryRow(ScheduleTabEntry entry) {
     final state = widget.statesByKey[
@@ -585,6 +669,57 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
         return '中';
     }
   }
+}
+
+/// V4.1.1 整改 2：时间轴槽位的三种形态。
+enum _TimelineKind {
+  /// 分组标题（到期日）。
+  header,
+
+  /// 一条日程条目。
+  entry,
+
+  /// 空态提示（一条也没有时）。
+  empty,
+}
+
+/// V4.1.1 整改 2：**时间轴的一个槽位**（惰性构建的最小单位）。
+///
+/// 只存定位信息（标题文字 / 条目引用），**不存 Widget**——
+/// Widget 由 [ListView.builder] 的 `itemBuilder` 现建，
+/// 看不见的槽位根本不构 Widget。
+class _TimelineSlot {
+  const _TimelineSlot.header(this.label)
+      : kind = _TimelineKind.header,
+        entry = null;
+
+  const _TimelineSlot.entry(this.entry)
+      : kind = _TimelineKind.entry,
+        label = '';
+
+  const _TimelineSlot.empty()
+      : kind = _TimelineKind.empty,
+        label = '',
+        entry = null;
+
+  final _TimelineKind kind;
+
+  /// 分组标题文字（到期日 / 「无期限」）。
+  final String label;
+
+  /// 该槽位对应的日程条目（只有 [kind] 为 entry 时非空）。
+  final ScheduleTabEntry? entry;
+}
+
+/// V4.1.1 整改 2：时间轴的一个分组（同一到期日的条目）。
+class _TimelineGroup {
+  const _TimelineGroup(this.label, this.entries);
+
+  /// 分组标题（到期日 / 「无期限」）。
+  final String label;
+
+  /// 该组下的条目。
+  final List<ScheduleTabEntry> entries;
 }
 
 /// V4.1 批次 3：日程签里的一条条目。

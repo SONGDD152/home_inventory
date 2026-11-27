@@ -8,10 +8,10 @@
 
 | 项 | 值 |
 |---|---|
-| 当前 versionName | 4.1.0（**已出包、已上线**；批次 1~5 全部交付） |
-| 当前 versionCode | **25（已上线）** — APK 实测 `versionCode='25' versionName='4.1.0'` |
-| 下一版应占用 | 26 |
-| 下一版 versionName | **待 PM 拍板**（versionCode 恒为 26，不得跳号） |
+| 当前 versionName | 4.1.1（**已出包、已上线**；V4.1 真机打回整改包） |
+| 当前 versionCode | **26（已上线）** — APK 实测 `versionCode='26' versionName='4.1.1'` |
+| 下一版应占用 | 27 |
+| 下一版 versionName | **待 PM 拍板**（versionCode 恒为 27，不得跳号；V4.2 知识库顺延到 27） |
 
 ### 版本链全链（截至 2026-11-27）
 
@@ -22,10 +22,11 @@
 | 3.12 | 22 | 已上线 | 部分废弃 |
 | 3.13 | 23 | 已上线 | 借出管理 / 来源弹窗 |
 | 4.0 | 24 | 已上线 | 多域架构（物理分库），sha256 `afe4a664…82a1` |
-| **4.1** | **25** | **已出包，已上线** | 概览双签 + 日程签完整交互 + 提醒层裁定 + 裁定②甲方案；sha256 `fd126e4b…db3f` |
+| 4.1 | 25 | 已上线 | 概览双签 + 日程签完整交互 + 提醒层裁定 + 裁定②甲方案；sha256 `fd126e4b…db3f` |
+| **4.1.1** | **26** | **已出包，已上线** | **V4.1 真机打回整改包**：日报签撤统计卡 / 日程列表可滚 / 新建提醒必选区 / 催办恒两块 / 顶部切换器保留；sha256 `cea08ec4…d2d0e` |
 
 > 历史：3.5=+8、3.6=+9、3.6.1=+11、3.7=+12、3.7.1=+13、3.8=+14、3.8.1=+15、
-> 3.9=+16、3.9.1=+17、3.9.2=+18、3.10=+19。**V4.1 占用 +25，不跳号。**
+> 3.9=+16、3.9.1=+17、3.9.2=+18、3.10=+19。**V4.1 占用 +25，V4.1.1 占用 +26，均不跳号。**
 
 ## V4.0 架构决策留档（2026-11-26 PM 拍板）
 
@@ -682,3 +683,113 @@ if (doneAt != null && doneAt < dayStart) return false;
 
 - **V4.2 知识库**，versionCode **26**（不得跳号）。
 - **红线：批次 5 简报交齐前不动 V4.2 一行代码。**
+
+---
+
+## V4.1.1 整改包留档（2026-11-27）· V4.1 真机打回修复
+
+> **触发**：V4.1（versionCode 25）上线装机后，PM 2026-11-27 **真机手点打回 5 处**
+> ——4 处界面/分区口径问题 + 1 处交互缺陷。
+> **613 条测试与 lint 全绿仍未覆盖** → 属批次 5 锁③「真机验收」范畴，
+> **不改功能批次，只出整改补丁**。
+> 按铁律「已上线版本不做同号覆盖式热修」→ **升号重发：versionCode 26、versionName 4.1.1**。
+> 本版**已出包、已上线**；测试 **622/622** 全绿；`flutter analyze` **0 error / 0 warning**。
+
+### 五条整改逐条处置
+
+| # | 元宝原单 | 处置 | 落地位置 |
+|---|---|---|---|
+| 1 | 日报签移除概览统计卡（生活区/工作区两张），只留催办、催办上移铺满 | ✅ 已做。统计卡整块删除（`_snapshotCard` 方法一并删除，避免 analyzer 报未使用）。**概览统计数据来源一个字没删**：`OverviewReader` 仍持有、`_snapshots` 仍填充、日报导出（`DailyReportService` 独立读快照）不受影响 | `lib/ui/overview_page.dart` `_buildReportTab()` |
+| 2 | 日程提醒列表超一屏无法滚动 | ✅ 已做。**真因不是「缺 Expanded」**：`ReminderEditDialog` 静态 `show()` 在 `showDialog` 返回后立刻 `dispose()` 两个 `TextEditingController`，退出动画未结束 → TextField 继续 rebuild → 抛 `A TextEditingController was used after being disposed` → 连带 `_dependents.isEmpty` 与 `Tried to build dirty widget in the wrong build scope` → **整页 build 被打断，列表再也拖不动**。修法：弹窗改 `StatefulWidget`（dispose 交给框架）+ 时间轴改 `ListView.builder` 惰性构建 + 唯一滚动容器 | `lib/ui/reminder_edit_dialog.dart`、`lib/ui/schedule_tab_view.dart` |
+| 3 | 新建提醒默认落生活区（分区破口），须二选一且不选不能存 | ✅ 已做。新建表单加**区域二选一**（ChoiceChip），`_requiresDomain` 时未选则保存按钮置灰；**不预选**（默认 null）；打开工作域 `DomainCapability.reminders` 能力开关 | `lib/ui/reminder_edit_dialog.dart`、`lib/ui/schedule_tab_view.dart`、`lib/data/domain.dart` |
+| 4 | 催办只分两级，不往下分层 | ✅ 已做（**按 PM 拍板做 2 块，非元宝原单的 4 块**，见下「口径偏差」）。`_buildAgendaGroup(source)` → `_buildAgendaBlock(_AgendaBlock)`，按域聚合，每域一块，块内混合该区的到期与提醒事项 | `lib/ui/overview_page.dart` `_agendaBlocks()` |
+| 5 | 日报签顶部「概览/生活/工作」切换器去向（原单 A/B 二选一） | ✅ **PM 拍板：切换器保留不动**。日报签只展示两块催办 | `lib/ui/overview_page.dart` |
+
+### 两处口径偏差（如实上报）
+
+**偏差①：整改 4 的块数由 4 改为 2（PM 拍板覆盖元宝原单）。**
+
+- 元宝原单：结构定死四块 —— 生活区·仓储借出到期 / 工作区·仓储借出到期 / 生活区·日程提醒 / 工作区·日程提醒，恒为 4。
+- **PM 更正（2026-11-27）**：催办只分**两块**（生活区、工作区），**不设三级分类、不设子标签、不设额外筛选**；
+  生活区集中显示该区域的到期与提醒事项，工作区同理。
+- 处置：**以 PM 为准**，实现与测试断言均按 **恒为 2 块**；代码注释写明「催办块数恒为 2」，
+  测试 `test/v48_domain_isolation_test.dart` 断言恒为 2 并做源码级校验。
+
+**偏差②：整改 3 反转了 V4.1 批次 1「工作域不新建」的旧拍板，并连带改变语音路径行为。**
+
+- V4.1 批次 1 PM 拍板③：工作域提醒**不新建**（表建齐、永远为空）→ 当时 `domainCapabilities` 只给生活域开 `reminders`。
+- 整改 3 要求「工作区新建提醒」→ **必须打开工作域 `DomainCapability.reminders`**，等于反转该旧拍板。
+- **连带影响（不止 UI）**：语音路径行为随之改变 —— 工作区语音加提醒从「暂不支持 + 引导弹窗」
+  改为**直接落工作库**。旧测试 `test/v40_multidomain_test.dart:516`（原「工作区不支持提醒 → 报错并给引导按钮」）
+  **改名改断言保行数**（不删一条）：改为「工作区提醒 → 落工作库」，断言 work 库 1 条、life 库 0 条。
+- **schema 未变**（仍 v13、9 表）——工作库 `reminders` 表批次 1 就已建齐，只是此前没有写入口。
+- **此项口径反转已上报 PM，待 PM 复核确认。**
+
+### 回归测试（新增 9 条，旧 613 条一条未删）
+
+| 文件 | 条数 | 覆盖 |
+|---|---|---|
+| `test/v47_scroll_fix_test.dart` | 3 | 整改 2：① 10 条提醒时列表能滚（判据 `scrollOffset > 0`）② **新建提醒后列表仍能滚**（真因回归锁，断言弹窗退出动画期间 `tester.takeException()` 为空）③ 滚动后条目仍可勾选（滚不是把交互滚没了） |
+| `test/v48_domain_isolation_test.dart` | 6 | 整改 3：① 必须选区域、不选不能存 ② 工作区新建 → 仅工作区催办可见、生活区查不到 ③ 编辑既有提醒不显示区域选择（不改归属）<br>整改 4：④ 催办块数恒为 2 ⑤ 块内混合到期与提醒，块标题就是区域名 ⑥ 源码级断言注释写明「恒为 2」 |
+
+**旧测试改断言（保行数，一条未删，一条不改行数）**：
+
+| 文件 | 改什么 |
+|---|---|
+| `test/v43_reminder_layer_test.dart` | 催办分组 key `overview_group_<源id>` → `overview_block_<区域id>`；统计卡改 `findsNothing` + 催办块 `findsOneWidget`；折叠标题改 `find.text('生活区')` |
+| `test/v44_schedule_tab_test.dart` | 「批次3④ 工作域能力开关」断言 work 的 `reminders` 由 `isFalse` 改 `isTrue`；补两域 `storage` 断言 |
+| `test/v40_multidomain_test.dart` | 工作区语音提醒行为反转（见偏差②） |
+
+**总数**：613（旧） + 9（新） = **622/622 全绿**。
+
+### 锁③ 真因的两个补充教训（写下来免得再犯）
+
+1. **「量位移」才是滚动问题的定义式判据**，「第 N 条不可见」不是 ——
+   `ListView.builder` 会预建 cacheExtent 外的条目，`findsNothing` 断言天然不成立。
+   v44 旧测试用 `Size(1200, 3000)` + dpr 1.0 = **1200×3000 逻辑像素（平板尺寸）**，
+   10 条一屏装得下 → 测不出滚动问题；改用真机 **360×640**（物理 1080×1920 ÷ dpr 3.0）才撞出来。
+2. **widget 测试别用真 `InventoryDatabase`**：sqflite ffi 跑在独立 isolate，与 widget 测试的 FakeAsync 时钟不同步，
+   `pumpAndSettle` 永远等不到静止帧 → 卡满 10 分钟超时。改用纯 Dart fake（`FakeDomainRepository`）+ `timeout: 90s` 护栏。
+
+### 实施中额外修掉的一个真缺陷
+
+**`Duplicate keys found`（`overview_entry_loan_life_1`）**：测试 stub 源 id 与真实 `LoanDueReminderSource` 撞 id
+（都是 `loan_due_life`）→ 同一 key 渲染两次 → 整页崩溃。
+**在实现中加防御**：`_agendaBlocks()` 按 `entry.id` 去重（`seen.add`）——
+这是 E1「Map key 必须带域」在聚合层的翻版，**防的正是「两个源产出同 id 条目」**。
+
+### APK 与签名核验
+
+| 项 | 值 |
+|---|---|
+| 大小 | **54,733,246 字节**（52.2 MB） |
+| sha256 | `cea08ec4ca7ea73af84cf1341e606f27c16cf8f58f1205e6075793f3e45d2d0e` |
+| aapt2 实测 | `versionCode='26' versionName='4.1.1'`（与 `pubspec.yaml` 的 `4.1.1+26` 一致） |
+| 签名指纹 | **`c1647f33…`（与线上 V4.0/V4.1 一致 → 可覆盖安装）** |
+| v2/v3 签名 | v2 = true，v3 = false（与上版同形态） |
+| 第四道锁（APK 内 UI 文案，utf-16-le 检索） | 整改 3 新文案「请选择要放在生活区还是工作区」「新建提醒（选区域）」**HIT**；整改 1 删除的「账目平衡」「账目不平，请检查」「独立记账，与生活区互不相通。」「还没有记账，先建第一个位置。」**全部 MISS**（= 确已整块移除） |
+
+### 下载页上线
+
+- 地址：**https://home-inventory-apk-14912.app.workbuddy.host/?sharecode=P4WQ4OYEZN**
+  （**链接与 sharecode 永不变**，与 V4.0/V4.1 同一条）
+- 部署目录 `v361_preview_site`（locator `wbapp_hPO0bYGL45XTsynGgNm0ni`）；重新发布后实测核验：
+  - 页面 `HTTP=200`、标题「家庭仓储 V4.1.1 · 下载」、含 `4.1.1+26`、正确 sha256、「新建提醒必须选区」「催办只分两块」等新文案；
+  - APK 直链 `HTTP=200`、`size=54733246`、**sha256 与本地完全一致**（`cea08ec4…d2d0e`）。
+- APK 存放名 `home-inventory-v411.apk`（ASCII，URL 直链必须 ASCII）；**直链必须带 `?sharecode=P4WQ4OYEZN`**，否则 403。
+- 二维码：`qrcode.make(url, box_size=12, border=3)` → **516×516**，**zxingcpp 解码回原文完全一致**
+  （工作区另存 `二维码_V411下载页.png`）。
+- 历史版本索引补入 **V4.1** 一条；V4.1 原页备份为 `index-v410-backup.html`。
+
+### 工作副本路径（铁律，本版起生效）
+
+- 元宝 2026-11-27 追加要求：工作副本必须迁出 `/tmp`，落永久路径，钉死不再动。
+- **实际落点：`~/dev/home_inventory`**（`/Users/yilaoshi/dev/home_inventory`）。
+- 背景：`/tmp/home_inventory_push_v3fix` 在 2026-11-27 批次 5 之后**被系统清理**，
+  源码 + `.git` + 未提交改动全丢 → 从 GitHub SSH 克隆取回（`fa7f7ea` 批次 5 提交齐全，`git fsck` 干净）。
+- 后续所有改动 / 出包 / 简报均基于该路径；**简报「环境与路径」栏已写明供 PM 核验**。
+
+### 下一版
+
+- **V4.2 知识库**，versionCode 顺延 **27**（不得跳号）。
+- **红线：本版简报交齐前不动 V4.2 一行代码；改名任务（展示层 + 包名 `com.danfeng.xiaobenben`）是 V4.1 收官后单开的事，本版未动。**

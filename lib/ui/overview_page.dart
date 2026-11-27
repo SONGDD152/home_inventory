@@ -285,6 +285,27 @@ class _OverviewPageState extends State<OverviewPage>
 
   // ───────────────────────── 日报签 ─────────────────────────
 
+  /// V4.1.1 整改 1：**日报签只展示催办**。
+  ///
+  /// ## 撤掉了什么
+  ///
+  /// 原来日报签顶部有「生活区 / 工作区」**两张统计卡**
+  /// （物品 X 种｜在库｜在借｜废弃未恢复｜总拥有｜账目平衡｜引导语）。
+  /// PM 2026-11-27 真机手点红框指定：**整块删除**——
+  /// 日报签是「看催办」的，不是「看账目」的，账目数字挤在催办上方
+  /// 把真正要处理的事推到了屏幕下面。
+  ///
+  /// ## 没撤掉什么（重要）
+  ///
+  /// **概览统计数据的数据来源一个字没删**：
+  /// - [OverviewReader] 仍然持有、仍然被调用（[reader] 仍然读两域快照）；
+  /// - [_snapshots] 仍然照常填充。
+  ///
+  /// 撤掉的**只是日报签这一屏的展示**——
+  /// 账目快照在**日报导出**里照常出现（`DailyReportService` 独立读快照，
+  /// 不经过本页）。
+  ///
+  /// 催办区因此**上移铺满**腾出的空间。
   Widget _buildReportTab() {
     return RefreshIndicator(
       onRefresh: _reload,
@@ -310,8 +331,6 @@ class _OverviewPageState extends State<OverviewPage>
           )),
           if (_error != null)
             Text('读取失败：$_error', key: const Key('overview_error')),
-          for (final snapshot in _snapshots ?? const <DomainOverview>[])
-            _snapshotCard(snapshot),
           const SizedBox(height: 8),
           Row(
             children: <Widget>[
@@ -331,65 +350,12 @@ class _OverviewPageState extends State<OverviewPage>
             ],
           ),
           const SizedBox(height: 4),
-          // 催办区 = 日程类 + 系统类**分组**（元宝裁定④）：
-          // 图标区分 + 可折叠；组内按优先级排序（裁定①）。
-          for (final source in widget.sources) ...<Widget>[
+          // 催办区 = 按**区域**分块（整改 4：只分生活区/工作区两块）。
+          for (final block in _agendaBlocks()) ...<Widget>[
             const SizedBox(height: 8),
-            _buildAgendaGroup(source),
+            _buildAgendaBlock(block),
           ],
         ],
-      ),
-    );
-  }
-
-  Widget _snapshotCard(DomainOverview snapshot) {
-    // E3：工作区全 0 空态给引导，不再只印一行数字。
-    final empty = snapshot.itemCount == 0 && snapshot.stock == 0 &&
-        snapshot.lent == 0;
-    return Card(
-      key: Key('overview_domain_${snapshot.domain.id}'),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(snapshot.domain.label,
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 6),
-            Text('物品 ${snapshot.itemCount} 种｜在库 ${snapshot.stock}'
-                '｜在借 ${snapshot.lent}｜废弃未恢复 ${snapshot.discardedPending}'),
-            Text('总拥有 ${snapshot.totalOwned}'),
-            Text(
-              snapshot.isBalanced ? '账目平衡' : '账目不平，请检查',
-              key: Key('overview_balance_${snapshot.domain.id}'),
-              style: TextStyle(
-                color: snapshot.isBalanced ? Colors.green : Colors.red,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            if (empty) ...<Widget>[
-              const SizedBox(height: 6),
-              Text(
-                snapshot.domain == InventoryDomain.work
-                    ? '独立记账，与生活区互不相通。'
-                    : '还没有记账，先建第一个位置。',
-                key: Key('overview_empty_${snapshot.domain.id}'),
-                style: const TextStyle(color: Colors.grey),
-              ),
-              if (snapshot.domain == InventoryDomain.work &&
-                  widget.onOpenDomain != null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    key: const Key('overview_empty_goto_work'),
-                    onPressed: () => widget.onOpenDomain!(InventoryDomain.work),
-                    icon: const Icon(Icons.arrow_forward),
-                    label: const Text('去工作区建首个位置'),
-                  ),
-                ),
-            ],
-          ],
-        ),
       ),
     );
   }
@@ -420,39 +386,121 @@ class _OverviewPageState extends State<OverviewPage>
     return items;
   }
 
+  /// V4.1.1 整改 4：**催办块**（按区域分块，**恒为 2 块**）。
+  ///
+  /// ## PM 拍板的口径（2026-11-27）
+  ///
+  /// 催办列表**只按区域分成两块**——「生活区」和「工作区」。
+  /// **不要拆成四块**（不要「生活区·仓储借出到期 / 工作区·仓储借出到期 /
+  /// 生活区·日程提醒 / 工作区·日程提醒」），
+  /// **不要任何三级分类、子标签、额外筛选**。
+  ///
+  /// 生活区集中显示**该区域的**到期与提醒事项，工作区同理——
+  /// 同一个区域里，借出到期和日程提醒**混在一起**，用**图标**区分
+  /// （借出=箱子，日程=本子），**不再拆成两个分组**。
+  ///
+  /// ## 为什么这是「结构」而不是「外观」
+  ///
+  /// 分组是**用户能看见的分类结构**。拆成四块 = 给用户四层心智模型；
+  /// 只分两块 = 「我的事」和「公司的事」两堆，符合直觉。
+  /// 所以这块的**块数是固定的 2**，不随源数量变化——
+  /// 以后再加新源（第三类事项），它落进所属区域，**不新增块**。
+  List<_AgendaBlock> _agendaBlocks() {
+    final blocks = <_AgendaBlock>[];
+    for (final domain in InventoryDomain.values) {
+      final items = <TodoAgendaItem>[];
+      // **按条目 id 去重**——同一个条目只渲染一次。
+      //
+      // ## 为什么必须去重
+      //
+      // 催办块是**按区域**聚合的（整改 4），一个区域的条目来自**多个源**
+      // （借出到期 + 日程提醒…）。如果两个源给出了**同一条目 id**
+      // （比如两个源都注册了 `loan_due_life`），
+      // 聚合后同一个 key 会出现两次 → Flutter 抛
+      // 「Duplicate keys found」→ **整页 build 崩掉**。
+      //
+      // 这正是 E1（源 id 撞车）的**聚合层翻版**：
+      // 单看每个源都正常，**一聚到一块就炸**。
+      //
+      // 所以这里按 `entry.id` 去重（先到先得）——
+      // 与概览 Map 用 `source.id` 作 key 是同一个防撞思路。
+      final seen = <String>{};
+      for (final source in widget.sources) {
+        // 只收属于该区域的源（条目本身也带域，这里再按源 id 判一次）。
+        if (!_sourceBelongsToDomain(source, domain)) continue;
+        for (final item in _agendaItems(source)) {
+          if (!seen.add(item.entry.id)) continue;
+          items.add(item);
+        }
+      }
+      // 块内排序：按优先级（裁定①）——借出到期（高）在前。
+      TodoAgenda.sortByPriority(items);
+      blocks.add(_AgendaBlock(domain, items));
+    }
+    return blocks;
+  }
+
+  /// 某个源是否属于该区域。
+  ///
+  /// 源 id 一律带域（`loan_due_life` / `schedule_reminders_work`…），
+  /// 所以直接看后缀即可——不靠解析 displayName（那是给人看的文案）。
+  bool _sourceBelongsToDomain(ReminderSource source, InventoryDomain domain) {
+    final entries = _entriesBySource[source.id] ?? const <OverviewEntry>[];
+    // 源里一条条目都没有 → 它不贡献这个区域（空块就不该出现）。
+    if (entries.isEmpty) return false;
+    return entries.any((e) => e.domain == domain);
+  }
+
   /// 取某个域的待办状态写入口（null = 该域没有该能力 → 该域条目只读展示）。
   TodoStateWriter? _writerOf(InventoryDomain? domain) {
     if (domain == null) return null;
     return widget.todoWriters[domain];
   }
 
-  /// 催办区分组（元宝裁定④）：系统类 / 日程类**图标区分** + **可折叠**。
+  /// 催办块（整改 4：**按区域**，恒为「生活区 / 工作区」两块）。
   ///
-  /// 分组标题带图标：系统类（借出到期）= 箱子图标，日程类 = 日程图标。
-  /// 默认展开（刚进来就能看见催办内容），但可以点标题折起来。
-  Widget _buildAgendaGroup(ReminderSource source) {
-    final items = _agendaItems(source);
-    final isSystem = source.id.startsWith('loan_due_');
+  /// 块内**混合**该区域的到期与提醒事项，用图标区分类型
+  /// （元宝裁定⑤的图标区分保留，但**不再作为分组依据**）。
+  Widget _buildAgendaBlock(_AgendaBlock block) {
+    final items = block.items;
+    final domain = block.domain;
     return ExpansionTile(
-      key: Key('overview_group_${source.id}'),
+      key: Key('overview_block_${domain.id}'),
       initiallyExpanded: true,
       tilePadding: EdgeInsets.zero,
       childrenPadding: const EdgeInsets.only(bottom: 4),
       leading: Icon(
-        isSystem ? Icons.inventory_2_outlined : Icons.event_note,
+        domain == InventoryDomain.life
+            ? Icons.home_outlined
+            : Icons.business_outlined,
         size: 20,
         color: Colors.grey,
       ),
-      title: Text(source.displayName,
+      title: Text(domain.label,
           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
       subtitle: Text(items.isEmpty ? '暂无待办' : '共 ${items.length} 条待办',
           style: const TextStyle(fontSize: 12)),
       children: items.isEmpty
-          ? const <Widget>[
+          ? <Widget>[
               Padding(
-                padding: EdgeInsets.symmetric(vertical: 6),
+                padding: const EdgeInsets.symmetric(vertical: 6),
                 child: Text('暂无待办', style: TextStyle(color: Colors.grey)),
               ),
+              // 整改 1：统计卡整块撤掉后，原先挂在卡里的
+              // 「去工作区建首个位置」引导改挂到**工作区的空催办块**上——
+              // 引导语还在（不丢入口），但它现在属于「催办」这一屏，
+              // 而不是混在账目数字里。
+              if (domain == InventoryDomain.work &&
+                  widget.onOpenDomain != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    key: const Key('overview_empty_goto_work'),
+                    onPressed: () => widget.onOpenDomain!(InventoryDomain.work),
+                    icon: const Icon(Icons.arrow_forward),
+                    label: const Text('去工作区建首个位置'),
+                  ),
+                ),
             ]
           : items
               .map((item) => _TodoEntryRow(
@@ -543,6 +591,25 @@ class _OverviewPageState extends State<OverviewPage>
     });
     return entries;
   }
+}
+
+/// V4.1.1 整改 4：**一个催办块**（= 一个区域的生活/工作）。
+///
+/// ## 块数恒为 2（PM 拍板）
+///
+/// 催办列表**只按区域分块**——生活区一块、工作区一块。
+/// 块内**混合**该区域的到期与提醒事项（用图标区分类型），
+/// **不设三级分类、子标签、额外筛选**。
+///
+/// 以后加新源（第三类事项），它落进所属区域，**不新增块**。
+class _AgendaBlock {
+  const _AgendaBlock(this.domain, this.items);
+
+  /// 这一块属于哪个区域。
+  final InventoryDomain domain;
+
+  /// 这一块里的催办条目（按优先级排好序）。
+  final List<TodoAgendaItem> items;
 }
 
 /// V4.1 批次 2：催办条目行（三态 + 延期 + 备注）。

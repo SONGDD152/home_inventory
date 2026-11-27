@@ -331,12 +331,22 @@ void main() {
     expect(workEntries.first.domain, InventoryDomain.work);
   });
 
-  test('批次3④：工作域能力开关 —— 表建齐但本轮不开放写口', () {
+  test('批次3④：工作域能力开关 —— 表建齐且本轮起开放写口', () {
     // 能力开关在 domain.dart 里，不是「表不存在」。
+    //
+    // **V4.1.1 整改 3：工作域开放提醒。**
+    // PM 2026-11-27 真机手点发现「新建提醒一律落生活区、工作区无入口」，
+    // 属分区破口 → 两域都能新建，新建时**必选区域**（二选一）。
     expect(domainSupports(InventoryDomain.life, DomainCapability.reminders),
         isTrue);
     expect(domainSupports(InventoryDomain.work, DomainCapability.reminders),
-        isFalse);
+        isTrue,
+        reason: '整改3：工作域开放提醒，新建时由用户选落哪本账');
+    // 仓储能力两域都在（这才是「表建齐」的本意）。
+    expect(domainSupports(InventoryDomain.life, DomainCapability.storage),
+        isTrue);
+    expect(domainSupports(InventoryDomain.work, DomainCapability.storage),
+        isTrue);
   });
 
   // ───────────────── 批次 3 ⑤：双签勾选同步 ─────────────────

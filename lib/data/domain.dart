@@ -74,6 +74,15 @@ class DomainSwitchInProgress implements Exception {
 /// 注意：这是**能力开关**，不是"表不存在"：
 /// 说「工作区提醒我明天交周报」时，报错文案是「工作区暂不支持提醒」，
 /// 而不是"表缺失"这种技术口吻。
+///
+/// ## V4.1.1 整改 3：工作域**开放提醒**
+///
+/// PM 2026-11-27 真机手点发现：**新建提醒一律落生活区**，工作区没有入口，
+/// 属「分区破口」。整改后**两域都能新建提醒**，
+/// 新建时**必选区域**（二选一，不选不能存），落哪本账由用户明确表态。
+///
+/// 物理分库下 `reminders` 表**每库一张**（工作库那张一直建着、只是没人写），
+/// 所以开放工作域**不需要动 schema**——它本来就在。
 enum DomainCapability {
   /// 提醒条目 + 日程 + 日报。
   reminders,
@@ -85,8 +94,8 @@ enum DomainCapability {
 /// 各域的能力开关。
 ///
 /// - 生活域：全开（仓储 + 提醒/日程/日报）。
-/// - 工作域：本轮只开仓储；提醒相关能力未开放，
-///   语音跨域落库时给出「是否切换到生活区创建？」的引导，而不是默默记到生活库。
+/// - 工作域：**整改 3 后也开放提醒**（V4.1 之前只开仓储）。
+///   语音跨域落库时，提醒直接落工作库，不再需要「是否切换到生活区」的引导。
 const Map<InventoryDomain, Set<DomainCapability>> domainCapabilities =
     <InventoryDomain, Set<DomainCapability>>{
   InventoryDomain.life: <DomainCapability>{
@@ -95,6 +104,7 @@ const Map<InventoryDomain, Set<DomainCapability>> domainCapabilities =
   },
   InventoryDomain.work: <DomainCapability>{
     DomainCapability.storage,
+    DomainCapability.reminders,
   },
 };
 

@@ -932,7 +932,47 @@ if (doneAt != null && doneAt < dayStart) return false;
 APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 zxingcpp 解码一致；
 历史索引补 V4.1.3、原页备份 `index-v413-backup.html`。
 
+### V4.1.5 复验补丁留档（2026-11-28）· 真机打回 → 升号重发
+
+> **触发**：V4.1.4 真机复验不过关——两处硬伤：① 月历翻不了月（想看 12 月）② 日报导出与催办框不符（工作区进行中 2 条、明日前瞻 1 条全部丢失）。
+> 按「真机打回→升号重发」纪律升 **29 → 30**（versionName 4.1.5；V4.2 知识库顺延 **+31**）。
+> **已出包、已上线**；测试 **650/650 全绿**（642 旧 + v51 两条 + v52 六条新）；analyze **0 error/0 warning**（5 条既有 info）。
+
+### 硬伤 A：日报服务漏接工作域日程源（根因在组合根，不在四区逻辑）
+
+- `lib/main.dart` 日报服务 `todoSources` 只有 `ScheduleReminderSource(life,…)`，**漏 `work`** → 工作域日程条目根本不进导出取数集合；四区过滤器本身正确（源码复核）。
+- UI 组合根 `home_page.dart:2419/2423` 两域都接了 → 界面对、导出错。
+- 642 条测试没拦住：v51 用 fake 手工接线，组合根 main() 无测试覆盖。**教训：「方法存在」≠「接线存在」。**
+- 修复：补 1 行接线 + 源码级锁（main.dart 必须同时含两域 ScheduleReminderSource）+ 两域混合数据四区分组断言。
+
+### 硬伤 B：图标字体没打包——全 app 73 处 Icons.* 真机全空白
+
+- `pubspec.yaml` `uses-material-design: false` → APK 无 MaterialIcons 字体（解包验证）→ 翻月箭头「存在但看不见」（V4.1 批次 3 就写了 `schedule_cal_prev/next`）、延期/备注按钮「盲点能触发」。
+- **这也是 V4.1.2「怪字」的真源头**（字体缺失 → tofu；当时换经典 glyph 只治症状）。
+- 修复：`uses-material-design: true`。字体 tree-shaken 到 7KB（只保留用到的 glyph），体积几乎没涨；源码级锁防再关。
+- 真机预期变化：**全 app 隐形图标全部显形**（已提前告知 PM）。
+
+### 顺带（PM 拍板追加）
+
+- 月历副标题按**当前显示月**统计天数（此前翻月后永远显示全部月份总数）。
+- **按钮颜色全 APK 一致**：主题本就是绿色种子（`colorSchemeSeed: Colors.green`）；月历选中高亮从硬编码蓝改为 `colorScheme.primaryContainer` 主题绿；「有日程」蓝点/蓝字是数据标记保持蓝色语义。源码级锁两条（主题种子 + 高亮走主题）。
+- 左右滑动手势不加（与两框滚动冲突，PM 同意按钮够用）。
+
+### APK 与签名核验
+
+| 项 | 值 |
+|---|---|
+| 大小 | 55,426,337 字节（52.9 MB） |
+| sha256 | `c061f7f386d9732ab8b2ced8e8ca45629089c1e9abb9cfc3f6e12fc6f3353153` |
+| aapt2 实测 | versionCode='30' versionName='4.1.5' |
+| 签名指纹 | c1647f33…（不变 → 覆盖安装） |
+| 字体 | MaterialIcons-Regular.otf 已进包（tree-shaken 7,372 字节） |
+| 线上核验 | 页面 200 含 4.1.5+30/650/650/sha；APK 直链 200、线上 sha 与本地逐字一致；不带 sharecode 403 |
+
+### 复验清单（一次关账，AI 不代签）
+
+翻月 12 月（农历/蓝点/筛选/开关）→ 导出工作区三条进对区段 → **全 app 图标显形扫一遍（独立项）** → V4.1.4 四项 → V4.1.3 六项 + 两框各滑各的。关账后启动改名 → V4.2 知识库 +31。
+
 ### 下一版
 
-- **改名**（展示名「小本本」+ 包名 `com.danfeng.xiaobenben`）→ **V4.2 知识库**，versionCode **30**（不得跳号）。
-- **真机一次关账**：本版四项（三态切换/导出四区/月历农历/开关）+ V4.1.3 四下（两框各滑各的+条目靠左/点条目改标题/删一次/隐藏已完成），AI 不代签。关账后才启动改名。
+- **改名**（「小本本」+ `com.danfeng.xiaobenben`）→ **V4.2 知识库**，versionCode 顺延 **31**（不得跳号）。

@@ -289,6 +289,11 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
       if (entry.dueAt == null) continue;
       days.add(_dayOf(entry.dueAt!));
     }
+    // V4.1.5：副标题只统计**当前显示月**的天数——
+    // 翻到别的月份时数字跟着走，否则翻月后永远显示总数、自相矛盾。
+    final monthDayCount = days
+        .where((d) => d.year == _month.year && d.month == _month.month)
+        .length;
     return Card(
       key: const Key('schedule_calendar_card'),
       child: Column(
@@ -299,7 +304,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
             leading: const Icon(Icons.calendar_month_outlined),
             title: const Text('月历'),
             subtitle: Text('${_month.year} 年 ${_month.month} 月 · '
-                '共 ${days.length} 天有日程'),
+                '共 $monthDayCount 天有日程'),
             trailing: Icon(
               _calendarExpanded ? Icons.expand_less : Icons.expand_more,
             ),
@@ -368,7 +373,11 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           height: 44,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: selected ? Colors.blue.shade100 : null,
+            // V4.1.5：选中高亮走主题绿（PM 拍板「全 APK 按钮颜色一致」）；
+            // 「有日程」的蓝点/蓝字是数据标记，保持蓝色语义不动。
+            color: selected
+                ? Theme.of(context).colorScheme.primaryContainer
+                : null,
             borderRadius: BorderRadius.circular(6),
           ),
           child: Column(

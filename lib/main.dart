@@ -50,6 +50,10 @@ Future<void> main() async {
       LoanDueReminderSource(life, InventoryDomain.life),
       LoanDueReminderSource(work, InventoryDomain.work),
       ScheduleReminderSource(life, InventoryDomain.life),
+      // V4.1.5 复验补丁：**工作域日程源此前漏接**——催办框两域都对
+      // （home_page 组合根两域都接了），导出却只见生活区条目，
+      // 工作区进行中/明日前瞻全部丢失（真机 2026-11-28 打回）。
+      ScheduleReminderSource(work, InventoryDomain.work),
     ],
   );
 

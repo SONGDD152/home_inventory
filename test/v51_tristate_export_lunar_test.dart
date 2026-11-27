@@ -10,6 +10,7 @@ import 'package:home_inventory/domain/lunar_label.dart';
 import 'package:home_inventory/domain/overview_reader.dart';
 import 'package:home_inventory/domain/reminder_source.dart';
 import 'package:home_inventory/domain/reminder_sources.dart';
+import 'package:home_inventory/domain/todo_state_writer.dart';
 
 import 'fake_domain_repository.dart';
 
@@ -182,7 +183,9 @@ void main() {
     final agenda = File('lib/domain/todo_agenda.dart').readAsStringSync();
 
     expect(pubspec, contains('lunar:'), reason: '月历阴历依赖已引入');
-    expect(pubspec, contains('4.1.4+29'), reason: '版号 +29');
+    expect(pubspec, contains('4.1.5+30'), reason: '版号 +30（V4.1.5 复验补丁）');
+    expect(pubspec, contains('uses-material-design: true'),
+        reason: '图标字体必须打包（V4.1.5 根因修复）');
     expect(sched, contains('tristate: true'), reason: '三态勾选');
     expect(sched, contains('schedule_lunar_toggle'), reason: '农历开关');
     expect(sched, contains('LunarLabel.of'), reason: '月历用农历标注');
@@ -191,5 +194,71 @@ void main() {
     // schema：无 in_progress 列（只加枚举值，不加列）。
     expect(db.contains('columnInProgress'), isFalse,
         reason: 'schema 零新增列');
+  });
+
+  // ─────────────── ⑤ V4.1.5 复验补丁 ───────────────
+
+  test('V4.1.5⑤：两域接线（对齐 main.dart）下，工作域四条各归对区',
+      () async {
+    final life = FakeDomainRepository();
+    final work = FakeDomainRepository();
+    final today = DateTime(2026, 11, 28);
+    final tomorrow = today.add(const Duration(days: 1));
+    final dayAfter = today.add(const Duration(days: 2));
+
+    // 工作域混合数据（真机打回的四条原型）：
+    // 申报税务数据=明天 pending / 申报统计数据=后天进行中 /
+    // 申报产值=今天进行中 / 申报结算=今天完成。
+    await work.addReminder('申报税务数据', dueAt: tomorrow);
+    await work.addReminder('申报统计数据', dueAt: dayAfter);
+    await work.addReminder('申报产值', dueAt: today);
+    await work.addReminder('申报结算', dueAt: today);
+    await work.setTodoStatus('schedule_reminder', 2, TodoStatus.inProgress);
+    await work.setTodoStatus('schedule_reminder', 3, TodoStatus.inProgress);
+    await work.setTodoStatus('schedule_reminder', 4, TodoStatus.done);
+    await life.addReminder('生活今天待办', dueAt: today);
+
+    // **与修复后 main.dart 完全一致的两域接线**——回归的就是漏源这件事。
+    final service = DailyReportService(
+      storage: life,
+      reminders: life,
+      overview: InventoryOverviewReader(life: life, work: work),
+      todoReader: life,
+      todoReaders: <InventoryDomain, TodoStateReader>{
+        InventoryDomain.life: life,
+        InventoryDomain.work: work,
+      },
+      todoSources: <ReminderSource>[
+        LoanDueReminderSource(life, InventoryDomain.life),
+        LoanDueReminderSource(work, InventoryDomain.work),
+        ScheduleReminderSource(life, InventoryDomain.life),
+        ScheduleReminderSource(work, InventoryDomain.work),
+      ],
+    );
+    final s = await service.loadFourSections(today);
+
+    // ① 今日未完成：生活今天到期 + pending；申报税务数据是明天到期
+    //    → 只进明日前瞻，不进今日未完成。
+    expect(s.pending.map((i) => i.entry.title), contains('生活今天待办'));
+    expect(s.pending.map((i) => i.entry.title),
+        isNot(contains('申报税务数据')));
+    // ② 进行中（不限到期日）：今天到期 + 后天到期的两条都要在。
+    expect(s.inProgress.map((i) => i.entry.title),
+        containsAll(['申报产值', '申报统计数据']),
+        reason: '真机打回点：后天到期的进行中也要进「今日进行中」');
+    // ③ 完成。
+    expect(s.done.map((i) => i.entry.title), contains('申报结算'));
+    // ④ 明日（严格明天+pending）。
+    expect(s.tomorrow.map((i) => i.entry.title), contains('申报税务数据'),
+        reason: '真机打回点：工作区明天到期那条必须进明日前瞻');
+  });
+
+  test('V4.1.5⑤：源码级锁——main.dart 日报服务必须同时接两域日程源',
+      () {
+    final main = File('lib/main.dart').readAsStringSync();
+    expect(main, contains('ScheduleReminderSource(life, InventoryDomain.life)'),
+        reason: '生活域日程源');
+    expect(main, contains('ScheduleReminderSource(work, InventoryDomain.work)'),
+        reason: '工作域日程源（V4.1.5 补——漏了它导出就丢工作区条目）');
   });
 }

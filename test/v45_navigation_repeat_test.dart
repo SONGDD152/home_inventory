@@ -494,26 +494,29 @@ void main() {
     await tester.tap(find.byKey(const Key('overview_tab_schedule')));
     await tester.pumpAndSettle();
 
-    // 默认：已完成的历史实例**照旧显示**（批次 3 既有行为一个字没改）。
+    // V4.1.3 真机反馈改默认：已完成的历史实例**默认收起**（纯视图过滤）。
     expect(find.byKey(const Key('schedule_entry_reminder_life_1')),
-        findsOneWidget);
+        findsNothing,
+        reason: 'V4.1.3：已完成默认隐藏');
     expect(find.byKey(const Key('schedule_entry_reminder_life_2')),
-        findsOneWidget);
+        findsOneWidget,
+        reason: '未完成的当期日程不受影响');
     expect(find.byKey(const Key('schedule_toggle_done')), findsOneWidget);
 
-    // 点开关 → 已完成那条收起，未完成那条留着。
+    // 点开关 → 已完成那条回来（数据一条没删）。
     await tester.tap(find.byKey(const Key('schedule_toggle_done')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('schedule_entry_reminder_life_1')), findsNothing,
-        reason: '历史实例被开关收起了');
+    expect(find.byKey(const Key('schedule_entry_reminder_life_1')),
+        findsOneWidget,
+        reason: 'V4.1.3：切换只改视图，历史没丢');
     expect(find.byKey(const Key('schedule_entry_reminder_life_2')),
         findsOneWidget,
         reason: '未完成的当期日程不受影响');
 
-    // 再点 → 收起的回来了（历史没丢）。
+    // 再点 → 又收起（随时可切回，不触发软删/回收站）。
     await tester.tap(find.byKey(const Key('schedule_toggle_done')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('schedule_entry_reminder_life_1')),
-        findsOneWidget);
+        findsNothing);
   });
 }

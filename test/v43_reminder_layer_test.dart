@@ -828,6 +828,9 @@ void main() {
     // 切到日程签，同一条目应显示为「已处理」（勾选框选中）。
     await tester.tap(find.byKey(const Key('overview_tab_schedule')));
     await tester.pumpAndSettle();
+    // V4.1.3：已完成默认隐藏（纯视图），先点开「显示已完成」再看状态。
+    await tester.tap(find.byKey(const Key('schedule_toggle_done')));
+    await tester.pumpAndSettle();
     final check = tester.widget<Checkbox>(
       find.descendant(
         of: find.byKey(const Key('schedule_entry_reminder_life_1')),

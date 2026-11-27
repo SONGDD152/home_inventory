@@ -844,8 +844,45 @@ if (doneAt != null && doneAt < dayStart) return false;
 - 二维码 `qrcode.make(url, box_size=12, border=3)` → 516×516，zxingcpp 解码回原文一致。
 - 历史索引补入 V4.1.1 一条；V4.1.1 原页备份 `index-v411-backup.html`。
 
+### V4.1.3 真机补充整改包留档（2026-11-27）· V4.1.2 真机截图再打回
+
+> **触发**：V4.1.2（versionCode 27）装机后 PM 真机截图 + 元宝代整理回执：
+> ① 日报催办条目仍居中、文字折成两字一行（「作早/餐」「喂小/鸡」），右侧大片留白；
+> ② 日程条目点整行无编辑入口、左滑无删除；③ 已完成日程越挂越多。
+> 按铁律升号重发：**versionCode 28、versionName 4.1.3**（V4.2 知识库顺延 29）。
+> **631/631 全绿**（626 旧 + v50 五条新）；analyze 0 error / 0 warning（5 条既有 info）。
+
+### 整改逐条处置
+
+| # | 真机现象 | 处置 | 落地位置 |
+|---|---|---|---|
+| 1 | 日报条目居中、每行两字、右侧留白 | ✅ `ExpansionTile` 子列松约束会「缩到内容宽再居中」→ 滚动框 `SizedBox(width: double.infinity)` 钉满框宽；条目行改「勾选框在前 + 文字 `Expanded` + `maxLines: 1` + ellipsis」，类型图标挪到副标题行首（源码级测试锁着不能删） | `lib/ui/overview_page.dart` `_buildAgendaBlock()` / `_TodoEntryRow.build()` |
+| 2 | 日程点条目无编辑 | ✅ 整行 `onTap` 进 `ReminderEditDialog` 改标题（右侧小图标保留） | `lib/ui/schedule_tab_view.dart` `_buildEntryRow()` |
+| 3 | 日程左滑无删除 | ✅ `Dismissible`（endToStart）+ 长按同入口 → 弹「移到回收站 / 彻底删除」，硬删再二次确认 | 同上 `_askDelete()` / `_performDelete()` |
+| 4 | 软删提醒可恢复 / 硬删二次确认 | ✅ 数据层 `getDeletedReminders` / `restoreReminder` / `purgeReminder`（**schema 仍 v13、零新增列零新增表**，用已有 `is_deleted/deleted_at`）；提醒回收站入口在日程签，恢复、彻底删除都走组合根回调（概览不持写口）；硬删连 `todo_states` 一起物理清掉，不留孤儿 | `lib/data/reminder_repository.dart` / `inventory_database.dart` / `lib/ui/home_page.dart` |
+| 5 | 已完成日程越挂越多 | ✅ 「隐藏已完成」**默认开**，纯视图过滤（不软删、不进回收站、不自动过期、随时切回显示）；数据一条不删 | `schedule_tab_view.dart` `_hideDone = true` |
+
+**边界**：两域物理分库、日报催办过滤口径、催办恒 2 块、顶栏/双签、两框各滑各的、必选区、schema v13 全不动；
+工作区催办显示 4 条属「只算临期未完成」的正常子集（非 bug，不修）；「新衣服」错条由 PM 在真机勾选完成，AI 不动数据。
+
+### 回归测试
+
+- 新增 `test/v50_layout_and_schedule_actions_test.dart` **5 条**：① 日报三域条目单行、靠左、勾选框在文字左 ② 点整行进编辑弹窗 ③ 长按→移回收站→恢复 ④ 左滑→彻底删除二次确认→硬删不留痕 ⑤ 隐藏已完成默认开、来回切换数据一条不少、不进回收站。
+- 旧测试改断言保行数（一条未删）：`v48`「块内混合」去掉「初始在框外」（单行后两条同屏，锁块内混合语义）；`v45`「隐藏已完成」改默认隐藏；`v43` 勾选同步测试先点「显示已完成」再看状态。
+- **626（旧）+ 5（新）= 631/631 全绿**。
+
+### APK 与签名核验
+
+| 项 | 值 |
+|---|---|
+| 大小 | **54,651,330 字节**（52.1 MB） |
+| sha256 | `05f262c6c55ed40873ae5552d38f1234fcf0867ba99dfce3a4aef5d7debec2df` |
+| 线上核验 | 页面 HTTP=200 含 4.1.3+28 / 631/631 / 正确 sha256；APK 直链带 sharecode HTTP=200、size=54651330、线上 sha 与本地逐字一致；不带 sharecode HTTP=403 |
+| aapt2 实测 | `versionCode='28' versionName='4.1.3'`（与 `pubspec.yaml` 的 `4.1.3+28` 一致） |
+| 签名指纹 | `c1647f33…`（与线上 V4.0/V4.1/V4.1.1/V4.1.2 一致 → 可覆盖安装） |
+
 ### 下一版
 
-- **V4.2 知识库**，versionCode 顺延 **28**（不得跳号）。
+- **V4.2 知识库**，versionCode 顺延 **29**（不得跳号）。
 - **红线：本版简报交齐前不动 V4.2 一行代码；改名任务（展示层 + 包名 `com.danfeng.xiaobenben`）是 V4.1 收官后单开的事，本版未动。**
-- **真机锁③仍未关账**：等 PM 复验三下（生活区块内上滑 / 工作区块内上滑各滑各的 / 日程新建 5 条后拖列表），AI 不代签。
+- **真机锁③仍未关账**：等 PM 复验（日报两框各滑各的 + 条目单行靠左 / 日程点条目改标题 / 左滑或长按删除各试一次 / 隐藏已完成开关 / 日程新建 5 条后拖列表），AI 不代签。

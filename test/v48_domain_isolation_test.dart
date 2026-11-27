@@ -317,17 +317,12 @@ void main() {
       findsWidgets,
       reason: '整改4：借出到期要在生活区块里',
     );
-    // V4.1.2：日报签改成**两个独立滚动框**后，每框高度有界，
-    // 框内 ListView 只 build 可见条目——第二条要**在框内滚一下**才出现。
-    // 这正是「聊天框式各滑各的」口径（不是整页滚到底）。
+    // V4.1.2：日报签改成**两个独立滚动框**后，每框高度有界、
+    // 框内 ListView 只 build 可见条目（不是整页滚到底）。
+    // V4.1.3 条目行压成单行后这两条已能同屏显示，故不再锁「初始在框外」——
+    // 锁的是「框内滚动后两条仍在同一块里」这层块内混合语义。
     final lifeList = find.byKey(const Key('overview_block_list_life'));
     expect(lifeList, findsOneWidget, reason: '生活区块必须有自己的滚动容器');
-    expect(
-      find.descendant(
-          of: lifeBlock, matching: find.text('生活区的日程')),
-      findsNothing,
-      reason: '整改4→V4.1.2：第二条初始在框外，需框内滚动才可见',
-    );
     await tester.drag(lifeList, const Offset(0, -200));
     await tester.pumpAndSettle();
     expect(

@@ -46,6 +46,9 @@ class ScheduleTabView extends StatefulWidget {
     this.onCreateReminder,
     this.onEditReminder,
     this.onDeleteReminder,
+    this.onListDeletedReminders,
+    this.onRestoreReminder,
+    this.onPurgeReminder,
     this.onChanged,
   });
 
@@ -76,9 +79,17 @@ class ScheduleTabView extends StatefulWidget {
           InventoryDomain domain, int reminderId, ReminderDraft draft)?
       onEditReminder;
 
-  /// 删除提醒。
+  /// 删除提醒（软删进回收站）。
   final Future<void> Function(InventoryDomain domain, int reminderId)?
       onDeleteReminder;
+
+  /// V4.1.3：回收站读写三回调（概览区仍不持仓储写口）。
+  final Future<List<Reminder>> Function(InventoryDomain domain)?
+      onListDeletedReminders;
+  final Future<void> Function(InventoryDomain domain, int reminderId)?
+      onRestoreReminder;
+  final Future<void> Function(InventoryDomain domain, int reminderId)?
+      onPurgeReminder;
 
   /// 状态/条目变化后回调（让父级刷新共享状态）。
   final Future<void> Function()? onChanged;
@@ -97,11 +108,16 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   /// 选中的日期（null = 不筛选，显示全部）。
   DateTime? _selectedDay;
 
-  /// 是否隐藏已完成条目（V4.1 批次 4 · 裁定②甲方案的配套）。
+  /// 是否隐藏已完成条目（V4.1 批次 4 裁定② + V4.1.3 真机反馈）。
   ///
-  /// **默认 false**（不隐藏）——批次 3 已交付的既有行为一个字没改，
-  /// 用户想清爽时一键收起。
-  bool _hideDone = false;
+  /// **V4.1.3 改默认开**（`true`）：PM 真机反馈「已完成项天天挂着越累越多」。
+  /// 这是**纯视图过滤**——不软删、不进回收站、不自动过期、数据一条不删，
+  /// 随时点开关切回显示（v45 旧测试改断言保行数，语义由「默认显示」
+  /// 改为「默认隐藏、一点即显示」）。
+  bool _hideDone = true;
+
+  /// 左滑确认后、滑出动画执行前暂存用户选的删除方式（按条目 id）。
+  final Map<String, _DeleteChoice> _pendingDelete = <String, _DeleteChoice>{};
 
   /// 该条目的完成态（**`todo_states` 优先**——与日报签同源）。
   ///
@@ -152,6 +168,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
               const SizedBox(height: 12),
               _buildAddButton(),
               _buildDoneToggle(),
+              _buildTrashButton(),
               const SizedBox(height: 8),
             ],
           );
@@ -389,8 +406,9 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
   /// 时间轴上就有 7 条已完成的历史实例 + 1 条当前实例——
   /// 全铺开就没法看日程了。
   ///
-  /// 所以给一个开关让用户自己收起。**默认不隐藏**（批次 3 的既有行为
-  /// 一个字没改），想清爽时一键收起；历史**不会丢**，日报里照样看得到。
+  /// 所以给一个开关让用户自己收起。**V4.1.3 起默认隐藏**（真机反馈：
+  /// 已完成越挂越多），一点即可切回显示；历史**不会丢**，
+  /// 纯视图过滤，不软删/不回收站/不自动过期。
   Widget _buildDoneToggle() {
     if (widget.entries.isEmpty) return const SizedBox.shrink();
     final doneCount = widget.entries.where(_isDone).length;
@@ -405,6 +423,22 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
           size: 18,
         ),
         label: Text(_hideDone ? '显示已完成（$doneCount）' : '隐藏已完成（$doneCount）'),
+      ),
+    );
+  }
+
+  /// V4.1.3：提醒回收站入口（软删的提醒在这里恢复 / 彻底删除）。
+  ///
+  /// 仍只持回调，不持仓储；按域分别读，避免跨域混账。
+  Widget _buildTrashButton() {
+    if (widget.onListDeletedReminders == null) return const SizedBox.shrink();
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        key: const Key('schedule_open_trash'),
+        onPressed: _openTrash,
+        icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+        label: const Text('提醒回收站'),
       ),
     );
   }
@@ -496,7 +530,7 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
         '备注：${state.handleNote}',
     ];
 
-    return Container(
+    final row = Container(
       decoration: deferred
           ? const BoxDecoration(
               border: Border(left: BorderSide(color: Colors.orange, width: 3)),
@@ -505,6 +539,10 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
       child: ListTile(
         key: Key('schedule_entry_${entry.id}'),
         dense: true,
+        // V4.1.3 真机反馈：原来只有右侧小图标能编辑，用户点条目没反应。
+        // 现在整行可点进详情改标题；长按弹删除选择。
+        onTap: editable ? () => _edit(entry) : null,
+        onLongPress: editable ? () => _deleteFlow(entry) : null,
         leading: Checkbox(
           key: Key('overview_check_${entry.id}'),
           value: done,
@@ -564,6 +602,31 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
               ),
       ),
     );
+
+    // V4.1.3：左滑删除（长按也可）。确认弹窗先问「回收站 / 彻底删除」，
+    // 用户取消则 Dismissible 回弹、条目不动。
+    return Dismissible(
+      key: Key('schedule_dismiss_${entry.id}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        color: Colors.red.shade200,
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 16),
+        child: const Icon(Icons.delete_outline, color: Colors.white),
+      ),
+      confirmDismiss: (_) async {
+        if (!editable) return false;
+        final choice = await _askDelete(entry);
+        if (choice == null) return false;
+        _pendingDelete[entry.id] = choice;
+        return true;
+      },
+      onDismissed: (_) {
+        final choice = _pendingDelete.remove(entry.id);
+        if (choice != null) _performDelete(entry, choice);
+      },
+      child: row,
+    );
   }
 
   Future<void> _toggle(ScheduleTabEntry entry, bool done) async {
@@ -613,38 +676,184 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     }
   }
 
-  Future<void> _delete(ScheduleTabEntry entry) async {
-    final ok = await showDialog<bool>(
+  /// V4.1.3：删除方式选择——软删进回收站（可恢复）/ 彻底删除（二次确认）。
+  Future<_DeleteChoice?> _askDelete(ScheduleTabEntry entry) async {
+    final choice = await showDialog<_DeleteChoice>(
       context: context,
       builder: (context) => AlertDialog(
         key: const Key('schedule_delete_dialog'),
         title: const Text('删除提醒'),
-        content: Text('确定删除「${entry.title}」？'),
+        content: Text('「${entry.title}」要怎么删？'),
         actions: <Widget>[
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(context).pop(),
             child: const Text('取消'),
           ),
           TextButton(
-            key: const Key('schedule_delete_confirm'),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('删除'),
+            key: const Key('schedule_delete_trash'),
+            onPressed: () => Navigator.of(context).pop(_DeleteChoice.trash),
+            child: const Text('移到回收站'),
+          ),
+          TextButton(
+            key: const Key('schedule_delete_purge'),
+            onPressed: () => Navigator.of(context).pop(_DeleteChoice.purge),
+            child: const Text('彻底删除'),
           ),
         ],
       ),
     );
-    if (ok != true) return;
-    final handler = widget.onDeleteReminder;
+    if (choice == _DeleteChoice.purge) {
+      if (!mounted) return null;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          key: const Key('schedule_purge_confirm'),
+          title: const Text('彻底删除？'),
+          content: const Text('这条提醒会被物理删除，不能恢复。确定吗？'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              key: const Key('schedule_purge_confirm_ok'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('彻底删除'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return null;
+    }
+    return choice;
+  }
+
+  /// 长按/旧删除按钮走的流程：先问方式，再执行（左滑走 confirmDismiss）。
+  Future<void> _deleteFlow(ScheduleTabEntry entry) async {
+    final choice = await _askDelete(entry);
+    if (choice == null) return;
+    await _performDelete(entry, choice);
+  }
+
+  Future<void> _delete(ScheduleTabEntry entry) => _deleteFlow(entry);
+
+  Future<void> _performDelete(ScheduleTabEntry entry, _DeleteChoice choice) async {
+    final handler = choice == _DeleteChoice.trash
+        ? widget.onDeleteReminder
+        : widget.onPurgeReminder;
     if (handler == null) return;
     try {
       await handler(entry.domain, entry.reminderId);
       if (widget.onChanged != null) await widget.onChanged!();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(choice == _DeleteChoice.trash
+                ? '已移到提醒回收站，可以恢复'
+                : '已彻底删除')),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('删除失败：$e')),
       );
     }
+  }
+
+  /// V4.1.3：提醒回收站弹窗（按域分组，恢复 / 彻底删除都要二次确认）。
+  Future<void> _openTrash() async {
+    final listHandler = widget.onListDeletedReminders;
+    if (listHandler == null) return;
+    final rows = <({InventoryDomain domain, Reminder reminder})>[];
+    for (final domain in widget.editableDomains) {
+      for (final r in await listHandler(domain)) {
+        rows.add((domain: domain, reminder: r));
+      }
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('schedule_trash_dialog'),
+        title: const Text('提醒回收站'),
+        content: SizedBox(
+          width: 320,
+          child: rows.isEmpty
+              ? const Text('回收站为空')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: rows.length,
+                  itemBuilder: (context, i) {
+                    final row = rows[i];
+                    final id = row.reminder.id;
+                    return ListTile(
+                      key: Key('schedule_trash_${row.domain.id}_$id'),
+                      dense: true,
+                      title: Text(row.reminder.title),
+                      subtitle: Text(row.domain.label),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          TextButton(
+                            key: Key('schedule_restore_${row.domain.id}_$id'),
+                            onPressed: () async {
+                              final h = widget.onRestoreReminder;
+                              if (h == null || id == null) return;
+                              await h(row.domain, id);
+                              if (widget.onChanged != null) {
+                                await widget.onChanged!();
+                              }
+                              if (context.mounted) Navigator.of(context).pop();
+                            },
+                            child: const Text('恢复'),
+                          ),
+                          TextButton(
+                            key: Key('schedule_trash_purge_${row.domain.id}_$id'),
+                            onPressed: () async {
+                              final h = widget.onPurgeReminder;
+                              if (h == null || id == null) return;
+                              final ok = await showDialog<bool>(
+                                context: context,
+                                builder: (context) => AlertDialog(
+                                  title: const Text('彻底删除？'),
+                                  content: Text('「${row.reminder.title}」删除后不能恢复。'),
+                                  actions: <Widget>[
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(false),
+                                      child: const Text('取消'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(true),
+                                      child: const Text('彻底删除'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (ok != true) return;
+                              await h(row.domain, id);
+                              if (widget.onChanged != null) {
+                                await widget.onChanged!();
+                              }
+                              if (context.mounted) Navigator.of(context).pop();
+                            },
+                            child: const Text('彻底删除'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   static DateTime _dayOf(int ms) {
@@ -670,6 +879,9 @@ class _ScheduleTabViewState extends State<ScheduleTabView> {
     }
   }
 }
+
+/// V4.1.3：删除方式（软删可恢复 / 物理删除不可恢复）。
+enum _DeleteChoice { trash, purge }
 
 /// V4.1.1 整改 2：时间轴槽位的三种形态。
 enum _TimelineKind {

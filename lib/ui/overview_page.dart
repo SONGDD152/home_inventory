@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/domain.dart';
+import '../data/reminder.dart';
 import '../data/todo_state.dart';
 import '../domain/overview_reader.dart';
 import '../domain/reminder_source.dart';
@@ -40,6 +41,9 @@ class OverviewPage extends StatefulWidget {
     this.onCreateReminder,
     this.onEditReminder,
     this.onDeleteReminder,
+    this.onListDeletedReminders,
+    this.onRestoreReminder,
+    this.onPurgeReminder,
     this.switchTimeoutCount = 0,
     this.onOpenDomain,
     this.onOpenReport,
@@ -91,9 +95,21 @@ class OverviewPage extends StatefulWidget {
           InventoryDomain domain, int reminderId, ReminderDraft draft)?
       onEditReminder;
 
-  /// 删除提醒（组合根执行写操作）。
+  /// 删除提醒（组合根执行写操作；软删进回收站）。
   final Future<void> Function(InventoryDomain domain, int reminderId)?
       onDeleteReminder;
+
+  /// V4.1.3：读某域回收站里的提醒（概览仍只持回调，不持仓储）。
+  final Future<List<Reminder>> Function(InventoryDomain domain)?
+      onListDeletedReminders;
+
+  /// V4.1.3：从回收站恢复提醒（组合根执行写操作）。
+  final Future<void> Function(InventoryDomain domain, int reminderId)?
+      onRestoreReminder;
+
+  /// V4.1.3：彻底删除回收站里的提醒（组合根执行写操作）。
+  final Future<void> Function(InventoryDomain domain, int reminderId)?
+      onPurgeReminder;
 
   /// 切库超时次数（**用户可见**：切库降级不是静默的）。
   final int switchTimeoutCount;
@@ -546,10 +562,15 @@ class _OverviewPageState extends State<OverviewPage>
                 ]
               : <Widget>[
                   SizedBox(
+                    // V4.1.3 真机排版整改：ExpansionTile 的子列用松约束，
+                    // 只给高度时子项会「缩到内容宽再居中」→ 文字列只剩两字宽、
+                    // 整行看着居中、右侧大片留白。钉死 width: double.infinity
+                    // 让滚动框铺满本域块的横向空间，条目从左往右排。
+                    width: double.infinity,
                     height: listHeight,
                     child: ListView(
                       key: Key('overview_block_list_${domain.id}'),
-                      padding: const EdgeInsets.only(left: 56, right: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
                       // 非懒加载：所有条目都在 widget 树上（折叠/查找断言依赖），
                       // 但 scrollable 有界 → 超出框高的部分可在框内上翻。
                       children: items
@@ -602,6 +623,9 @@ class _OverviewPageState extends State<OverviewPage>
       onCreateReminder: widget.onCreateReminder,
       onEditReminder: widget.onEditReminder,
       onDeleteReminder: widget.onDeleteReminder,
+      onListDeletedReminders: widget.onListDeletedReminders,
+      onRestoreReminder: widget.onRestoreReminder,
+      onPurgeReminder: widget.onPurgeReminder,
       onChanged: _reload,
     );
   }
@@ -1043,23 +1067,13 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
           : null,
       child: ListTile(
         dense: true,
-        leading: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-          // 日程类 vs 系统类用图标区分（元宝 B5）。
-          Icon(
-            widget.item.isSystemHint
-                ? Icons.inventory_2_outlined
-                : Icons.event_note,
-            size: 18,
-            color: Colors.grey,
-          ),
-          Checkbox(
-            key: Key('overview_check_${entry.id}'),
-            value: _done,
-            onChanged: _writable ? (_) => _toggle() : null,
-          ),
-        ],
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+        // V4.1.3 真机排版整改：勾选框在最前，标题/副标题从它右边起
+        // 一整行从左往右排；文字区 Expanded 占满剩余宽度、单行不折字。
+        leading: Checkbox(
+          key: Key('overview_check_${entry.id}'),
+          value: _done,
+          onChanged: _writable ? (_) => _toggle() : null,
         ),
         title: Row(
           children: <Widget>[
@@ -1067,6 +1081,8 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
             Expanded(
               child: Text(
                 entry.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   decoration: dimmed ? TextDecoration.lineThrough : null,
                   color: dimmed ? Colors.grey : null,
@@ -1077,11 +1093,31 @@ class _TodoEntryRowState extends State<_TodoEntryRow> {
         ),
         subtitle: subtitleParts.isEmpty
             ? null
-            : Text(subtitleParts.join(' · '),
-                style: TextStyle(
-                  color: dimmed ? Colors.grey : null,
-                  decoration: dimmed ? TextDecoration.lineThrough : null,
-                )),
+            : Row(
+                children: <Widget>[
+                  // 元宝 B5 的类型图标保留（源码级测试锁着），但挪到
+                  // 信息行首，不再挡在勾选框与标题之间。
+                  Icon(
+                    widget.item.isSystemHint
+                        ? Icons.inventory_2_outlined
+                        : Icons.event_note,
+                    size: 16,
+                    color: Colors.grey,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      subtitleParts.join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: dimmed ? Colors.grey : null,
+                        decoration: dimmed ? TextDecoration.lineThrough : null,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
         trailing: _writable
             ? Row(
                 mainAxisSize: MainAxisSize.min,

@@ -43,6 +43,16 @@ abstract class ReminderRepository {
   /// 软删提醒（进回收站）。
   Future<void> deleteReminder(int id);
 
+  /// V4.1.3：回收站里的提醒（is_deleted=1，删除时间倒序）。
+  Future<List<Reminder>> getDeletedReminders();
+
+  /// V4.1.3：从回收站恢复提醒（is_deleted 归 0、deleted_at 清空）。
+  Future<void> restoreReminder(int id);
+
+  /// V4.1.3：彻底删除回收站里的提醒（物理删除，不可恢复）。
+  /// UI 必须二次确认后才调；本方法只做数据层硬删。
+  Future<void> purgeReminder(int id);
+
   /// 取某天的日报（没有则返回 null）。
   Future<DailyReport?> getDailyReport(String reportDate);
 

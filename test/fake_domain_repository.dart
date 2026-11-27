@@ -347,7 +347,9 @@ class FakeDomainRepository
 
   @override
   Future<List<Reminder>> getReminders({bool includeDone = true}) async =>
-      _reminders.where((r) => includeDone || r.isPending).toList();
+      _reminders
+          .where((r) => !r.isDeleted && (includeDone || r.isPending))
+          .toList();
 
   @override
   Future<int> addReminder(String title,
@@ -416,7 +418,59 @@ class FakeDomainRepository
 
   @override
   Future<void> deleteReminder(int id) async {
+    // V4.1.3：与生产库同口径——软删进回收站，不物理移除。
+    final i = _reminders.indexWhere((r) => r.id == id && !r.isDeleted);
+    if (i < 0) return;
+    final old = _reminders[i];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _reminders[i] = Reminder(
+      id: old.id,
+      title: old.title,
+      detail: old.detail,
+      dueAt: old.dueAt,
+      status: old.status,
+      doneAt: old.doneAt,
+      repeatRule: old.repeatRule,
+      priority: old.priority,
+      isDeleted: true,
+      deletedAt: now,
+      createdAt: old.createdAt,
+      updatedAt: now,
+    );
+  }
+
+  @override
+  Future<List<Reminder>> getDeletedReminders() async => _reminders
+      .where((r) => r.isDeleted)
+      .toList()
+    ..sort((a, b) => (b.deletedAt ?? 0).compareTo(a.deletedAt ?? 0));
+
+  @override
+  Future<void> restoreReminder(int id) async {
+    final i = _reminders.indexWhere((r) => r.id == id && r.isDeleted);
+    if (i < 0) return;
+    final old = _reminders[i];
+    _reminders[i] = Reminder(
+      id: old.id,
+      title: old.title,
+      detail: old.detail,
+      dueAt: old.dueAt,
+      status: old.status,
+      doneAt: old.doneAt,
+      repeatRule: old.repeatRule,
+      priority: old.priority,
+      isDeleted: false,
+      deletedAt: null,
+      createdAt: old.createdAt,
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  @override
+  Future<void> purgeReminder(int id) async {
+    // 硬删 = 痕迹全无：提醒行 + 对应 todo_states 一起清掉。
     _reminders.removeWhere((r) => r.id == id);
+    _todoStates.remove(TodoState.entryKeyOf(TodoSourceType.scheduleReminder, id));
   }
 
   @override

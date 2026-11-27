@@ -9,6 +9,7 @@ import '../data/inventory_repository.dart';
 import '../data/item.dart';
 import '../data/normalize.dart';
 import '../data/phrase_parser.dart';
+import '../data/reminder.dart';
 import '../data/reminder_repository.dart';
 import '../domain/domain_hub.dart';
 import '../domain/overview_reader.dart';
@@ -2324,6 +2325,9 @@ class _HomePageState extends State<HomePage> {
           onCreateReminder: _createReminder,
           onEditReminder: _editReminder,
           onDeleteReminder: _deleteReminder,
+          onListDeletedReminders: _listDeletedReminders,
+          onRestoreReminder: _restoreReminder,
+          onPurgeReminder: _purgeReminder,
           switchTimeoutCount: widget.hub!.switchTimeoutCount,
           onOpenDomain: _openDomainSection,
           // V4.1 批次 2：日报入口（修孤儿页）。
@@ -2495,7 +2499,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// V4.1 批次 3：删除提醒。
+  /// V4.1 批次 3：删除提醒（软删进回收站）。
   Future<void> _deleteReminder(InventoryDomain domain, int reminderId) async {
     final editor = _reminderEditors()[domain];
     if (editor == null) {
@@ -2503,6 +2507,26 @@ class _HomePageState extends State<HomePage> {
     }
     await editor.removeReminder(reminderId);
   }
+
+  /// V4.1.3：按域取提醒仓库（回收站读写仍由组合根执行，概览只持回调）。
+  ReminderRepository _reminderRepo(InventoryDomain domain) {
+    final hub = widget.hub;
+    if (hub == null) throw StateError('当前没有可用的仓储');
+    final repo = domain == InventoryDomain.life ? hub.life.repository : hub.work.repository;
+    if (repo is! ReminderRepository) {
+      throw StateError('${domain.label}暂不支持提醒');
+    }
+    return repo as ReminderRepository;
+  }
+
+  Future<List<Reminder>> _listDeletedReminders(InventoryDomain domain) =>
+      _reminderRepo(domain).getDeletedReminders();
+
+  Future<void> _restoreReminder(InventoryDomain domain, int reminderId) =>
+      _reminderRepo(domain).restoreReminder(reminderId);
+
+  Future<void> _purgeReminder(InventoryDomain domain, int reminderId) =>
+      _reminderRepo(domain).purgeReminder(reminderId);
 
   /// 仓储主体（V3.13 原样）。
   Widget _storageBody() {

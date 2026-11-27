@@ -3289,6 +3289,55 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     );
   }
 
+  // ─────────── V4.1.3：提醒回收站（不新增列/表，schema 仍 v13） ───────────
+
+  @override
+  Future<List<Reminder>> getDeletedReminders() async {
+    final db = await open();
+    final rows = await db.query(
+      tableReminders,
+      where: '$columnIsDeleted = 1',
+      orderBy: '$columnDeletedAt DESC, $columnId DESC',
+    );
+    return rows.map(Reminder.fromMap).toList();
+  }
+
+  @override
+  Future<void> restoreReminder(int id) async {
+    _guardWrite();
+    final db = await open();
+    await db.update(
+      tableReminders,
+      <String, Object?>{
+        columnIsDeleted: 0,
+        columnDeletedAt: null,
+        columnUpdatedAt: DateTime.now().millisecondsSinceEpoch,
+      },
+      where: '$columnId = ? AND $columnIsDeleted = 1',
+      whereArgs: <Object?>[id],
+    );
+  }
+
+  @override
+  Future<void> purgeReminder(int id) async {
+    _guardWrite();
+    final db = await open();
+    // 硬删 = 痕迹全无：提醒行 + 它对应的 todo_states 一起物理清掉，
+    // 否则日程硬删后状态行变永久孤儿（项目守恒铁律）。
+    await db.transaction((txn) async {
+      await txn.delete(
+        tableTodoStates,
+        where: '$columnSourceType = ? AND $columnSourceId = ?',
+        whereArgs: <Object?>[TodoSourceType.scheduleReminder, id],
+      );
+      await txn.delete(
+        tableReminders,
+        where: '$columnId = ?',
+        whereArgs: <Object?>[id],
+      );
+    });
+  }
+
   // ─────────────────── V4.1 批次 3：ReminderEditor 实现 ───────────────────
   //
   // 只写 `reminders` 表（提醒条目本身），**不碰** items / loans / locations。

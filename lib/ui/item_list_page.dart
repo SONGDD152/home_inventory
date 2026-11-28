@@ -144,7 +144,9 @@ class _ItemListPageState extends State<ItemListPage> {
           ),
         ],
       ),
-      // 底部固定操作区：导出/恢复不再依赖右上角图标，SafeArea 兜住手势区。
+      // 底部固定操作区：备份导出/恢复保留（V3.6 起的既有入口）。
+      // V4.2.3（+36 终审边界）：「导出 Excel」按钮撤掉——导入导出统一
+      // 收归概览「数据管理」签（生活区/工作区各一份），不双头、不散落。
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -152,8 +154,6 @@ class _ItemListPageState extends State<ItemListPage> {
             repository: widget.repository,
             gateway: widget.gateway,
             onRestored: _reload,
-            onExportExcel: _saveExcel,
-            onShareExcel: _shareExcel,
             compact: true,
           ),
         ),
@@ -234,7 +234,7 @@ class _ItemListPageState extends State<ItemListPage> {
     }).join('、');
   }
 
-  // ---------- V3.6 回收站 / Excel 导出 ----------
+  // ---------- V3.6 回收站 ----------
 
   Future<void> _openTrash() async {
     await Navigator.of(context).push(
@@ -247,89 +247,9 @@ class _ItemListPageState extends State<ItemListPage> {
     await _reload();
   }
 
-  /// V3.7：借出明细导出数据（loans + 物品 id→位置名映射）。
-  /// 复用明细页已加载的 _rows 构造映射，避免额外全表查询。
-  Future<({List<Loan> loans, Map<int, String> locationByItem})>
-      _loanExportData() async {
-    final loans = await widget.repository.getAllLoans();
-    final locationByItem = <int, String>{};
-    for (final row in _rows ?? const <ItemWithLocations>[]) {
-      final id = row.item.id;
-      if (id == null) continue;
-      locationByItem[id] = row.locations.isEmpty
-          ? '（无位置）'
-          : row.locations.map((l) => l.name).join('、');
-    }
-    return (loans: loans, locationByItem: locationByItem);
-  }
-
-  /// V3.6.1：点击导出 Excel = 直接保存到手机（SAF）。
-  /// 工作簿字节直接从 buildWorkbook 取（无需落临时盘），写用户所选位置。
-  Future<void> _saveExcel() async {
-    final gateway = widget.gateway ?? SystemBackupGateway();
-    setState(() => _busy = true);
-    try {
-      final exporter = widget.exporter ?? ExcelExporter(domain: widget.domain);
-      final activeRows = _rows ?? const <ItemWithLocations>[];
-      final deletedRows = await widget.repository.getDeletedItems();
-      final loanData = await _loanExportData();
-      // V3.12：废弃流水一并导出（新增「废弃流水」Sheet）。
-      final discards = await widget.repository.getDiscards(includeRestored: true);
-      final bytes = exporter.buildWorkbook(activeRows, deletedRows,
-          loans: loanData.loans,
-          locationByItem: loanData.locationByItem,
-          discards: discards);
-      final fileName = exporter.fileNameForDomain(DateTime.now(), widget.domain);
-      final saved = await gateway.saveBytesToDevice(fileName, bytes);
-      if (!mounted) return;
-      if (saved == null) {
-        // 用户取消：静默。
-        setState(() => _busy = false);
-        return;
-      }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已保存：$fileName')),
-      );
-    } catch (_) {
-      // 兜住 Error + Exception（磁盘满/权限/ROM 拒绝），失败必须明确提示。
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法保存，请改用分享（长按导出按钮）')),
-      );
-    }
-    if (!mounted) return;
-    setState(() => _busy = false);
-  }
-
-  /// V3.6.1：长按 Excel = 走原系统分享面板（生成 xlsx 后 shareFile）。
-  Future<void> _shareExcel() async {
-    final gateway = widget.gateway ?? SystemBackupGateway();
-    setState(() => _busy = true);
-    try {
-      final activeRows = _rows ?? const <ItemWithLocations>[];
-      final deletedRows = await widget.repository.getDeletedItems();
-      final loanData = await _loanExportData();
-      // V3.12：废弃流水一并导出。
-      final discards = await widget.repository.getDiscards(includeRestored: true);
-      final path = await (widget.exporter ?? ExcelExporter(domain: widget.domain))
-          .writeExcelFile(activeRows, deletedRows,
-              loans: loanData.loans,
-              locationByItem: loanData.locationByItem,
-              discards: discards);
-      await gateway.shareFile(path);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Excel 已生成：${path.split('/').last}')),
-      );
-    } on Exception catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('导出失败：$e')),
-      );
-    }
-    if (!mounted) return;
-    setState(() => _busy = false);
-  }
+  /// V3.7：借出明细导出数据（loans + 物品 id→位置名映射）已随 Excel
+  /// 导出链路搬到 `lib/data/excel_export_kit.dart`（+36 终审边界：
+  /// 导入导出统一收归数据管理签）。
 
   // ---------- V3.2 编辑 / V3.6 软删（决策点①A：语义统一进回收站） ----------
 

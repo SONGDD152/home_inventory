@@ -288,8 +288,9 @@ void main() {
     final written = jsonDecode(utf8.decode(gateway.lastSavedBytes!))
         as Map<String, Object?>;
     expect(written['kind'], 'full_system');
+    // V4.2.3（+36 终审）：三域 JSON——knowledge 空壳分区恒在。
     expect((written['domains']! as Map<String, Object?>).keys.toSet(),
-        <String>{'life', 'work'});
+        <String>{'life', 'work', 'knowledge'});
     expect(find.textContaining('含生活区+工作区'), findsOneWidget);
   });
 
@@ -390,7 +391,7 @@ void main() {
     expect(lifeRepo.restoreCalls, 0, reason: '校验拒绝时不得落库');
     expect(workRepo.restoreCalls, 0);
     expect(find.textContaining('恢复失败'), findsOneWidget);
-    expect(find.textContaining('请到对应区域的「数据管理 → 分区备份」页签恢复'),
+    expect(find.textContaining('请到「数据管理」对应区域（生活区/工作区）的备份恢复入口恢复'),
         findsOneWidget, reason: '指路分区入口');
     expect(find.byKey(const Key('full_restore_backup')), findsOneWidget,
         reason: '页面仍在，未崩溃');

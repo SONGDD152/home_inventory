@@ -977,24 +977,22 @@ void main() {
     expect(find.text('共 1 件物品 · 1 条存放记录'), findsOneWidget);
   });
 
-  testWidgets('V3.6.1 导出Excel：点击→直接保存（SAF）→提示已保存', (tester) async {
+  testWidgets('V3.6.1（+36 收编）导出Excel 按钮撤出明细页（收归数据管理签）', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台'], id: 1),
     ]);
     final gateway = FakeBackupGateway();
     await _pumpPage(tester, repo: repo, gateway: gateway);
 
-    await tester.tap(find.byKey(const Key('export_excel')));
-    await tester.pumpAndSettle();
-
-    expect(gateway.lastSavedBytes, isNotNull, reason: '工作簿字节交给保存对话框');
-    expect(gateway.lastSavedBytes![0], 0x50, reason: 'zip 头（xlsx 容器）');
-    expect(gateway.lastSavedFileName, endsWith('.xlsx'));
-    expect(gateway.lastSharedPath, isNull, reason: '点击不触发分享');
-    expect(find.textContaining('已保存：'), findsOneWidget);
+    // V4.2.3（+36 终审）：明细页不再有导出按钮，Excel 导出统一走
+    // 概览「数据管理」签的生活/工作区（保存/分享链路由 v57 专项覆盖）。
+    expect(find.byKey(const Key('export_excel')), findsNothing,
+        reason: '+36 撤散落入口：明细页无导出按钮');
+    expect(gateway.lastSavedBytes, isNull, reason: '无入口即无导出');
+    expect(gateway.lastSharedPath, isNull, reason: '无入口即无分享');
   });
 
-  testWidgets('V3.6.1 长按导出Excel：走原系统分享链路（保留分享能力）', (tester) async {
+  testWidgets('V3.6.1（+36 收编）长按导出Excel 分享链路随按钮撤出明细页', (tester) async {
     final repo = FakeListRepository(<ItemWithLocations>[
       _row('梯子', <String>['阳台'], id: 1),
     ]);
@@ -1008,13 +1006,11 @@ void main() {
     );
     await _pumpPage(tester, repo: repo, gateway: gateway, exporter: exporter);
 
-    await tester.longPress(find.byKey(const Key('export_excel')));
-    await tester.pumpAndSettle();
-
-    expect(lastBytes, isNotNull, reason: '分享路仍生成 xlsx 落盘');
-    expect(gateway.lastSharedPath, isNotNull, reason: '长按触发分享');
-    expect(gateway.lastSharedPath!, endsWith('.xlsx'));
-    expect(find.textContaining('Excel 已生成'), findsOneWidget);
+    // V4.2.3（+36 终审）：长按分享能力收归数据管理签（v57 覆盖），明细页无按钮。
+    expect(find.byKey(const Key('export_excel')), findsNothing,
+        reason: '+36 撤散落入口：长按分享无处安放');
+    expect(lastBytes, isNull, reason: '分享路未触发');
+    expect(gateway.lastSharedPath, isNull, reason: '分享路未触发');
   });
 
   // 元宝补丁提醒②：可见性回归锁（色写死本体 + 对比度达标）。

@@ -1,7 +1,7 @@
 name: home_inventory
 description: 小本本 APP 第一阶段数据层：物品位置的本地持久化。不含语音与界面。
 publish_to: none
-version: 4.2.2+35
+version: 4.2.3+36
 
 environment:
   sdk: ">=3.4.0 <4.0.0"

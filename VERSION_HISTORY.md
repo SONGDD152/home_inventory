@@ -1142,3 +1142,28 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - 线上核验：页面含 V4.2.2 与 sha、APK 直链 200 且 sha 逐字一致、无 sharecode 403、v421 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
 - **范围如实**：本版只做收拢搬运，+34 行为一字不改；日报老六块口径未动（变更挂 +36）；无 schema 变更。
 - 需求链：+35（本版）→ +36 知识库功能（v5 施工图已收档，开工前落 7 点回执）。
+
+### V4.2.3 数据管理终审版留档（2026-11-28）· versionCode 35 → 36
+
+> **依据**：PM 终审开工边界（2026-11-28 元宝代笔，V4.2.2 上线后发现 tab 形态与终审冲突，版号按「当前+1 不复用」铁律顺延：本版占 **+36**，知识库功能顺延 **+37**）。终审要点：数据管理=概览「日程」右侧新签、唯一集散入口；抽屉入口撤掉改跳签；明细页导出 Excel 按钮撤除；签内**整页纵向滚动四区**（系统/生活/工作/知识），不做横向切页、不做顶部 tab、不弹新页。
+
+### 实现逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **概览第三签「数据管理」**：TabBar 2→3 签（日报/日程/数据管理），`initialTab` + seed 换 key 重建响应抽屉跳签；组合根 `_buildDataManagementTab()` 注入 `DataManagementView`（概览只收 Widget 不持仓储，写边界铁律） | `lib/ui/overview_page.dart` / `home_page.dart` |
+| 2 | **四区单页纵向滚动**：`DataManagementView` 重写为 SingleChildScrollView——区①系统区（FullSystemBackupPanel 原样）→ 区②生活区 → 区③工作区 → 区④知识区（按钮置灰通道：不建库不接 Writer，建库后自动开放）；+35 的 tab 形态撤除 | `lib/ui/data_management_page.dart`（重写） |
+| 3 | **全系统备份扩三域 JSON**：`exportAll` 增 `domains.knowledge` 空壳分区（壳域恒在，建库后自动带数据）；恢复端：knowledge 放行→空壳跳过→**带数据明确拒绝不炸**（「请升级应用后恢复这份备份」）；旧版 app 恢复新文件走既有未知分区指路；+34 行为一字不改（校验前置/逐域分行/互拒指路） | `lib/domain/full_system_backup.dart` |
+| 4 | **生活/工作区自带导出**：每区=分区备份/恢复（BackupPageBody 原样复用）+ Excel 导出（点击保存/长按分享，`ExcelExportKit` 从明细页搬组装链路）+ **新增 Word 物品清单导出**（`ItemDocxExporter`，docx 含物品+存放位置，点击保存/长按分享） | `lib/data/excel_export_kit.dart`（新建）/ `item_docx_exporter.dart`（新建）/ `data_management_page.dart` |
+| 5 | **散落入口撤除**：抽屉改回「数据备份与恢复」跳概览数据管理签（多域）；单域形态（单测）兜底 push 独立页；物品明细页底部「导出 Excel」按钮撤除（BackupActions 底栏整体撤除） | `home_page.dart` / `item_list_page.dart` |
+| 6 | **互拒指路文案再校准**：分区文件误入全系统入口 →「请到对应区域的『数据管理 → 分区备份』页签恢复」对齐四区布局 | `full_system_backup.dart` |
+
+### 测试与发布
+
+- `v57` 重写为四区断言 8 条（四区布局+纵向次序/系统区两键/生活工作备份恢复+Excel+Word 齐备/知识区置灰/生活区 Excel 保存/生活区 Excel 长按分享/生活区 Word 保存/单域模式提示）。旧断言按终审口径改写**一条未删**：v56 三域 JSON+拒收文案 2 处、backup_page_test 三域断言 1 处、home_page_test 抽屉 2 处、item_list_page_test 明细页撤按钮锁 2 处。v51/v53 版号锁同步 4.2.3+36。**全量 694/694 全绿，analyze 0 error / 0 warning（5 条既有 info）**。
+- **过程中修的实现 bug**：四区标题 `'${domain.label}区'` 拼出「生活区区」（label 已含「区」字）——真机验收前被测试拦截，未上线。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=36 versionName=4.2.3；55,475,525 字节；sha256 `b58dc2a8b6f9c0d2777cf7475919f24084d2227c6c326a0605dbbb6fc5ace16d`；签名 c1647f33… 不变，可覆盖安装。
+- 线上核验：页面含 V4.2.3 与 sha、APK 直链 200 且线上 sha 逐字一致、无 sharecode 403、v422 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
+- **范围如实**：知识区只做通道按钮（不建库不接 Writer，全归 +37）；日报导出不归本签（走日报页自己按钮）；无 schema 变更。
+- 需求链：+36（本版）→ **+37 知识库功能**（v5 施工图已收档；开工前按 7 点回执落定：备份枚举 9→15、updateNodeTitle 补口、deleteNode 软删边界、search_text 跨表落点、种子只进 knowledge.db、+34→全系统备份扩 knowledge【已于本版预落】、创作区入口待元宝补）。
+- **环境留档**：WorkBuddy 权限放行「未匹配文件规则的删除=允许」后 flutter 恢复会话内运行（engine.stamp.tmp 删除被 `**` 规则拦的问题解除），analyze/test/build 全链回归会话内自跑。

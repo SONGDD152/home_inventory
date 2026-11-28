@@ -28,8 +28,14 @@ import '../data/inventory_repository.dart';
 /// **一行不重写、天然继承**（两套迟早漂移，铁律）。
 ///
 /// 口径：
-/// * 只覆盖**开放仓储能力的域**（[DomainCapability.storage]）——知识域
-///   壳实例没有账可备，永不出现；
+/// * 仓储数据覆盖**开放仓储能力的域**（[DomainCapability.storage]，生产：
+///   life + work）；
+/// * **V4.2.3（+36 终审边界）：全系统文件带知识壳分区**——`domains.knowledge`
+///   恒在（无库时是只含归属标识的空壳分区），「三域 JSON：生活+工作+知识」。
+///   壳分区不带任何表键，恢复时空壳直接跳过；带表键（未来版本导出）在
+///   尚未建库的当前版本上**明确拒绝**，不静默不炸页。旧格式文件（无
+///   knowledge 分区）照常兼容；旧版应用恢复新文件会被旧版校验以
+///   「不支持的分区」明确拒绝（文案已有，无需旧版改动）；
 /// * 恢复前**先整体校验后逐域落库**（结构/域归属/版本全过才开始写第一本账），
 ///   把「第一本恢复成功第二本失败」的窗口压到只剩磁盘级故障；
 /// * 与单域备份**互拒**：全系统文件进分区恢复入口、单域文件进全系统入口，
@@ -53,13 +59,31 @@ class FullSystemBackup {
       .where((d) => domainSupports(d, DomainCapability.storage))
       .toList(growable: false);
 
+  /// 全系统文件分区覆盖的域：仓储域 + 知识壳分区（+36 终审边界，
+  /// 三域 JSON）。恢复校验按此白名单放行，未知的分区仍拒。
+  List<InventoryDomain> get partitionDomains => InventoryDomain.values;
+
+  /// 知识壳分区：只带归属标识，不带任何表键（+35 不建库、+36 建库前恒壳）。
+  Map<String, Object?> _knowledgeShellPartition() => <String, Object?>{
+        'app': 'home_inventory',
+        'domain': InventoryDomain.knowledge.id,
+        'schemaVersion': InventoryDatabase.currentSchemaVersion,
+      };
+
   /// 导出全系统备份。
   ///
   /// 纯读取不改库；任何一域导出失败即整体失败（不让用户拿到半份备份）。
+  /// 知识域恒输出壳分区（+35 不建库不接 Writer——PM 终审边界）。
   Future<Map<String, Object?>> exportAll() async {
     final entries = <String, Object?>{};
-    for (final domain in domains) {
-      entries[domain.id] = await _repositories[domain]!.exportBackup();
+    for (final domain in partitionDomains) {
+      final repo = _repositories[domain];
+      if (repo != null &&
+          domainSupports(domain, DomainCapability.storage)) {
+        entries[domain.id] = await repo.exportBackup();
+      } else {
+        entries[domain.id] = _knowledgeShellPartition();
+      }
     }
     return <String, Object?>{
       'app': 'home_inventory',
@@ -90,7 +114,7 @@ class FullSystemBackup {
         data['kind'],
         'kind',
         '这是分区备份（单个区域的文件），'
-        '请到对应区域的「数据管理 → 分区备份」页签恢复',
+        '请到「数据管理」对应区域（生活区/工作区）的备份恢复入口恢复',
       );
     }
     // ③ domains 映射。
@@ -103,11 +127,12 @@ class FullSystemBackup {
       );
     }
     // ④⑤ 逐条校验：key 已知、条目归属一致、版本不高于当前库。
+    // V4.2.3：白名单从「仓储域」扩为「分区覆盖域」（含 knowledge 壳分区）。
     final validated = <InventoryDomain, Map<String, Object?>>{};
     for (final entry in rawDomains.entries) {
       final key = '${entry.key}';
       final domain = InventoryDomain.fromId(key);
-      if (domain == null || !domains.contains(domain)) {
+      if (domain == null || !partitionDomains.contains(domain)) {
         throw ArgumentError.value(
           key,
           'domains',
@@ -154,7 +179,27 @@ class FullSystemBackup {
     }
 
     // 校验全过 → 逐域落库（delegate 单域恢复，收口全继承）。
+    // 知识壳分区：+35 不建库，空壳跳过；壳分区若混进表键（未来版本导出）
+    // 明确拒绝——数据还在文件里，升级到知识库功能版即可恢复，不静默丢弃。
     for (final entry in validated.entries) {
+      if (!_repositories.containsKey(entry.key)) {
+        final extraKeys = entry.value.keys
+            .where((k) =>
+                k != 'app' && k != 'domain' && k != 'schemaVersion')
+            .toList();
+        if (extraKeys.isNotEmpty) {
+          final reason = entry.key == InventoryDomain.knowledge
+              ? '（知识库尚未建库）'
+              : '（该区域在当前应用未启用）';
+          throw ArgumentError.value(
+            entry.key,
+            'domains',
+            '分区（${entry.key}）带有当前应用还不能恢复的数据$reason，'
+                '请升级应用后恢复这份备份',
+          );
+        }
+        continue; // 空壳分区：无账可恢复，跳过。
+      }
       await _repositories[entry.key]!.restoreBackup(entry.value);
     }
   }
@@ -179,6 +224,11 @@ class FullSystemBackup {
   }
 
   String _describeDomain(InventoryDomain domain, Map<String, Object?> body) {
+    // 知识壳分区（+35 不建库）：恒无表键，报一行状态而不是逐表清点。
+    if (domain == InventoryDomain.knowledge &&
+        !body.containsKey(InventoryDatabase.tableItems)) {
+      return '知识系统：暂无数据（备份通道已就绪，知识库建库后自动纳入）';
+    }
     int countOf(String table) => (body[table] as List?)?.length ?? 0;
     final parts = <String>[
       '物品 ${countOf(InventoryDatabase.tableItems)} 条',

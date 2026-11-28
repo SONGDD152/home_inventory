@@ -47,6 +47,8 @@ class OverviewPage extends StatefulWidget {
     this.switchTimeoutCount = 0,
     this.onOpenDomain,
     this.onOpenReport,
+    this.dataManagementTab,
+    this.initialTab = 0,
   });
 
   /// 两域账目快照的只读读取口。
@@ -120,6 +122,17 @@ class OverviewPage extends StatefulWidget {
   /// 「打开日报页」的跳转回调（V4.1 批次 2：补孤儿页入口）。
   final VoidCallback? onOpenReport;
 
+  /// V4.2.3（+36 终审边界）：「数据管理」签内容——由组合根构建并注入
+  /// （概览只收 Widget 不持仓储，写边界铁律不破）。
+  ///
+  /// 非 null 时底栏变三签：日报 / 日程 / 数据管理（「日程」签右侧）。
+  /// null 时保持旧双签（旧测试注入方式不受影响）。
+  final Widget? dataManagementTab;
+
+  /// 初始选中签（0=日报 1=日程 2=数据管理）。抽屉「数据备份与恢复」
+  /// 入口跳转数据管理签靠它；顶栏默认 0（日报签）。
+  final int initialTab;
+
   @override
   State<OverviewPage> createState() => _OverviewPageState();
 }
@@ -145,7 +158,12 @@ class _OverviewPageState extends State<OverviewPage>
   String? _error;
 
   late final TabController _tabController =
-      TabController(length: 2, vsync: this);
+      TabController(length: _tabCount, vsync: this, initialIndex: _initialTab);
+
+  int get _tabCount => widget.dataManagementTab != null ? 3 : 2;
+
+  int get _initialTab =>
+      widget.initialTab.clamp(0, _tabCount - 1).toInt();
 
   @override
   void initState() {
@@ -239,6 +257,9 @@ class _OverviewPageState extends State<OverviewPage>
             children: <Widget>[
               _buildReportTab(),
               _buildScheduleTab(),
+              // V4.2.3（+36 终审边界）：数据管理签（组合根注入的四区视图）。
+              if (widget.dataManagementTab != null)
+                widget.dataManagementTab!,
             ],
           ),
         ),
@@ -282,17 +303,24 @@ class _OverviewPageState extends State<OverviewPage>
           indicatorSize: TabBarIndicatorSize.tab,
           labelColor: scheme.primary,
           unselectedLabelColor: scheme.onSurfaceVariant,
-          tabs: const <Widget>[
-            Tab(
+          tabs: <Widget>[
+            const Tab(
               key: Key('overview_tab_report'),
               icon: Icon(Icons.description_outlined),
               text: '日报',
             ),
-            Tab(
+            const Tab(
               key: Key('overview_tab_schedule'),
               icon: Icon(Icons.event_note_outlined),
               text: '日程',
             ),
+            // V4.2.3（+36 终审边界）：「日程」签右侧的「数据管理」签。
+            if (widget.dataManagementTab != null)
+              const Tab(
+                key: Key('overview_tab_data'),
+                icon: Icon(Icons.settings_backup_restore_outlined),
+                text: '数据管理',
+              ),
           ],
         ),
       ),

@@ -2108,37 +2108,43 @@ class _HomePageState extends State<HomePage> {
                   _push(ItemListPage(repository: _execRepo, domain: _domain));
                 },
               ),
-              // V4.2.2（+35）：抽屉入口收拢升级——「数据备份与恢复」单页
-              // 变「数据管理」页签（全系统备份/分区备份/导出 Excel/
-              // 回收站与清理四块）。旧 BackupPage 类保留为子页，
-              // key `drawer_backup` 不变（选中态/旧断言语义不受影响）。
+              // V4.2.3（+36 终审边界）：抽屉只留「数据备份与恢复」一个
+              // 入口（上一版「数据管理」页入口撤掉，不再双入口）——点击
+              // 跳转概览「数据管理」签（数据导入导出唯一集散地）。
               ListTile(
                 key: const Key('drawer_backup'),
                 leading: const Icon(Icons.backup_outlined),
-                title: const Text('数据管理'),
-                subtitle: const Text('备份恢复 / 导出 Excel / 回收站'),
+                title: const Text('数据备份与恢复'),
+                subtitle: const Text('全系统 / 分区备份恢复 / 导出'),
                 onTap: () async {
                   Navigator.of(context).pop();
+                  if (widget.hub != null) {
+                    // 多域形态（真机）：跳概览「数据管理」签——唯一集散入口。
+                    // seed 自增换 key → OverviewPage 重建并定位第三签。
+                    setState(() {
+                      _overviewTabSeed++;
+                      _overviewInitialTab = 2;
+                    });
+                    if (_section != _TopSection.overview) {
+                      await _switchSection(_TopSection.overview);
+                    }
+                    return;
+                  }
+                  // 单域形态（单测注入）：无概览页，兜底 push 独立数据管理页。
                   await Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) => DataManagementPage(
-                        repository: _execRepo,
-                        domain: _domain,
-                        // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
-                        // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
-                        onRestored: _onBackupRestored,
-                        // V4.2.1（+34）：全系统备份（生活+工作一份文件）。
-                        // 只在多域模式提供；单测注入单仓储时不显示全系统区。
-                        fullSystem: widget.hub == null
-                            ? null
-                            : FullSystemBackup(
-                                repositories: _storageRepositories()),
+                      builder: (_) => Scaffold(
+                        appBar: AppBar(title: const Text('数据管理')),
+                        body: DataManagementView(
+                          lifeRepository: _execRepo,
+                          // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
+                          // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
+                          onRestored: _onBackupRestored,
+                        ),
                       ),
                     ),
                   );
-                  // V4.2.2（+35）兜底刷新：页签内回收站恢复/彻底删除/
-                  // 全部清空都改了库；恢复本身有 onRestored 即时回调，
-                  // 返回后再刷一次是幂等兜底（V4.1.7 同款链路）。
+                  // 返回后兜底刷新（V4.1.7 同款链路，幂等）。
                   await _onBackupRestored();
                 },
               ),
@@ -2317,6 +2323,9 @@ class _HomePageState extends State<HomePage> {
           onSelectionChanged: (selection) {
             final next = selection.first;
             if (next == _section) return;
+            // V4.2.3：顶栏回概览 = 默认日报签（抽屉跳数据管理签不受影响——
+            // 它自设 _overviewInitialTab=2）。
+            if (next == _TopSection.overview) _overviewInitialTab = 0;
             _switchSection(next);
           },
         ),
@@ -2400,6 +2409,11 @@ class _HomePageState extends State<HomePage> {
           onOpenDomain: _openDomainSection,
           // V4.1 批次 2：日报入口（修孤儿页）。
           onOpenReport: widget.reportService == null ? null : _openReport,
+          // V4.2.3（+36 终审边界）：「数据管理」第三签（组合根注入，
+          // 概览不持仓储；seed 换 key 重建以响应抽屉跳签）。
+          key: ValueKey('overview_$_overviewTabSeed'),
+          initialTab: _overviewInitialTab,
+          dataManagementTab: _buildDataManagementTab(),
         );
       }
       // V4.2.0 三域骨架：**零模块域**（知识系统）——不进模块分派，
@@ -2421,6 +2435,36 @@ class _HomePageState extends State<HomePage> {
     // 单域形态：与 V3.13 完全一致（主体恒为仓储页）。
     return _storageBody();
   }
+
+  /// V4.2.3（+36 终审边界）：概览「数据管理」签内容。
+  ///
+  /// 组合根构建注入——概览只收 Widget 不持仓储（写边界铁律）：
+  /// 生活/工作仓储、全系统备份服务都在这里取，写操作走各区块
+  /// 既有链路（BackupActions / FullSystemBackupPanel / 导出套件）。
+  Widget _buildDataManagementTab() {
+    final hub = widget.hub;
+    if (hub != null) {
+      return DataManagementView(
+        lifeRepository: hub.life.repository,
+        workRepository: hub.work.repository,
+        onRestored: _onBackupRestored,
+        // 只收开放仓储能力的域（先能力过滤再碰 repository，壳实例教训沿用）。
+        fullSystem:
+            FullSystemBackup(repositories: _storageRepositories()),
+      );
+    }
+    // 单域形态（单测注入）：只有生活区，无全系统区。
+    return DataManagementView(
+      lifeRepository: widget.repository,
+      onRestored: _onBackupRestored,
+    );
+  }
+
+  /// V4.2.3（+36 终审边界）：概览「数据管理」签的跳签状态。
+  /// seed 自增换 key 强制重建 OverviewPage 以跳到数据管理签；
+  /// initialTab 供重建时定位（0=日报 1=日程 2=数据管理）。
+  int _overviewTabSeed = 0;
+  int _overviewInitialTab = 0;
 
   /// V4.1：各域的待办状态写入口（只写 `todo_states`，不碰账）。
   ///

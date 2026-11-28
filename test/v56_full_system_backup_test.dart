@@ -122,9 +122,12 @@ void main() {
     expect(backup['kind'], 'full_system');
     expect(backup['formatVersion'], 1);
     final domains = backup['domains']! as Map<String, Object?>;
-    expect(domains.keys.toSet(), <String>{'life', 'work'});
+    // V4.2.3（+36 终审）：三域 JSON——knowledge 空壳分区恒在（建库前）。
+    expect(domains.keys.toSet(), <String>{'life', 'work', 'knowledge'});
     expect((domains['life']! as Map<String, Object?>)['domain'], 'life');
     expect((domains['work']! as Map<String, Object?>)['domain'], 'work');
+    expect((domains['knowledge']! as Map<String, Object?>)['domain'],
+        'knowledge');
     final roundTrip = jsonDecode(jsonEncode(backup)) as Map<String, dynamic>;
 
     // ── 恢复到两个全新库 ──
@@ -249,8 +252,8 @@ void main() {
     await expectLater(
       service.restoreAll(unknown),
       throwsA(predicate((e) =>
-          e is ArgumentError && '${e.message}'.contains('不支持的分区'))),
-      reason: '骨架版没有 knowledge 库，出现即视为非法文件',
+          e is ArgumentError && '${e.message}'.contains('还不能恢复'))),
+      reason: '知识分区带数据=知识库版产物，当前版拒收不炸（指路升级）',
     );
 
     // ② 条目与位置不匹配（key=life 放 work 的账）。

@@ -10,7 +10,7 @@ library;
 
 /// 应用内的域。
 enum InventoryDomain {
-  /// 生活域：家庭仓储（沿用既有库文件 `home_inventory.db`，用户数据天然保留）。
+  /// 生活域：主库存（沿用既有库文件 `home_inventory.db`，用户数据天然保留）。
   life(
     id: 'life',
     label: '生活区',
@@ -39,7 +39,7 @@ enum InventoryDomain {
   /// UI 文案：顶栏分段控件、抽屉副标题用。
   final String label;
 
-  /// 备份/导出文件名里的域标识（如 `家庭仓储-生活-20261126.json`）。
+  /// 备份/导出文件名里的域标识（如 `小本本-生活-20261126.json`）。
   final String storageLabel;
 
   /// 该域对应的数据库文件名。

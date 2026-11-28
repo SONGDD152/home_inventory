@@ -14,7 +14,7 @@ import 'reminder.dart';
 import 'reminder_repository.dart';
 import 'todo_state.dart';
 
-/// 家庭仓储数据访问层（三张表：物品 / 位置 / 关联）。
+/// 小本本数据访问层（三张表：物品 / 位置 / 关联）。
 ///
 /// 关系模型：
 ///  * 一件物品可以放在多个位置；一个位置可以放多件物品（多对多）；
@@ -765,7 +765,7 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
   /// 旧版本存的是原始输入（如「梯子 」「ＬＡＤＤＥＲ」），v4 起写入/查询都走
   /// [normalizeName]。若不清洗，历史记录用新逻辑查不到、会被重复插入。
   ///
-  /// 单人家庭仓储数据量小，采用"读出有效数据 → 归一化 → 重建"：归一化后同名
+  /// 单人库存数据量小，采用"读出有效数据 → 归一化 → 重建"：归一化后同名
   /// 自动合并、重复关联由 [_link] 幂等消除。全过程在 sqflite 升级事务内完成，
   /// 任一步失败整体回滚。软删除记录与时间戳不迁移（V1 无删除入口）。
   Future<void> _normalizeLegacyNames(DatabaseExecutor db) async {

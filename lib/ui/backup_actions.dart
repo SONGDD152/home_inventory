@@ -66,7 +66,7 @@ class _BackupActionsState extends State<BackupActions> {
   /// 文件名必须能分清是哪本账）。
   String _backupFileName(DateTime now) {
     String two(int v) => v.toString().padLeft(2, '0');
-    return '家庭仓储-${widget.domain.storageLabel}-'
+    return '小本本-${widget.domain.storageLabel}-'
         '${now.year}${two(now.month)}${two(now.day)}_'
         '${two(now.hour)}${two(now.minute)}${two(now.second)}.json';
   }

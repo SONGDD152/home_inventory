@@ -414,7 +414,7 @@ void main() {
     expect(text, contains('word/document.xml'));
     expect(text, contains('[Content_Types].xml'));
     // 正文中文（UTF-8 字节序列）能在包里检索到。
-    expect(text, contains('家庭仓储日报'));
+    expect(text, contains('小本本日报'));
   });
 
   test('V4.0 提醒：增删改与完成状态流转', () async {

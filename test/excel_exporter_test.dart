@@ -255,7 +255,7 @@ void main() {
       String two(int v) => v.toString().padLeft(2, '0');
       expect(
         exporter.fileNameFor(now),
-        '家庭仓储物品明细_${now.year}${two(now.month)}${two(now.day)}.xlsx',
+        '小本本物品明细_${now.year}${two(now.month)}${two(now.day)}.xlsx',
       );
     });
   });

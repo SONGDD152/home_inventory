@@ -94,7 +94,7 @@ class DocxWriter {
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <dc:title>${_escapeXml(title ?? '日报')}</dc:title>
-  <dc:creator>家庭仓储</dc:creator>
+  <dc:creator>小本本</dc:creator>
 </cp:coreProperties>
 ''';
 

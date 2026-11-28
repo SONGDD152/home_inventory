@@ -73,7 +73,7 @@ class ExcelExporter {
   }
 
   /// 生成文件并落盘，返回绝对路径。
-  /// 文件名：家庭仓储物品明细_YYYYMMDD.xlsx（当日日期）。
+  /// 文件名：小本本物品明细_YYYYMMDD.xlsx（当日日期）。
   /// 落盘走 [fileWriter]（注入）或 [defaultWrite]（生产）。
   Future<String> writeExcelFile(
     List<ItemWithLocations> activeRows,
@@ -90,7 +90,7 @@ class ExcelExporter {
 
   /// 当日导出文件名（V3.6 原始格式，保持不变）。
   String fileNameFor(DateTime now) {
-    return '家庭仓储物品明细_'
+    return '小本本物品明细_'
         '${now.year}${_two(now.month)}${_two(now.day)}.xlsx';
   }
 
@@ -100,7 +100,7 @@ class ExcelExporter {
   /// （「生活」还是「工作」），否则两个 JSON/xlsx 混在一起没法认。
   String fileNameForDomain(DateTime now, [InventoryDomain? domain]) {
     final target = domain ?? this.domain;
-    return '家庭仓储物品明细-${target.storageLabel}-'
+    return '小本本物品明细-${target.storageLabel}-'
         '${now.year}${_two(now.month)}${_two(now.day)}.xlsx';
   }
 

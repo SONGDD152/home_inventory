@@ -121,7 +121,7 @@ class DailyReportService {
   Future<String> buildContent(DateTime date) async {
     final key = formatDate(date);
     final buffer = StringBuffer();
-    buffer.writeln('# 家庭仓储日报 · $key');
+    buffer.writeln('# 小本本日报 · $key');
     buffer.writeln();
 
     // ① 催办四区——与概览日报签同源（共用 _loadAllItems，不另开查询）。
@@ -429,7 +429,7 @@ class DailyReportService {
     }
 
     return DocxWriter.buildLines(
-      title: '家庭仓储日报 · $key',
+      title: '小本本日报 · $key',
       lines: lines,
     );
   }

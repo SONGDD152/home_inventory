@@ -183,7 +183,7 @@ void main() {
     final agenda = File('lib/domain/todo_agenda.dart').readAsStringSync();
 
     expect(pubspec, contains('lunar:'), reason: '月历阴历依赖已引入');
-    expect(pubspec, contains('4.1.5+30'), reason: '版号 +30（V4.1.5 复验补丁）');
+    expect(pubspec, contains('4.1.6+31'), reason: '版号 +31（V4.1.6 改名版）');
     expect(pubspec, contains('uses-material-design: true'),
         reason: '图标字体必须打包（V4.1.5 根因修复）');
     expect(sched, contains('tristate: true'), reason: '三态勾选');

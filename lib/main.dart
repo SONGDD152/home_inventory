@@ -95,7 +95,7 @@ class HomeInventoryApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '家庭仓储布局',
+      title: '小本本',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.green),
       // V4.1 批次 2：日报服务往下传到 HomePage → 概览日报签的「日报」入口
       // 才能打开日报页（此前 DailyReportPage 是孤儿页，全仓无引用）。

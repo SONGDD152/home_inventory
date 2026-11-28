@@ -999,6 +999,30 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - **改名 +31 → 纯序号 +32 → 全系统备份 +33 → 数据管理页签 +34**。D3 由本链隐式定为乙案：改名独立占 +31（versionName 待定，建议 4.1.6 归改名版或另议——开工前 PM 一句话确认）。
 - **待确认**：V4.2 知识库顺延位置（页签占 +34 后建议 +35，PM 一句话定）；改名 D1（namespace 不动）/ D2（文案与导出文件名前缀）/ D4（迁移演练）三项仍未拍。
 
+### V4.1.6 改名版留档（2026-11-28）· versionCode 30 → 31
+
+> **触发**：PM 拍板五项（D1/D2/D4 全认默认 + 版号全链 +31~+35 排定）。
+> **已出包、已上线**；测试 **655/655 全绿**（650 旧 + v53 五条改名锁）；analyze 0/0（5 条既有 info）。
+
+### 落地逐条（D1/D2/D4 按拍板）
+
+| 项 | 内容 |
+|---|---|
+| D1 | `namespace`/MainActivity **不动**；仅 `build.gradle.kts:34` applicationId → `com.danfeng.xiaobenben` |
+| D2 | lib/「家庭仓储」文案**清零**（grep 证实），应用标题/导出文件名（日报 md/docx、备份 json、Excel、docx creator、md 标题）全改「小本本」；pubspec name 不动；数据库文件名不动 |
+| D2 配套 | `AndroidManifest.xml:3` label `home_inventory` → `小本本`（桌面名） |
+| D4 | 真机迁移演练步骤+核对清单随简报给出；**演练=PM 真机执行**（AI 无真机不代签），演练通过才卸旧包、改名版才算验收 |
+
+### aapt2 实测
+
+`package: name='com.danfeng.xiaobenben' versionCode='31' versionName='4.1.6'` · `application-label:'小本本'` · 55,426,345 字节 · sha256 `303ca8591731af8c9b749d1adb646168ea0d75806079402050f56fd0125f8ddc` · 签名 c1647f33… 不变（**换包名 → 新包与旧包并存，不覆盖安装，数据走备份迁移**）。
+
+### 测试与发布
+
+- 新增 `test/v53_rename_test.dart` 五条源码级锁（applicationId/namespace 不动/label/文案清零/版号/标题与文件名前缀）；旧测试改断言 2 处（excel_exporter_test:258、v40:417），一条未删；v51 版号断言同步 4.1.6+31。
+- 下载页：标题/二维码文案换「小本本」、新增**改名迁移五步**区块（第 1-5 步含核对清单与"过了才卸旧包"）；V4.1.5 入历史索引（备份 index-v415-backup.html）；二维码 516×516 解码校验；线上 curl 全核验（页面 200 含包名/五步，APK 直链 200、线上 sha 与本地逐字一致，不带 sharecode 403）。
+
 ### 下一版
 
-- **改名**（「小本本」+ `com.danfeng.xiaobenben`）：方案已出，等 D1/D2/D4 + versionName 确认；拍后开工，先真机迁移演练。
+- **纯序号 +32（4.1.7）**：v53（测试）必加「仓储动态/账目快照两段存在且非空」断言；改名版真机演练关账后开工。
+- 全系统备份 +33（4.1.8）→ 数据管理页签 +34（4.1.9）→ 知识库 +35（4.2.0）。

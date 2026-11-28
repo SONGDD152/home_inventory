@@ -27,7 +27,7 @@ import 'loan_list_page.dart';
 import 'overview_page.dart';
 import 'reminder_edit_dialog.dart';
 
-/// 家庭仓储 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
+/// 小本本 APP 界面（V3 交互说明）：单页，键盘语音 + 单句式输入框。
 ///
 /// 语音能力完全交由系统输入法：点输入框唤起键盘、用户点键盘话筒转文字，
 /// App 只承接"语音转文字后的"文本，做语义解析与仓储管理。不自建识别引擎、
@@ -44,7 +44,7 @@ class HomePage extends StatefulWidget {
   const HomePage({
     super.key,
     required this.repository,
-    this.title = '家庭仓储布局',
+    this.title = '小本本',
     this.hub,
     this.reportService,
   });
@@ -2034,7 +2034,7 @@ class _HomePageState extends State<HomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   const Text(
-                    '家庭仓储布局',
+                    '小本本',
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 4),

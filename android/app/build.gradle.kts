@@ -31,7 +31,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.songdd.homeinventory.home_inventory"
+        applicationId = "com.danfeng.xiaobenben"
         // minSdk 24：与已发版包（sdkVersion:'24'）对齐。
         minSdk = 24
         targetSdk = 36

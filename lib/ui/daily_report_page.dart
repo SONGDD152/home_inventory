@@ -96,7 +96,7 @@ class _DailyReportPageState extends State<DailyReportPage> {
     try {
       final bytes = await widget.service.buildMarkdown(_date);
       final name =
-          '家庭仓储日报-${DailyReportService.formatDate(_date)}.md';
+          '小本本日报-${DailyReportService.formatDate(_date)}.md';
       final saved = await _gateway.saveBytesToDevice(name, bytes);
       if (!mounted) return;
       if (saved != null) {
@@ -119,7 +119,7 @@ class _DailyReportPageState extends State<DailyReportPage> {
     try {
       final bytes = await widget.service.buildDocx(_date);
       final name =
-          '家庭仓储日报-${DailyReportService.formatDate(_date)}.docx';
+          '小本本日报-${DailyReportService.formatDate(_date)}.docx';
       final saved = await _gateway.saveBytesToDevice(name, bytes);
       if (!mounted) return;
       if (saved != null) {

@@ -1,5 +1,6 @@
 // ignore_for_file: deprecated_member_use
 // Flutter 3.50 将 material.dart 标记为 deprecated，Material 组件本版本仍可用。
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -10,6 +11,8 @@ import '../data/excel_export_kit.dart';
 import '../data/excel_exporter.dart';
 import '../data/inventory_repository.dart';
 import '../data/item_docx_exporter.dart';
+import '../data/knowledge_database.dart';
+import '../domain/backup_archiver.dart';
 import '../domain/full_system_backup.dart';
 import 'backup_page.dart';
 import 'full_system_backup_panel.dart';
@@ -28,6 +31,8 @@ import 'full_system_backup_panel.dart';
 /// - 生活/工作区 = 分区备份/恢复 + Excel 导出 + Word 文档导出；
 /// - 知识区 = 备份/恢复**通道**（+35 不建库不接 Writer，按钮置灰提示，
 ///   知识库功能版建库后启用）；
+///   V4.3.1（+38 补丁二）：组合根注入 knowledgeStore 后按钮解锁，
+///   走知识库自己的导出/恢复接口；未注入时保持置灰提示（单测形态）；
 /// - 日报导出**不归本签**（日报走自己的导出按钮）。
 ///
 /// 写边界：本视图由组合根构建并注入概览页（概览只收 Widget 不持仓储），
@@ -43,6 +48,7 @@ class DataManagementView extends StatefulWidget {
     this.fullSystem,
     this.excelExporter,
     this.wordFileWriter,
+    this.knowledgeStore,
   });
 
   /// 生活区仓储（生活区备份/恢复/Excel/Word 的对象）。
@@ -66,6 +72,10 @@ class DataManagementView extends StatefulWidget {
 
   /// Word 落盘注入（长按分享用，与 excelExporter 同构）。
   final Future<String> Function(Uint8List bytes)? wordFileWriter;
+
+  /// V4.3.1（+38 补丁二）：知识库实例；null = 知识区按钮保持置灰
+  /// （未建库形态）。非空 = 知识备份/恢复接真库。
+  final KnowledgeDatabase? knowledgeStore;
 
   @override
   State<DataManagementView> createState() => _DataManagementViewState();
@@ -261,6 +271,66 @@ class _DataManagementViewState extends State<DataManagementView> {
     );
   }
 
+  // ---- 区④：知识区（V4.3.1 补丁二：建库后解锁） ----
+
+  /// 知识备份：导出 knowledge 库 JSON → 系统分享（与分区备份同 UX）。
+  Future<void> _shareKnowledgeBackup() async {
+    final store = widget.knowledgeStore;
+    if (store == null) return;
+    setState(() => _busy = true);
+    try {
+      final backup = await store.exportBackup();
+      final path =
+          await _gateway.writeBackupFile(jsonEncode(backup));
+      await _gateway.shareFile(path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('知识备份已生成：${path.split('/').last}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('导出失败：$e')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
+  /// 知识恢复：文件选择器挑 JSON → 强校验（归属/版本在 KnowledgeDatabase
+  /// 内部）→ 清空重灌 → SnackBar 报「N 学科 / M 条目」。
+  Future<void> _restoreKnowledge() async {
+    final store = widget.knowledgeStore;
+    if (store == null) return;
+    final path = await _gateway.pickBackupFile();
+    if (!mounted) return;
+    if (path == null) return; // 用户取消：静默。
+    setState(() => _busy = true);
+    try {
+      final content = await _gateway.readBackupFile(path);
+      final data = jsonDecode(content) as Map<String, Object?>;
+      await store.restoreBackup(data);
+      if (!mounted) return;
+      final summary = await store.countSummary();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('知识库已恢复：$summary')),
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message is String ? e.message : '恢复被拒绝')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('恢复失败：$e')),
+      );
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final fullSystem = widget.fullSystem;
@@ -286,6 +356,7 @@ class _DataManagementViewState extends State<DataManagementView> {
                     service: fullSystem,
                     gateway: widget.gateway,
                     onRestored: widget.onRestored,
+                    archiver: BackupArchiver(),
                   )
                 else
                   const Text(
@@ -313,7 +384,7 @@ class _DataManagementViewState extends State<DataManagementView> {
               child: _sectionHeader('工作区', note: '工作区未启用（单域模式）。'),
             ),
           const Divider(),
-          // ---- 区④：知识区（+35 通道，不建库不接 Writer）----
+          // ---- 区④：知识区（V4.3.1 补丁二：注入 knowledgeStore 即解锁）----
           Container(
             key: Key('data_section_knowledge'),
             padding: const EdgeInsets.only(bottom: 8),
@@ -321,14 +392,20 @@ class _DataManagementViewState extends State<DataManagementView> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 _sectionHeader('知识区',
-                    note: '知识库建库后，这里的备份/恢复自动生效；'
-                        '全系统备份文件已预留知识分区，不会丢数据。'),
+                    note: widget.knowledgeStore != null
+                        ? '知识库数据的备份/恢复；全系统备份文件也包含知识分区。'
+                        : '知识库建库后，这里的备份/恢复自动生效；'
+                            '全系统备份文件已预留知识分区，不会丢数据。'),
                 Row(
                   children: <Widget>[
                     Expanded(
                       child: OutlinedButton.icon(
-                        key: const Key('data_knowledge_backup_disabled'),
-                        onPressed: null,
+                        key: Key(widget.knowledgeStore != null
+                            ? 'data_knowledge_backup'
+                            : 'data_knowledge_backup_disabled'),
+                        onPressed: (widget.knowledgeStore != null && !_busy)
+                            ? _shareKnowledgeBackup
+                            : null,
                         icon: const Icon(Icons.ios_share),
                         label: const Text('知识备份'),
                       ),
@@ -336,22 +413,27 @@ class _DataManagementViewState extends State<DataManagementView> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: OutlinedButton.icon(
-                        key: const Key('data_knowledge_restore_disabled'),
-                        onPressed: null,
+                        key: Key(widget.knowledgeStore != null
+                            ? 'data_knowledge_restore'
+                            : 'data_knowledge_restore_disabled'),
+                        onPressed: (widget.knowledgeStore != null && !_busy)
+                            ? _restoreKnowledge
+                            : null,
                         icon: const Icon(Icons.restore),
                         label: const Text('知识恢复'),
                       ),
                     ),
                   ],
                 ),
-                const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Text(
-                    '知识库建库后开放（当前仅通道，未建库不接写入口）',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                if (widget.knowledgeStore == null)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text(
+                      '知识库建库后开放（当前仅通道，未建库不接写入口）',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
                   ),
-                ),
               ],
             ),
           ),

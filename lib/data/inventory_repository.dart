@@ -100,9 +100,11 @@ abstract class InventoryRepository {
       throw UnimplementedError('lendItem 需由真实仓储实现');
 
   /// 归还：[quantity] 为空 = 全部；给定值 = 部分归还（累加 + 标 is_partial）。
-  /// [toLocationId] 为归还落点（UI 弹窗问），未指定加到主位置。
+  /// [toLocationId] 为归还落点（UI 弹窗问），未指定优先回借出源位置，
+  /// 再回退主位置（V4.3.1 位置恢复口径）。
+  /// [returnedAt] 精确归还时间（UTC 毫秒，UI 弹窗默认当前可改），不传落当前。
   Future<void> returnLoan(int loanId,
-      {int? quantity, int? toLocationId}) async {}
+      {int? quantity, int? toLocationId, int? returnedAt}) async {}
 
   /// 单笔改借期（天数从借出时刻起算）。
   Future<void> updateLoanDue(int loanId, int days) async {}
@@ -110,6 +112,14 @@ abstract class InventoryRepository {
   /// 全部借出记录（未软删，含已还，借出时间倒序）。逾期由 UI 按 due_at 计算。
   /// V3.8：已软删（进回收站）的记录不在此返回。
   Future<List<Loan>> getAllLoans() async => const <Loan>[];
+
+  /// V4.3.1（+38 借出补丁）：某物品全部未还清的借出记录（未软删）。
+  ///
+  /// 位置查询合并借出状态的唯一数据源，与借出管理页同查 loans 一张表
+  /// （PM 红线：查询结果与借出管理页数据同源，不各查各的）。
+  /// 没有未还借出时返回空列表。
+  Future<List<Loan>> getActiveLoansForItem(String itemName) async =>
+      const <Loan>[];
 
   /// V3.8：回收站——已软删的借出记录（删除时间倒序）。
   Future<List<Loan>> getDeletedLoans() async => const <Loan>[];

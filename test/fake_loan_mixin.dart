@@ -17,7 +17,11 @@ mixin FakeLoanMixin {
       );
 
   Future<void> returnLoan(int loanId,
-      {int? quantity, int? toLocationId}) async {}
+      {int? quantity, int? toLocationId, int? returnedAt}) async {}
+
+  /// V4.3.1（+38 借出补丁）：查询合并借出状态的数据源桩，默认无未还借出。
+  Future<List<Loan>> getActiveLoansForItem(String itemName) async =>
+      const <Loan>[];
 
   Future<void> updateLoanDue(int loanId, int days) async {}
 

@@ -159,9 +159,10 @@ void main() {
 
   // ============ 一、schema 版本 ============
 
-  test('锁①-a：schema 版本恒为 13', () {
-    expect(InventoryDatabase.currentSchemaVersion, 13);
+  test('锁①-a：schema 版本恒为 14', () {
+    expect(InventoryDatabase.currentSchemaVersion, 14);
     // 版本号是硬编码在引擎里的，不是靠建表推出来的 → 写死断言。
+    // V4.3.1（+38）借出补丁：loans 加 from_location_id，v13→v14。
   });
 
   // ============ 二、九张表不多不少 ============
@@ -280,7 +281,7 @@ void main() {
     ]);
   });
 
-  test('锁①-h：loans 表逐列核对（13 列）', () async {
+  test('锁①-h：loans 表逐列核对（14 列）', () async {
     final db = newDb(name: 'life.db');
     await expectColumns(db, 'loans', <Col>[
       const Col('id', 'INTEGER'),
@@ -296,6 +297,8 @@ void main() {
       const Col('updated_at', 'INTEGER', notNull: true),
       const Col('is_deleted', 'INTEGER', notNull: true, dflt: 0),
       const Col('deleted_at', 'INTEGER'),
+      // V4.3.1（+38）借出补丁：借出时从哪个位置扣数落库，归还优先恢复。
+      const Col('from_location_id', 'INTEGER'),
     ]);
   });
 

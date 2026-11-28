@@ -952,7 +952,7 @@ class _FakeRepo with FakeLoanMixin implements InventoryRepository {
 
   @override
   Future<void> returnLoan(int loanId,
-      {int? quantity, int? toLocationId}) async {}
+      {int? quantity, int? toLocationId, int? returnedAt}) async {}
 
   @override
   Future<List<Loan>> getAllLoans() async => List<Loan>.unmodifiable(_loans);

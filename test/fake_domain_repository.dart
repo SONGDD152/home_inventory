@@ -170,6 +170,10 @@ class FakeDomainRepository
   @override
   Future<List<Loan>> getAllLoans() async => const <Loan>[];
 
+  @override
+  Future<List<Loan>> getActiveLoansForItem(String itemName) async =>
+      const <Loan>[];
+
   // ---------- 以下为 widget 测试用不到的最小实现 ----------
   // Dart 的 `implements` 不继承默认实现，必须逐个补齐（这里给最小行为）。
 
@@ -254,7 +258,8 @@ class FakeDomainRepository
       throw UnimplementedError('内存仓储不实现借出');
 
   @override
-  Future<void> returnLoan(int loanId, {int? quantity, int? toLocationId}) async {}
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId, int? returnedAt}) async {}
 
   @override
   Future<void> updateLoanDue(int loanId, int days) async {}

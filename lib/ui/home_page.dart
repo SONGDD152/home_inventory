@@ -105,6 +105,16 @@ class _HomePageState extends State<HomePage> {
   ItemWithLocations? _result;
   bool _busy = false;
 
+  /// V4.3.1（+38 借出补丁）：当前查询物品的未还清借出记录。
+  ///
+  /// 与 [InventoryRepository.getActiveLoansForItem] 同源（loans 一张表，
+  /// 与借出管理页不各查各的）。查询物品没有未还借出时为空列表，
+  /// 结果文案维持纯位置口径。
+  List<Loan> _queryLoans = const <Loan>[];
+
+  /// V4.3.1：查询物品的在库数（仅在有未还借出时拉取，文案分流用）。
+  QuantityInfo? _queryQty;
+
   /// V4.0：当前执行用的仓储。
   ///
   /// 默认 = 当前域的仓储；**语音跨域落库时临时指向目标域**，
@@ -358,12 +368,28 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  /// V4.3.1（+38 借出补丁）：位置查询合并借出状态。
+  ///
+  /// Bug 1（PM 真机）：指甲刀借给张三（在库 0 借出 1 未还），查「指甲刀在哪」
+  /// 旧实现只回「在：次卧床上（共1处）」——误导用户以为还能去次卧拿到。
+  /// 修正：查询时同一仓储取未还清借出（getActiveLoansForItem，与借出管理页
+  /// 同源 loans 一张表），按在库/在借口径分流文案：
+  ///  * 在库 0 且有未还 → 「已借给张三（借出日~到期日），当前在库 0，
+  ///    原存放：…」+ 标「借出中，不在库」，原位置仅作留底参考、不再列成可拿的位置；
+  ///  * 部分借出（借 2 还 1）→ 「在库 N 个（位置）· 借出未还 M 个（借给谁）」分开列；
+  ///  * 无未还借出 → 维持纯位置口径不变。
+  /// 语音与文本同一解析链路（_submitPhrase → ParseQuery → 本方法），天然同逻辑。
   Future<void> _handleQuery(String item) async {
     final found = await _execRepo.findByName(item);
+    final activeLoans = await _execRepo.getActiveLoansForItem(item);
+    // 在库数（文案分流用：在库 0 与部分借出口径不同）。
+    final qty = activeLoans.isEmpty ? null : await _execRepo.getQuantityInfo(item);
     if (!mounted) return;
     setState(() {
       _busy = false;
       _result = found;
+      _queryLoans = activeLoans;
+      _queryQty = qty;
       _notice = found == null ? _notFound(item) : null;
     });
   }
@@ -1888,10 +1914,35 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  /// 多位置文案（V3 文档：展示物品所在位置）。
-  String _multiLocationText(ItemWithLocations result) {
+  /// 查询结果文案。
+  ///
+  /// V4.3.1（+38 借出补丁）合并借出状态（Bug 1 修正）：
+  ///  * 无未还借出 → 纯位置口径（V3 文档原文，不变）。
+  ///  * 在库 0 且有未还 → 「已借给张三（借出日~到期日），当前在库 0，
+  ///    原存放：…」+ 标「借出中，不在库」——不报「共N处」，原位置仅留底。
+  ///  * 部分借出（借 2 还 1）→ 「在库 N 个（位置）· 借出未还 M 个（借给谁）」
+  ///    分开列。多条借出记录逐条列出借阅人。
+  String _queryResultText(ItemWithLocations result) {
+    final loans = _queryLoans;
     final names = result.locations.map((l) => l.name).join('、');
-    return '「${result.item.name}」在：$names（共${result.locations.length}处）。';
+    if (loans.isEmpty) {
+      return '「${result.item.name}」在：$names（共${result.locations.length}处）。';
+    }
+    final lentTotal =
+        loans.fold<int>(0, (sum, l) => sum + (l.quantity - l.returnedQty));
+    final stock = _queryQty?.stock ?? result.item.quantity;
+    if (stock <= 0) {
+      final who = loans
+          .map((l) => '已借给${l.borrowerName}'
+              '（${_loanDate(l.borrowedAt)}~${_loanDate(l.dueAt)}）')
+          .join('、');
+      return '$who，当前在库 0，原存放：$names。借出中，不在库。';
+    }
+    final who = loans
+        .map((l) => '借给${l.borrowerName} ${l.quantity - l.returnedQty} 个')
+        .join('、');
+    return '「${result.item.name}」在库 $stock 个（$names）'
+        '· 借出未还 $lentTotal 个（$who）。';
   }
 
   // ---------- 导航（V3.1 导航优化：抽屉为主动线，图标/文字为兜底） ----------
@@ -2461,14 +2512,22 @@ class _HomePageState extends State<HomePage> {
         workRepository: hub.work.repository,
         onRestored: _onBackupRestored,
         // 只收开放仓储能力的域（先能力过滤再碰 repository，壳实例教训沿用）。
-        fullSystem:
-            FullSystemBackup(repositories: _storageRepositories()),
+        // V4.3.1（+38 补丁二）：注入 knowledgeStore——+37 真机打回硬伤二的
+        // 根因就在这里：数据层的 knowledge 填实做了，组合根没接线，
+        // 全系统备份永远输出壳分区（「方法存在≠有人调用」V4.1.5 同款）。
+        knowledgeStore: widget.knowledgeStore,
+        fullSystem: FullSystemBackup(
+          repositories: _storageRepositories(),
+          knowledgeStore: widget.knowledgeStore,
+        ),
       );
     }
     // 单域形态（单测注入）：只有生活区，无全系统区。
+    // 知识区按钮随 knowledgeStore 注入状态解锁（+38 补丁二）。
     return DataManagementView(
       lifeRepository: widget.repository,
       onRestored: _onBackupRestored,
+      knowledgeStore: widget.knowledgeStore,
     );
   }
 
@@ -2757,15 +2816,18 @@ class _HomePageState extends State<HomePage> {
             ],
             if (_result != null) ...[
               const SizedBox(height: 8),
-              Text(_multiLocationText(_result!),
+              Text(_queryResultText(_result!),
                   key: const Key('result_line'),
                   style: const TextStyle(fontWeight: FontWeight.w600)),
-              for (final location in _result!.locations)
-                ListTile(
-                  key: Key('result_location_${location.id}'),
-                  leading: const Icon(Icons.place_outlined),
-                  title: Text(location.name),
-                ),
+              // V4.3.1（+38）：在库 0（全部借出未还）时不再把原位置列成
+              // 「可以拿到的地方」——原存放只写进文案留底；部分借出仍列在库位置。
+              if (!(_queryLoans.isNotEmpty && (_queryQty?.stock ?? 0) <= 0))
+                for (final location in _result!.locations)
+                  ListTile(
+                    key: Key('result_location_${location.id}'),
+                    leading: const Icon(Icons.place_outlined),
+                    title: Text(location.name),
+                  ),
             ],
             // V3.3 导航收敛：底部兜底「打开菜单」按钮已撤下（入口统一
             // 左上角三道杠），原位置保留一行静态引导文字——纯提示、

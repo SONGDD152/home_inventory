@@ -201,7 +201,8 @@ class InMemoryRepository with FakeLoanMixin implements InventoryRepository {
       List<Loan>.unmodifiable(_loans.reversed);
 
   @override
-  Future<void> returnLoan(int loanId, {int? quantity, int? toLocationId}) async {
+  Future<void> returnLoan(int loanId,
+      {int? quantity, int? toLocationId, int? returnedAt}) async {
     final idx = _loans.indexWhere((l) => l.id == loanId);
     if (idx < 0) return;
     final old = _loans[idx];

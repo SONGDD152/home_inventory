@@ -662,8 +662,9 @@ class _KnowledgePageState extends State<KnowledgePage>
                                 context: context,
                                 builder: (context) => AlertDialog(
                                   title: const Text('删除这条？'),
+                                  // V4.3.1：文案统一 PM 口径（+38 补丁一）。
                                   content: const Text(
-                                      '整棵子树进回收站，恢复前不进搜索与日报。'),
+                                      '删除后从知识树隐藏，数据保留在本地备份，不可在界面恢复。'),
                                   actions: <Widget>[
                                     TextButton(
                                       onPressed: () =>
@@ -1159,6 +1160,98 @@ class _TopicTile extends StatelessWidget {
   final Future<void> Function(int) onAddEntry;
   final bool creativeFixed;
 
+  /// V4.3.1（+38 补丁一）：删除主题。
+  ///
+  /// +37 真机打回硬伤一：主题行没有任何删除入口（deleteNode 接口做了，
+  /// 界面没画——「方法存在≠接线存在」复发）。现在主题行右侧加 ⋮，
+  /// 菜单含「删除主题」：
+  ///  * 有子条目 → 拦住并提示「先清空或转移子条目」，不删；
+  ///  * 空主题 → 二次确认（PM 口径文案）→ 软删进回收站（数据留底，
+  ///    不物理删，红线照旧）。
+  Future<void> _confirmDeleteTopic(BuildContext context) async {
+    final title = node['title'] as String? ?? '';
+    if (creativeFixed) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('创作表达下的四个主题是系统预置，不可删')));
+      return;
+    }
+    final entries =
+        await store.childrenOf(node['id'] as int);
+    if (!context.mounted) return;
+    if (entries.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('先清空或转移子条目，再删主题')));
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('knowledge_delete_confirm_dialog'),
+        title: Text('删除主题「$title」？'),
+        content: const Text('删除后从知识树隐藏，数据保留在本地备份，不可在界面恢复。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('knowledge_delete_confirm_ok'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await store.deleteNode(node['id'] as int);
+      await onChanged();
+    } catch (e) {
+      final msg = e is ArgumentError ? '${e.message}' : '$e';
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg)));
+      }
+    }
+  }
+
+  /// V4.3.1（+38 补丁一）：删除条目（树内长按入口）。
+  /// 条目无子节点，直接二次确认后软删。
+  Future<void> _confirmDeleteEntry(
+      BuildContext context, Map<String, Object?> entry) async {
+    final title = entry['title'] as String? ?? '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('knowledge_delete_confirm_dialog'),
+        title: Text('删除条目「$title」？'),
+        content: const Text('删除后从知识树隐藏，数据保留在本地备份，不可在界面恢复。'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('knowledge_delete_confirm_ok'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await store.deleteNode(entry['id'] as int);
+      await onChanged();
+    } catch (e) {
+      final msg = e is ArgumentError ? '${e.message}' : '$e';
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(msg)));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = node['title'] as String? ?? '';
@@ -1168,7 +1261,24 @@ class _TopicTile extends StatelessWidget {
         final entries = snap.data ?? const <Map<String, Object?>>[];
         return ExpansionTile(
           key: Key('knowledge_topic_${node['id']}'),
-          title: Text('$title（${entries.length} 条）'),
+          title: Row(
+            children: <Widget>[
+              Expanded(child: Text('$title（${entries.length} 条）')),
+              // V4.3.1（+38 补丁一）：主题行右侧 ⋮ → 删除主题（+37 硬伤一返工）。
+              PopupMenuButton<String>(
+                key: Key('knowledge_topic_menu_${node['id']}'),
+                onSelected: (action) async {
+                  if (action == 'delete') {
+                    await _confirmDeleteTopic(context);
+                  }
+                },
+                itemBuilder: (context) => const <PopupMenuEntry<String>>[
+                  PopupMenuItem<String>(
+                      value: 'delete', child: Text('删除主题')),
+                ],
+              ),
+            ],
+          ),
           children: <Widget>[
             if (entries.isEmpty)
               Padding(
@@ -1192,6 +1302,8 @@ class _TopicTile extends StatelessWidget {
                     style: const TextStyle(fontSize: 14),
                   ),
                   onTap: () => onOpenEntry(entry['id'] as int),
+                  // V4.3.1（+38 补丁一）：长按条目 → 删除（+37 硬伤一返工）。
+                  onLongPress: () => _confirmDeleteEntry(context, entry),
                 ),
             if (!creativeFixed)
               Padding(

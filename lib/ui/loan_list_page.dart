@@ -309,14 +309,17 @@ class _LoanListPageState extends State<LoanListPage> {
                   if (loan.returnedQty < loan.quantity)
                     TextButton(
                       key: Key('loan_partial_${loan.id ?? loan.itemName}'),
-                      onPressed: _busy ? null : () => _returnLoan(loan, partial: true),
+                      onPressed: _busy ? null : () => _returnOne(loan),
                       child: const Text('还1个'),
                     ),
                   const SizedBox(width: 8),
+                  // V4.3.1（+38 Bug 2 修正）：「全部归还」→「标记全部归还」，
+                  // 点了先二次确认（弹窗内归还时间默认当前、可改），
+                  // 不再一键静默改账。
                   FilledButton(
                     key: Key('loan_return_${loan.id ?? loan.itemName}'),
-                    onPressed: _busy ? null : () => _returnLoan(loan),
-                    child: const Text('全部归还'),
+                    onPressed: _busy ? null : () => _markAllReturned(loan),
+                    child: const Text('标记全部归还'),
                   ),
                 ],
               ),
@@ -577,12 +580,140 @@ class _LoanListPageState extends State<LoanListPage> {
     setState(() => _busy = false);
   }
 
-  Future<void> _returnLoan(Loan loan, {bool partial = false}) async {
+  /// 还 1 个（部分归还）：显式小操作，按钮本身就是确认，直接落库。
+  /// 在库 +1，不碰其他借出记录（V4.3.1 口径不变）。
+  Future<void> _returnOne(Loan loan) async {
     setState(() => _busy = true);
-    await widget.repository.returnLoan(loan.id!, quantity: partial ? 1 : null);
+    await widget.repository.returnLoan(loan.id!, quantity: 1);
     if (!mounted) return;
     await _reload();
     setState(() => _busy = false);
+  }
+
+  /// V4.3.1（+38 Bug 2 修正）：「标记全部归还」全流程。
+  ///
+  /// 旧实现一键静默标「已归还」：无二次确认、无归还日期、位置无轨迹——
+  /// 与查询 Bug 叠加后「系统说还了但其实没还，东西丢了都不知道」。
+  /// 现在三步走：
+  ///  1. 二次确认弹窗（物品名 + 数量 + 不可撤销警示）；
+  ///  2. 弹窗内归还时间默认当前、可改（精确到分，可只改日期）；
+  ///  3. 确认后落库：精确归还时间写进 returned_at（备份可回溯
+  ///     「谁、啥时候、还了几个」），位置由数据层自动恢复到借出前原位置。
+  /// 不物理删借出记录，归还走状态更新（红线）。
+  Future<void> _markAllReturned(Loan loan) async {
+    final remaining = loan.quantity - loan.returnedQty;
+    final timeController =
+        TextEditingController(text: _formatDateTime(DateTime.now()));
+    final formKey = GlobalKey<FormState>();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        key: const Key('loan_return_confirm_dialog'),
+        title: const Text('标记全部归还？'),
+        content: Form(
+          key: formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                '确认将 ${loan.itemName}（$remaining个）标记为已归还？'
+                '此操作不可撤销。',
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                key: const Key('loan_return_time_field'),
+                controller: timeController,
+                decoration: const InputDecoration(
+                  labelText: '归还时间（默认现在，可改）',
+                  helperText: '格式：2026-11-28 21:30，或只写日期 2026-11-28',
+                ),
+                validator: (v) => _parseReturnTime(v ?? '') == null
+                    ? '时间格式不对，按提示改一下（不改就还原成默认）'
+                    : null,
+              ),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('loan_return_cancel'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('loan_return_confirm_ok'),
+            onPressed: () {
+              if (formKey.currentState!.validate()) {
+                Navigator.of(context).pop(true);
+              }
+            },
+            child: const Text('标记归还'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final returnedAt = _parseReturnTime(timeController.text) ??
+        DateTime.now().toUtc().millisecondsSinceEpoch;
+    setState(() => _busy = true);
+    await widget.repository.returnLoan(loan.id!, returnedAt: returnedAt);
+    if (!mounted) return;
+    await _reload();
+    setState(() => _busy = false);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '已标记归还：${loan.itemName}（$remaining个）'
+          '· 归还时间 ${_formatDateTime(DateTime.fromMillisecondsSinceEpoch(returnedAt))}'
+          ' · 位置已恢复',
+        ),
+      ),
+    );
+  }
+
+  /// 归还时间解析：支持「2026-11-28 21:30」与只写日期「2026-11-28」
+  /// （只写日期时保留当前时刻，方便只改天数）。解析失败回 null（表单拦住）。
+  int? _parseReturnTime(String input) {
+    final text = input.trim();
+    bool inRange(int v, int lo, int hi) => v >= lo && v <= hi;
+    final full = RegExp(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2}) (\d{1,2}):(\d{2})$')
+        .firstMatch(text);
+    if (full != null) {
+      final y = int.parse(full.group(1)!);
+      final mo = int.parse(full.group(2)!);
+      final d = int.parse(full.group(3)!);
+      final h = int.parse(full.group(4)!);
+      final mi = int.parse(full.group(5)!);
+      // DateTime 构造对超界值是滚动不是抛错（2026-13-45 会滚进 2027），
+      // 先做范围闸，不合法就明说格式不对。
+      if (!inRange(mo, 1, 12) || !inRange(d, 1, 31) ||
+          !inRange(h, 0, 23) || !inRange(mi, 0, 59)) {
+        return null;
+      }
+      return DateTime(y, mo, d, h, mi).toUtc().millisecondsSinceEpoch;
+    }
+    final dateOnly =
+        RegExp(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$').firstMatch(text);
+    if (dateOnly != null) {
+      final y = int.parse(dateOnly.group(1)!);
+      final mo = int.parse(dateOnly.group(2)!);
+      final d = int.parse(dateOnly.group(3)!);
+      if (!inRange(mo, 1, 12) || !inRange(d, 1, 31)) {
+        return null;
+      }
+      final now = DateTime.now();
+      return DateTime(y, mo, d, now.hour, now.minute)
+          .toUtc()
+          .millisecondsSinceEpoch;
+    }
+    return null;
+  }
+
+  String _formatDateTime(DateTime t) {
+    String pad(int n) => n.toString().padLeft(2, '0');
+    return '${t.year}-${pad(t.month)}-${pad(t.day)} ${pad(t.hour)}:${pad(t.minute)}';
   }
 
   Future<void> _confirmSoftDeleteBorrower(String name) async {

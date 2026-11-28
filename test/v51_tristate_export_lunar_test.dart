@@ -14,6 +14,17 @@ import 'package:home_inventory/domain/todo_state_writer.dart';
 
 import 'fake_domain_repository.dart';
 
+/// 测试基准日：**真实当天零点**。
+///
+/// 为什么不能用固定日期（2026-11-28 跨午夜教训）：完成区判定
+/// `dateOnly(done_at) == today`，而 fake 仓储的 done_at 落真实
+/// `DateTime.now()`——固定日期一过午夜，done 永远进不了「当日」区，
+/// 测试从次日起持续假失败。取真实当天即与产品口径同基准。
+DateTime _today() {
+  final n = DateTime.now();
+  return DateTime(n.year, n.month, n.day);
+}
+
 /// V4.1.4 专项：三态勾选 + 日报导出四区 + 月历阴历节日。
 /// 纯 Dart + fake 仓储，不碰 ffi（避免 sqflite isolate 与测试卡死）。
 void main() {
@@ -98,7 +109,7 @@ void main() {
       () async {
     final life = FakeDomainRepository();
     final work = FakeDomainRepository();
-    final today = DateTime(2026, 11, 28);
+    final today = _today();
     final tomorrow = today.add(const Duration(days: 1));
     final dayAfter = today.add(const Duration(days: 2));
 
@@ -132,7 +143,7 @@ void main() {
   test('V4.1.4③：明日前瞻不套提前量——高优先级后天到期不进明天区', () async {
     final life = FakeDomainRepository();
     final work = FakeDomainRepository();
-    final today = DateTime(2026, 11, 28);
+    final today = _today();
     final dayAfter = today.add(const Duration(days: 2));
 
     // 高优先级后天到期：若套 isInAgenda(明天) 的提前 3 天会被误纳入。
@@ -148,7 +159,7 @@ void main() {
   test('V4.1.4③：导出文本四段顺序 + 明日待办标题 + 不显完成进未完成段', () async {
     final life = FakeDomainRepository();
     final work = FakeDomainRepository();
-    final today = DateTime(2026, 11, 28);
+    final today = _today();
 
     await life.addReminder('甲待办', dueAt: today);
     await life.addReminder('乙在做', dueAt: today);
@@ -183,7 +194,7 @@ void main() {
     final agenda = File('lib/domain/todo_agenda.dart').readAsStringSync();
 
     expect(pubspec, contains('lunar:'), reason: '月历阴历依赖已引入');
-    expect(pubspec, contains('4.3.0+37'), reason: '版号 +37（V4.3.0 知识库功能版）');
+    expect(pubspec, contains('4.3.1+38'), reason: '版号 +38（V4.3.1 返工+借出补丁版）');
     expect(pubspec, contains('uses-material-design: true'),
         reason: '图标字体必须打包（V4.1.5 根因修复）');
     expect(sched, contains('tristate: true'), reason: '三态勾选');
@@ -202,7 +213,7 @@ void main() {
       () async {
     final life = FakeDomainRepository();
     final work = FakeDomainRepository();
-    final today = DateTime(2026, 11, 28);
+    final today = _today();
     final tomorrow = today.add(const Duration(days: 1));
     final dayAfter = today.add(const Duration(days: 2));
 

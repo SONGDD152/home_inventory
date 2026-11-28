@@ -2,6 +2,7 @@ import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
 import '../data/knowledge_database.dart';
+import 'backup_integrity.dart';
 
 /// V4.2.1（+34）：**全系统备份**——生活区 + 工作区两本账打包成**一份 JSON**。
 ///
@@ -85,16 +86,22 @@ class FullSystemBackup {
   ///
   /// 纯读取不改库；任何一域导出失败即整体失败（不让用户拿到半份备份）。
   /// +37 建库版：knowledge 分区导出六表真数据；未注入 store 时仍输出壳分区。
+  /// V4.3.1（+38 P0-2）：每个分区导出后先过**完整性校验**（关键字段非空 +
+  /// 外键指向存在），不通过整体抛错——坏数据绝不进备份文件。
   Future<Map<String, Object?>> exportAll() async {
     final entries = <String, Object?>{};
     for (final domain in partitionDomains) {
       final repo = _repositories[domain];
       if (repo != null &&
           domainSupports(domain, DomainCapability.storage)) {
-        entries[domain.id] = await repo.exportBackup();
+        final body = await repo.exportBackup();
+        BackupIntegrity.ensureValid(body, knowledge: false);
+        entries[domain.id] = body;
       } else if (domain == InventoryDomain.knowledge &&
           _knowledgeStore != null) {
-        entries[domain.id] = await _knowledgeStore.exportBackup();
+        final body = await _knowledgeStore.exportBackup();
+        BackupIntegrity.ensureValid(body, knowledge: true);
+        entries[domain.id] = body;
       } else {
         entries[domain.id] = _knowledgeShellPartition();
       }
@@ -181,7 +188,8 @@ class FullSystemBackup {
       }
       final schemaVersion = (bodyMap['schemaVersion'] as num?)?.toInt();
       // 版本上限**按域独立**：knowledge.db 分域版本号（+37 起 v14），
-      // 仓储两库 v13——分域版本号各自演进（台账 2026-11-28 留档）。
+      // 仓储两库 v14（+38 借出补丁起，v13→v14 加 loans.from_location_id）
+      // ——分域版本号各自演进（台账留档）。
       final maxVersion = domain == InventoryDomain.knowledge
           ? KnowledgeDatabase.version
           : InventoryDatabase.currentSchemaVersion;

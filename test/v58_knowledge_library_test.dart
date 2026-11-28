@@ -19,14 +19,14 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   sqfliteFfiInit();
 
-  int _tmpSeq = 0;
+  int tmpSeq = 0;
 
   /// 临时文件库（不用 :memory:——内存库 close 即销毁，
   /// 测「重开不复活种子」必须真落盘再重开）。
   Future<KnowledgeDatabase> newStore() async {
     final dir = await Directory.systemTemp.createTemp('v58_knowledge');
     final path =
-        '${dir.path}/knowledge_${_tmpSeq++}_${DateTime.now().microsecondsSinceEpoch}.db';
+        '${dir.path}/knowledge_${tmpSeq++}_${DateTime.now().microsecondsSinceEpoch}.db';
     return KnowledgeDatabase(
       injectedFactory: databaseFactoryFfi,
       injectedPath: path,
@@ -36,7 +36,7 @@ void main() {
   Future<InventoryDatabase> newInventory(InventoryDomain domain) async {
     final dir = await Directory.systemTemp.createTemp('v58_inventory');
     final path =
-        '${dir.path}/${domain.id}_${_tmpSeq++}_${DateTime.now().microsecondsSinceEpoch}.db';
+        '${dir.path}/${domain.id}_${tmpSeq++}_${DateTime.now().microsecondsSinceEpoch}.db';
     return InventoryDatabase(
       databaseFactory: databaseFactoryFfi,
       databasePath: path,

@@ -8,6 +8,7 @@ import '../data/backup_gateway.dart';
 import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
+import '../domain/backup_integrity.dart';
 
 /// 备份/恢复/Excel 导出操作块（可复用）。
 ///
@@ -74,10 +75,12 @@ class _BackupActionsState extends State<BackupActions> {
 
   /// V3.6.1：点击导出 = 直接保存到手机（系统 SAF 保存对话框）。
   /// null（用户取消）静默无提示；异常（磁盘满/权限/ROM 拒绝）明确提示。
+  /// V4.3.1（+38 P0-2）：导出前完整性校验，坏数据不生成文件。
   Future<void> _saveBackup() async {
     setState(() => _busy = true);
     try {
       final backup = await widget.repository.exportBackup();
+      BackupIntegrity.ensureValid(backup, knowledge: false);
       final bytes = utf8.encode(
         const JsonEncoder.withIndent('  ').convert(backup),
       );
@@ -91,6 +94,16 @@ class _BackupActionsState extends State<BackupActions> {
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('已保存：$fileName')),
+      );
+    } on ArgumentError catch (e) {
+      // P0-2：完整性校验不通过——坏数据绝不写进备份文件。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message is String
+              ? e.message
+              : '数据异常，暂不备份，请联系排查'),
+        ),
       );
     } catch (_) {
       // 兜住 Error + Exception：file_picker 失败可能抛 PlatformException，
@@ -109,6 +122,7 @@ class _BackupActionsState extends State<BackupActions> {
     setState(() => _busy = true);
     try {
       final backup = await widget.repository.exportBackup();
+      BackupIntegrity.ensureValid(backup, knowledge: false);
       final path = await _gateway
           .writeBackupFile(const JsonEncoder.withIndent('  ').convert(backup));
       await _gateway.shareFile(path);
@@ -117,6 +131,15 @@ class _BackupActionsState extends State<BackupActions> {
         SnackBar(
           // 路径分隔符双兼容（Windows \ 与 POSIX /），只取文件名展示。
           content: Text('备份已生成：${path.split('/').last.split('\\').last}'),
+        ),
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message is String
+              ? e.message
+              : '数据异常，暂不备份，请联系排查'),
         ),
       );
     } on Exception catch (e) {

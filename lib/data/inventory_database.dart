@@ -30,14 +30,15 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
   ///
   /// v10 = V3.13（仓储六表）；v11 = V4.0（加 reminders / daily_reports 两表）；
   /// **v12 = V4.1 批次 1（加 todo_states 第 9 表）**；
-  /// **v13 = V4.1 批次 2（reminders 加 priority 列，元宝裁定①）**。
-  /// 两域各自独立升级到 v13：生活库走 v10→v11→v12→v13 迁移，
-  /// 工作库新建直接建到 v13。
+  /// **v13 = V4.1 批次 2（reminders 加 priority 列，元宝裁定①）**；
+  /// **v14 = V4.3.1（+38 借出补丁：loans 加 from_location_id 列）**。
+  /// 两域各自独立升级到 v14：生活库走 v10→…→v13→v14 迁移，
+  /// 工作库新建直接建到 v14。
   ///
   /// v12 迁移只做 `CREATE TABLE IF NOT EXISTS`——**不动任何旧表旧列**，
   /// 所以旧备份兼容零风险、老代码读路径不变、迁移幂等天然满足。
-  /// v13 迁移用幂等加列（`_addColumnIfMissing`），同样不碰任何旧列。
-  static const int currentSchemaVersion = 13;
+  /// v13/v14 迁移用幂等加列（`_addColumnIfMissing`），同样不碰任何旧列。
+  static const int currentSchemaVersion = 14;
 
   /// 生产构造：不暴露任何测试钩子，生产入口 main.dart 用此构造。
   ///
@@ -124,6 +125,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
   static const String columnDueAt = 'due_at';
   static const String columnReturnedAt = 'returned_at';
   static const String columnIsPartial = 'is_partial';
+  // V4.3.1（+38）：借出源位置——归还时优先恢复回这个位置（可空，兼容 v13 旧库）。
+  static const String columnFromLocationId = 'from_location_id';
   // V3.11：按位置记数量——item_locations.quantity（每个位置几个）。
   static const String columnLocationQuantity = 'quantity';
   // V3.12：废弃流水字段。
@@ -501,7 +504,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         $columnIsPartial INTEGER NOT NULL DEFAULT 0,
         $columnUpdatedAt INTEGER NOT NULL,
         $columnIsDeleted INTEGER NOT NULL DEFAULT 0,
-        $columnDeletedAt INTEGER
+        $columnDeletedAt INTEGER,
+        $columnFromLocationId INTEGER
       )
     ''');
   }
@@ -746,6 +750,28 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     if (oldVersion < 13 && newVersion >= 13) {
       await _addColumnIfMissing(db, tableReminders, columnPriority,
           type: 'INTEGER NOT NULL DEFAULT 1');
+    }
+
+    // v13 → v14：V4.3.1（+38）借出补丁——loans 加 from_location_id 列。
+    //
+    // PM 口径「位置恢复：归还后物品位置自动回到借出前的原位置，不丢轨迹」：
+    // 借出时从哪个位置扣的数，落库记下；归还时优先加回这个位置。
+    // 幂等加列（列已存在跳过），可空列、默认 NULL——旧借出记录没有这个
+    // 概念，归还时回退主位置（旧口径），行为不回退、数据不搬迁。
+    if (oldVersion < 14 && newVersion >= 14) {
+      // 极端 legacy 路径（如测试手造的极简 v8 库）可能没有 loans 表——
+      // 表不存在则跳过（借出模块未启用过，无数据可迁移；将来建表走
+      // _createBorrowTables 全列口径，from_location_id 天然在列）。
+      final loansTables = await db.query(
+        'sqlite_master',
+        columns: <String>['name'],
+        where: "type = 'table' AND name = ?",
+        whereArgs: <Object?>[tableLoans],
+      );
+      if (loansTables.isNotEmpty) {
+        await _addColumnIfMissing(db, tableLoans, columnFromLocationId,
+            type: 'INTEGER');
+      }
     }
   }
 
@@ -2329,6 +2355,35 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     return (rows.first['lent'] as num?)?.toInt() ?? 0;
   }
 
+  /// V4.3.1（+38 借出补丁）：某物品全部**未还清**的借出记录（未软删）。
+  ///
+  /// 位置查询（「指甲刀在哪」）合并借出状态的唯一数据源——与借出管理页
+  /// 同查 `loans` 一张表（PM 红线：查询结果与借出管理页数据同源，不各查各的）。
+  /// 按 item_id 命中（物品改名后快照对不上也能查到），借出时间倒序。
+  /// 没有未还借出时返回空列表（查询文案维持纯位置口径）。
+  @override
+  Future<List<Loan>> getActiveLoansForItem(String itemName) async {
+    final valid = _normalizeName(itemName, '物品名称');
+    final db = await open();
+    final itemRows = await db.query(
+      tableItems,
+      columns: <String>[columnId],
+      where: '$columnName = ? AND $columnIsDeleted = 0',
+      whereArgs: <Object?>[valid],
+      limit: 1,
+    );
+    if (itemRows.isEmpty) return const <Loan>[];
+    final itemId = itemRows.first[columnId] as int;
+    final rows = await db.query(
+      tableLoans,
+      where: '$columnItemId = ? AND $columnIsDeleted = 0 '
+          'AND $columnReturnedQty < $columnQuantity',
+      whereArgs: <Object?>[itemId],
+      orderBy: '$columnBorrowedAt DESC',
+    );
+    return rows.map(Loan.fromMap).toList(growable: false);
+  }
+
   /// 全部活跃物品的数量三口径（明细页用，一次查完避免 N+1）。
   @override
   Future<Map<int, QuantityInfo>> getAllQuantityInfo() async {
@@ -2876,6 +2931,7 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
       await _writeLocationQty(
           txn, itemId, sourceId, sourceQty - quantity, now);
       await _syncItemTotal(txn, itemId, now: now);
+      // V4.3.1（+38）：借出源位置落库——归还时优先恢复回这里（不丢轨迹）。
       final loan = Loan(
         itemId: itemId,
         updatedAt: now,
@@ -2884,6 +2940,7 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         quantity: quantity,
         borrowedAt: now,
         dueAt: due,
+        fromLocationId: sourceId,
       );
       final id = await txn.insert(tableLoans, loan.toMap());
       return Loan(
@@ -2895,18 +2952,33 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         quantity: quantity,
         borrowedAt: now,
         dueAt: due,
+        fromLocationId: sourceId,
       );
     });
   }
 
   /// 归还：[quantity] 为空 = 全部归还；给定值 = 部分归还（累加 returnedQty，
   /// 标 isPartial）。数量非法或超借出量抛 ArgumentError。幂等：已还完再还无操作。
+  ///
+  /// V4.3.1（+38）借出补丁：
+  ///  * [returnedAt] 精确归还时间（UTC 毫秒）——UI 弹窗默认当前时刻、可改；
+  ///    不传则落当前时刻（与旧口径一致）。仅还清时写 returned_at 列，
+  ///    部分归还仍只累加 returned_qty（returned_at 语义 = 还清时刻）。
+  ///  * 位置恢复：优先加回借出时的源位置 [Loan.fromLocationId]（借出即从
+  ///    哪里扣、归还回哪里）；源位置关联已不存在（物品挪位后位置被删）时
+  ///    回退主位置；无活跃关联只更新 loans，不报错（V3.9.2 口径）。
   @override
   Future<void> returnLoan(int loanId,
-      {int? quantity, int? toLocationId}) async {
+      {int? quantity, int? toLocationId, int? returnedAt}) async {
     _guardWrite();
     final db = await open();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final returnMoment = returnedAt ?? now;
+    if (returnedAt != null && returnedAt > now + 60000) {
+      // 归还时间不能落在未来（允许 1 分钟时钟偏差容差）。
+      throw ArgumentError.value(
+          returnedAt, 'returnedAt', '归还时间不能晚于现在');
+    }
     await db.transaction<void>((txn) async {
       final rows = await txn.query(
         tableLoans,
@@ -2931,7 +3003,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
         <String, Object?>{
           columnReturnedQty: newReturned,
           columnIsPartial: fullyReturned ? (loan.isPartial ? 1 : 0) : 1,
-          if (fullyReturned) columnReturnedAt: now,
+          // V4.3.1：写清还清时刻——UI 传入的精确归还时间（可改），不传落当前。
+          if (fullyReturned) columnReturnedAt: returnMoment,
           columnUpdatedAt: now,
         },
         where: '$columnId = ?',
@@ -2952,6 +3025,8 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
       if (itemRows.isNotEmpty) {
         final itemId = itemRows.first[columnId] as int;
         // V3.11：归还加到指定位置（UI 弹窗问），未指定则加到主位置。
+        // V4.3.1（+38）位置恢复：优先加回**借出时的源位置**（from_location_id
+        // 落库记录，借出从哪扣、归还回哪），源位置关联已不在时回退主位置。
         // 目标位置可能已被删除（物品进回收站/位置不存在）——此时无处加，
         // 只更新 loans 即可，不报错（V3.9.2 口径）。
         final links = await txn.query(
@@ -2962,9 +3037,15 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
           orderBy: '$columnId ASC',
         );
         int targetId;
+        final fromId = loan.fromLocationId;
+        final fromActive = fromId != null &&
+            links.any((l) => l[columnLocationId] as int == fromId);
         if (toLocationId != null &&
             links.any((l) => l[columnLocationId] as int == toLocationId)) {
+          // 显式指定 > 源位置 > 主位置（显式指定是用户当场拍板，最优先）。
           targetId = toLocationId;
+        } else if (fromActive) {
+          targetId = fromId;
         } else if (links.isNotEmpty) {
           targetId = links.first[columnLocationId] as int;
         } else {

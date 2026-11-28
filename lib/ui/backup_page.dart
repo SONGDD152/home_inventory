@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/backup_gateway.dart';
 import '../data/domain.dart';
 import '../data/inventory_repository.dart';
+import '../domain/backup_archiver.dart';
 import '../domain/full_system_backup.dart';
 import 'backup_actions.dart';
 import 'full_system_backup_panel.dart';
@@ -23,6 +24,7 @@ class BackupPageBody extends StatelessWidget {
     this.domain = InventoryDomain.life,
     this.onRestored,
     this.fullSystem,
+    this.archiver,
   });
 
   final InventoryRepository repository;
@@ -48,6 +50,10 @@ class BackupPageBody extends StatelessWidget {
   /// 旧单域备份文件仍然只从分区入口恢复。
   final FullSystemBackup? fullSystem;
 
+  /// V4.3.1（+38 P0-1）：内档轮转器；null = 不轮转（测试形态），
+  /// 生产组合根注入实例。
+  final BackupArchiver? archiver;
+
   @override
   Widget build(BuildContext context) {
     final fullSystem = this.fullSystem;
@@ -72,6 +78,7 @@ class BackupPageBody extends StatelessWidget {
               service: fullSystem,
               gateway: gateway,
               onRestored: onRestored,
+              archiver: archiver,
             ),
             const SizedBox(height: 24),
             const Divider(),
@@ -120,6 +127,7 @@ class BackupPage extends StatelessWidget {
     this.domain = InventoryDomain.life,
     this.onRestored,
     this.fullSystem,
+    this.archiver,
   });
 
   final InventoryRepository repository;
@@ -136,6 +144,9 @@ class BackupPage extends StatelessWidget {
   /// V4.2.1（+34）：全系统备份服务（生活+工作一份文件）。
   final FullSystemBackup? fullSystem;
 
+  /// V4.3.1（+38 P0-1）：内档轮转器；null = 不轮转（测试形态）。
+  final BackupArchiver? archiver;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -146,6 +157,7 @@ class BackupPage extends StatelessWidget {
         domain: domain,
         onRestored: onRestored,
         fullSystem: fullSystem,
+        archiver: archiver,
       ),
     );
   }

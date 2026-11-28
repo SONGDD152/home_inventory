@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
+import '../domain/backup_archiver.dart';
 import '../domain/full_system_backup.dart';
 
 /// V4.2.1（+34）：全系统备份操作块——生活区 + 工作区**一份文件**。
@@ -21,6 +22,7 @@ class FullSystemBackupPanel extends StatefulWidget {
     required this.service,
     this.gateway,
     this.onRestored,
+    this.archiver,
   });
 
   final FullSystemBackup service;
@@ -30,6 +32,10 @@ class FullSystemBackupPanel extends StatefulWidget {
 
   /// 恢复完成（成功）后的回调，例如刷新首页。
   final Future<void> Function()? onRestored;
+
+  /// V4.3.1（+38 P0-1）：内档轮转器；null = 不轮转（仅测试/旧链路），
+  /// 生产组合根必须注入 [BackupArchiver] 实例。
+  final BackupArchiver? archiver;
 
   @override
   State<FullSystemBackupPanel> createState() => _FullSystemBackupPanelState();
@@ -48,13 +54,15 @@ class _FullSystemBackupPanelState extends State<FullSystemBackupPanel> {
   }
 
   /// 点击导出 = 保存到手机（与分区导出同口径）；长按 = 分享。
+  /// V4.3.1（+38 P0-1）：导出成功后同步写一份内档并轮转（本地留最近 3 份），
+  /// 轮转发生时在回执里报一行「备份轮转，删除最旧备份 xxx」。
   Future<void> _saveBackup() async {
     setState(() => _busy = true);
     try {
       final backup = await widget.service.exportAll();
-      final bytes = utf8.encode(
-        const JsonEncoder.withIndent('  ').convert(backup),
-      );
+      final json =
+          const JsonEncoder.withIndent('  ').convert(backup);
+      final bytes = utf8.encode(json);
       final fileName = _backupFileName(DateTime.now());
       final saved = await _gateway.saveBytesToDevice(fileName, bytes);
       if (!mounted) return;
@@ -62,8 +70,28 @@ class _FullSystemBackupPanelState extends State<FullSystemBackupPanel> {
         setState(() => _busy = false);
         return;
       }
+      // archiver 为 null = 不轮转（测试/旧链路）；生产组合根注入实例。
+      final archiver = widget.archiver;
+      final rotated = archiver == null
+          ? null
+          : await archiver.archiveAndRotate(json);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('已保存：$fileName（含生活区+工作区）')),
+        SnackBar(
+          content: Text(rotated == null
+              ? '已保存：$fileName（含生活区+工作区）'
+              : '已保存：$fileName · 备份轮转，删除最旧备份 $rotated（本地保留最近 ${widget.archiver?.keepCount ?? 3} 份）'),
+        ),
+      );
+    } on ArgumentError catch (e) {
+      // P0-2：完整性校验不通过——坏数据绝不写进备份文件。
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message is String
+              ? e.message
+              : '数据异常，暂不备份，请联系排查'),
+        ),
       );
     } catch (_) {
       // 兜住 Error + Exception（口径同分区导出：失败必须明确提示）。
@@ -80,13 +108,31 @@ class _FullSystemBackupPanelState extends State<FullSystemBackupPanel> {
     setState(() => _busy = true);
     try {
       final backup = await widget.service.exportAll();
-      final path = await _gateway
-          .writeBackupFile(const JsonEncoder.withIndent('  ').convert(backup));
+      final json =
+          const JsonEncoder.withIndent('  ').convert(backup);
+      final path = await _gateway.writeBackupFile(json);
       await _gateway.shareFile(path);
+      if (!mounted) return;
+      final archiver = widget.archiver;
+      final rotated = archiver == null
+          ? null
+          : await archiver.archiveAndRotate(json);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('备份已生成：${path.split('/').last.split('\\').last}'),
+          content: Text(rotated == null
+              ? '备份已生成：${path.split('/').last.split('\\').last}'
+              : '备份已生成：${path.split('/').last.split('\\').last}'
+                  ' · 备份轮转，删除最旧备份 $rotated（本地保留最近 ${widget.archiver?.keepCount ?? 3} 份）'),
+        ),
+      );
+    } on ArgumentError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message is String
+              ? e.message
+              : '数据异常，暂不备份，请联系排查'),
         ),
       );
     } on Exception catch (e) {

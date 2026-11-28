@@ -153,6 +153,10 @@ class Borrower {
 ///
 /// V3.8：新增 [isDeleted] / [deletedAt]（借出记录软删，进回收站，可恢复）。
 /// 旧备份/旧库无这两列时 [fromMap] 按未删读取，V3.7 及以前导出的备份可正常恢复。
+///
+/// V4.3.1（+38 借出补丁）：新增 [fromLocationId]——借出时从哪个位置扣的数，
+/// 归还时优先恢复回这个位置（PM 口径「位置恢复：自动回到借出前的原位置，
+/// 不丢轨迹」）。旧备份/旧库无此列时按 null 读取，恢复时回退主位置（旧口径）。
 class Loan {
   const Loan({
     this.id,
@@ -168,6 +172,7 @@ class Loan {
     this.isPartial = false,
     this.isDeleted = false,
     this.deletedAt,
+    this.fromLocationId,
   });
 
   final int? id;
@@ -206,6 +211,10 @@ class Loan {
   /// V3.8：软删时间戳（UTC 毫秒）；未删记录为 null。
   final int? deletedAt;
 
+  /// V4.3.1（+38）：借出时的源位置 id（借出即从该位置扣数，归还优先加回）。
+  /// 旧记录/旧备份无此列时为 null，归还回退主位置（活跃关联 id 最小）。
+  final int? fromLocationId;
+
   /// 是否全部归还。
   bool get isReturned => returnedQty >= quantity;
 
@@ -227,6 +236,8 @@ class Loan {
         // V3.8：软删两列。旧备份恢复时 [fromMap] 按未删读入，这里写回 0/NULL。
         'is_deleted': isDeleted ? 1 : 0,
         if (deletedAt != null) 'deleted_at': deletedAt,
+        // V4.3.1（+38）：借出源位置（可空——旧记录没有这个概念）。
+        if (fromLocationId != null) 'from_location_id': fromLocationId,
       };
 
   factory Loan.fromMap(Map<String, Object?> map) => Loan(
@@ -244,6 +255,8 @@ class Loan {
         // 旧备份无这两列 → 按未删读入（元宝迁移兼容硬约束）。
         isDeleted: (map['is_deleted'] as int?) == 1,
         deletedAt: (map['deleted_at'] as num?)?.toInt(),
+        // V4.3.1：旧备份无此列 → null，归还回退主位置。
+        fromLocationId: (map['from_location_id'] as num?)?.toInt(),
       );
 }
 

@@ -62,14 +62,32 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-/// V4.0：顶栏三选一（概览 / 生活 / 工作）。
+/// V4.0：顶栏分区。
+///
+/// V4.2.0 三域骨架（PM 2026-11-28 终审拍板）：**四栏
+/// [概览][生活][工作][知识]**——知识库提平为独立第三域（全名「知识系统」，
+/// 顶栏按钮文案「知识」）。概览仍是跨域层（只聚合生活+工作两本账，
+/// **不展示知识系统任何信息**）。
+///
+/// 注册表制：顶栏 segments 按「概览 + [InventoryDomain].values」驱动渲染
+/// （见 [_buildSectionSwitcher]）——将来加第五域 = 域枚举加值 + 此处加一项，
+/// 主体逻辑零改动。
 enum _TopSection {
-  overview('概览'),
-  life('生活'),
-  work('工作');
+  overview('概览', null),
+  life('生活', InventoryDomain.life),
+  work('工作', InventoryDomain.work),
+  knowledge('知识', InventoryDomain.knowledge);
 
-  const _TopSection(this.label);
+  const _TopSection(this.label, this.domain);
+
   final String label;
+
+  /// 对应的域；概览为 null（跨域层，不属于任何一本账）。
+  final InventoryDomain? domain;
+
+  /// 域 → 顶栏分区（切域与「去某域」引导共用）。
+  static _TopSection ofDomain(InventoryDomain domain) =>
+      values.firstWhere((section) => section.domain == domain);
 }
 
 class _HomePageState extends State<HomePage> {
@@ -105,6 +123,9 @@ class _HomePageState extends State<HomePage> {
 
   /// 当前域的模块注册表（底栏按它渲染）。
   List<DomainModule> get _modules => modulesOf(_domain);
+
+  /// 当前域是否有一级模块（知识域零模块 → 无底栏、抽屉无子菜单）。
+  bool get _hasModules => _modules.isNotEmpty;
 
   /// 当前选中的模块。
   DomainModule get _currentModule =>
@@ -2039,8 +2060,11 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 4),
                   // V3.5：副标题随当前模块显示（审核意见 7）。
+                  // V4.2.0：零模块域（知识系统）显示域全名。
                   Text(
-                    '${_currentModule.label}模块',
+                    _hasModules
+                        ? '${_currentModule.label}模块'
+                        : _domain.label,
                     key: Key('drawer_module_subtitle'),
                     style: TextStyle(
                       fontSize: 14,
@@ -2053,7 +2077,8 @@ class _HomePageState extends State<HomePage> {
             // V3.5：抽屉按 currentModule 渲染子菜单——仓储为真实四项，
             // 其余模块为「建设中」占位（不做假功能、不做弹窗式子菜单）。
             // V4.0：概览页抽屉只留标题（概览与生活/工作同级，不摆业务入口）。
-            if (_section != _TopSection.overview) ...<Widget>[
+            // V4.2.0：零模块域（知识系统）抽屉也只有标题——不摆业务入口。
+            if (_section != _TopSection.overview && _hasModules) ...<Widget>[
               if (_currentModule.kind == ModuleKind.storage) ...<Widget>[
               ListTile(
                 key: const Key('drawer_voice'),
@@ -2177,12 +2202,15 @@ class _HomePageState extends State<HomePage> {
   /// V4.0：底栏渲染。
   ///
   /// * 概览页：**没有底栏**（PM 拍板「概览底部不摆」）。
-  /// * 生活区：四项固定（[BottomNavigationBar]，旧版结构不变）。
+  /// * 生活区：三栏固定（V4.2.0：仓储/衣橱/餐饮，[BottomNavigationBar]）。
   /// * 工作区：按需长出——本轮只有一项，而 Flutter 的 [BottomNavigationBar]
   ///   硬性要求**至少两项**，所以单模块域改用一条按钮底栏
   ///   （不假装有两个 tab，也不空着）。
+  /// * 知识域：**零模块 → 无底栏**（PM 2026-11-28 拍板：知识系统区
+  ///   不占底栏；主体即域壳页）。
   Widget? _buildBottomNav(List<DomainModule> modules) {
     if (_section == _TopSection.overview) return null;
+    if (modules.isEmpty) return null;
     if (modules.length < 2) {
       final module = modules.first;
       final scheme = Theme.of(context).colorScheme;
@@ -2241,8 +2269,23 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// V4.0：顶栏分区切换（概览 / 生活 / 工作）。
+  /// V4.2.0：顶栏分区切换（概览 / 生活 / 工作 / 知识，注册表驱动渲染）。
+  ///
+  /// segments = 概览 + [InventoryDomain.values] 逐域一项——加第五域
+  /// 自动出现在顶栏，主体逻辑零改动。按钮文案取 [_topDomainLabels]
+  /// （PM 拍板：知识系统顶栏按钮就叫「知识」），未登记的域回退域 label。
   PreferredSizeWidget _buildSectionSwitcher() {
+    final segments = <ButtonSegment<_TopSection>>[
+      ButtonSegment<_TopSection>(
+        value: _TopSection.overview,
+        label: const Text('概览'),
+      ),
+      for (final domain in InventoryDomain.values)
+        ButtonSegment<_TopSection>(
+          value: _TopSection.ofDomain(domain),
+          label: Text(_topDomainLabels[domain] ?? domain.label),
+        ),
+    ];
     return PreferredSize(
       preferredSize: const Size.fromHeight(52),
       child: Padding(
@@ -2250,20 +2293,7 @@ class _HomePageState extends State<HomePage> {
         child: SegmentedButton<_TopSection>(
           key: const Key('top_section_switch'),
           showSelectedIcon: false,
-          segments: const <ButtonSegment<_TopSection>>[
-            ButtonSegment<_TopSection>(
-              value: _TopSection.overview,
-              label: Text('概览'),
-            ),
-            ButtonSegment<_TopSection>(
-              value: _TopSection.life,
-              label: Text('生活'),
-            ),
-            ButtonSegment<_TopSection>(
-              value: _TopSection.work,
-              label: Text('工作'),
-            ),
-          ],
+          segments: segments,
           selected: <_TopSection>{_section},
           onSelectionChanged: (selection) {
             final next = selection.first;
@@ -2275,10 +2305,22 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// V4.0：切换顶栏分区。
+  /// 顶栏按钮短文案（域全名见 [InventoryDomain.label]）。
+  static const Map<InventoryDomain, String> _topDomainLabels =
+      <InventoryDomain, String>{
+    InventoryDomain.life: '生活',
+    InventoryDomain.work: '工作',
+    InventoryDomain.knowledge: '知识',
+  };
+
+  /// V4.0：切换顶栏分区（V4.2.0：泛化为任意域，知识域走同一守卫流程）。
   ///
   /// 切域走 [DomainHub.switchTo]（切库守卫：等旧查询收尾、超时置脏、
   /// 切换期间拒写），切完**全量刷新**（清掉旧域的结果与提示）。
+  ///
+  /// `_execRepo` 只在**开放仓储能力的域**上重指——知识域能力开关全空，
+  /// `hub.repository`（壳实例）访问即抛，绕开即可（知识域无任何写路径，
+  /// 执行仓储保持指向切换前的域，无副作用）。
   Future<void> _switchSection(_TopSection section) async {
     if (!_multiDomain) return;
     if (section == _section) return;
@@ -2292,8 +2334,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final hub = widget.hub!;
-    final target =
-        section == _TopSection.work ? InventoryDomain.work : InventoryDomain.life;
+    final target = section.domain!;
     await hub.switchTo(target);
     if (!mounted) return;
     setState(() {
@@ -2301,7 +2342,9 @@ class _HomePageState extends State<HomePage> {
       _selectedModuleId = 'storage';
       _result = null;
       _notice = null;
-      _execRepo = _repo;
+      if (domainSupports(target, DomainCapability.storage)) {
+        _execRepo = _repo;
+      }
     });
   }
 
@@ -2340,6 +2383,15 @@ class _HomePageState extends State<HomePage> {
           onOpenReport: widget.reportService == null ? null : _openReport,
         );
       }
+      // V4.2.0 三域骨架：**零模块域**（知识系统）——不进模块分派，
+      // 直接给域壳页（建设中占位，不做假功能；库与功能随 +36 落地）。
+      // 注册表制：modulesOf 返回空的域自动走这条，加域零改动。
+      if (_modules.isEmpty) {
+        return BuildingPlaceholderPage(
+          label: _domain.label,
+          text: '${_domain.label}建设中，敬请期待',
+        );
+      }
       switch (_currentModule.kind) {
         case ModuleKind.storage:
           return _storageBody();
@@ -2365,8 +2417,12 @@ class _HomePageState extends State<HomePage> {
     final hub = widget.hub;
     if (hub == null) return const <InventoryDomain, TodoStateWriter>{};
     final writers = <InventoryDomain, TodoStateWriter>{};
+    // V4.2.0：注册表查表（不再三元判断）；且**先按能力开关过滤**——
+    // 知识域能力全空、实例是壳（repository 访问即抛），不开放提醒的域
+    // 直接跳过（催办状态只存在于开放提醒的域，语义天然成立）。
     for (final domain in InventoryDomain.values) {
-      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
+      if (!domainSupports(domain, DomainCapability.reminders)) continue;
+      final instance = hub.instanceOf(domain);
       final repo = instance.repository;
       if (repo is TodoStateWriter) {
         writers[domain] = repo as TodoStateWriter;
@@ -2380,10 +2436,9 @@ class _HomePageState extends State<HomePage> {
   /// 复用 [_switchSection] 而不是自己 setState：切域必须走 **DomainHub 的
   /// 切库守卫**（写闸门 → 等在飞查询收尾 → 换指针 → 解闸），
   /// 绕开它会留下「UI 显示工作区、数据还指着生活库」的不一致。
+  /// V4.2.0：域 → 分区映射走注册表（[_TopSection.ofDomain]），不再三元判断。
   Future<void> _openDomainSection(InventoryDomain domain) async {
-    await _switchSection(
-      domain == InventoryDomain.life ? _TopSection.life : _TopSection.work,
-    );
+    await _switchSection(_TopSection.ofDomain(domain));
   }
 
   /// V4.1 批次 2：打开日报页（**孤儿页修复**）。
@@ -2453,7 +2508,9 @@ class _HomePageState extends State<HomePage> {
     final domains = <InventoryDomain>{};
     for (final domain in InventoryDomain.values) {
       if (!domainSupports(domain, DomainCapability.reminders)) continue;
-      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
+      // V4.2.0：注册表查表。知识域已被能力开关 continue 掉，
+      // 壳实例的 repository 不会被访问。
+      final instance = hub.instanceOf(domain);
       if (instance.repository is ReminderEditor) domains.add(domain);
     }
     return domains;
@@ -2471,14 +2528,15 @@ class _HomePageState extends State<HomePage> {
     if (hub == null) return const <InventoryDomain, ReminderEditor?>{};
     final editors = <InventoryDomain, ReminderEditor?>{};
     for (final domain in InventoryDomain.values) {
-      final instance = domain == InventoryDomain.life ? hub.life : hub.work;
-      final repo = instance.repository;
       if (!domainSupports(domain, DomainCapability.reminders)) {
         // 能力开关关闭：显式登记 null（而不是不登记）——
         // 日程签靠它判断「这个域不支持提醒」。
+        // V4.2.0：先按能力开关短路，壳实例（知识域）的 repository
+        // 不会被访问（访问即抛）。
         editors[domain] = null;
         continue;
       }
+      final repo = hub.instanceOf(domain).repository;
       editors[domain] = repo is ReminderEditor ? repo as ReminderEditor : null;
     }
     return editors;
@@ -2530,7 +2588,11 @@ class _HomePageState extends State<HomePage> {
   ReminderRepository _reminderRepo(InventoryDomain domain) {
     final hub = widget.hub;
     if (hub == null) throw StateError('当前没有可用的仓储');
-    final repo = domain == InventoryDomain.life ? hub.life.repository : hub.work.repository;
+    if (!domainSupports(domain, DomainCapability.reminders)) {
+      // V4.2.0：能力开关先短路——知识域是壳实例，repository 访问即抛。
+      throw StateError('${domain.label}暂不支持提醒');
+    }
+    final repo = hub.instanceOf(domain).repository;
     if (repo is! ReminderRepository) {
       throw StateError('${domain.label}暂不支持提醒');
     }

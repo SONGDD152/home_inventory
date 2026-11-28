@@ -1488,7 +1488,7 @@ void main() {
 
   // ---------- V3.5 一级模块底栏导航骨架（V4.1 批次 4：五项 → 四项）----------
 
-  testWidgets('V4.1 批次 4：底栏渲染 4 个一级模块按钮（日程上移概览层）',
+  testWidgets('V4.2.0：底栏渲染 3 个一级模块按钮（知识库提平顶栏第四域后，生活区底栏三栏）',
       (tester) async {
     await pumpApp(tester);
 
@@ -1497,10 +1497,14 @@ void main() {
     // V4.1 批次 4（PM 拍板「生活区底栏 5→4」）：
     // 「日程」不再占生活区底栏——它上移到概览层的「日程」签（跨域展示 + 可编辑）。
     expect(find.text('日程'), findsNothing,
-        reason: '日程上移概览层，生活区底栏只剩仓储/知识库/餐饮/衣橱四项');
-    expect(find.text('知识库'), findsOneWidget);
-    expect(find.text('餐饮'), findsOneWidget);
+        reason: '日程上移概览层，生活区底栏没有日程');
+    // V4.2.0（PM 2026-11-28 拍板「顶栏四栏 + 生活区底栏三栏」）：
+    // 「知识库」撤下底栏——提平为顶栏第四栏「知识」独立域。
+    expect(find.text('知识库'), findsNothing,
+        reason: '知识库提平为顶栏知识域，不占底栏');
+    // 底栏三栏按 PM 原话顺序：仓储 / 衣橱 / 餐饮。
     expect(find.text('衣橱'), findsOneWidget);
+    expect(find.text('餐饮'), findsOneWidget);
   });
 
   testWidgets('V3.5：仓储默认选中，抽屉显示真实四项子菜单', (tester) async {
@@ -1523,11 +1527,12 @@ void main() {
         reason: '仓储模块不渲染占位项');
   });
 
-  testWidgets('V4.1 批次 4：切至知识库 → 抽屉自动弹出并显示建设中占位'
-      '（沿用 V3.5.1 决策点①A，日程项已上移概览层）', (tester) async {
+  testWidgets('V4.2.0：切至衣橱 → 抽屉自动弹出并显示建设中占位'
+      '（沿用 V3.5.1 决策点①A；知识库已提平顶栏第四域，被测对象由知识库换成同为占位模块的衣橱）',
+      (tester) async {
     await pumpApp(tester);
 
-    await tester.tap(find.text('知识库'));
+    await tester.tap(find.text('衣橱'));
     await tester.pumpAndSettle();
 
     final nav = tester.widget<BottomNavigationBar>(
@@ -1542,30 +1547,29 @@ void main() {
     expect(find.byKey(const Key('home_drawer')), findsOneWidget,
         reason: '点底栏一级按钮后抽屉自动展开');
 
-    expect(find.text('知识库模块'), findsOneWidget);
+    expect(find.text('衣橱模块'), findsOneWidget);
     // V3.5 补丁（占位项收敛）：只渲染当前模块自己的一条占位项。
-    expect(find.byKey(const Key('drawer_building_knowledge')), findsOneWidget);
+    expect(find.byKey(const Key('drawer_building_wardrobe')), findsOneWidget);
     expect(find.byKey(const Key('drawer_building_dining')), findsNothing,
         reason: '非选中模块不渲染占位项');
-    expect(find.byKey(const Key('drawer_building_wardrobe')), findsNothing);
+    expect(find.byKey(const Key('drawer_building_knowledge')), findsNothing);
     expect(find.byKey(const Key('drawer_locations')), findsNothing,
         reason: '非仓储模块不渲染仓储四项');
 
     // 决策点③：占位点击仅提示，不进空白页。
-    await tester.tap(find.byKey(const Key('drawer_building_knowledge')));
+    await tester.tap(find.byKey(const Key('drawer_building_wardrobe')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('building_snackbar_knowledge')), findsOneWidget,
+    expect(find.byKey(const Key('building_snackbar_wardrobe')), findsOneWidget,
         reason: '点击占位项提示建设中');
     expect(find.byKey(const Key('detail_search')), findsNothing,
         reason: '不进入任何子页');
   });
 
-  testWidgets('V3.5 补丁：切知识库/餐饮/衣橱 → 抽屉各只锁单条占位项',
+  testWidgets('V3.5 补丁：切餐饮/衣橱 → 抽屉各只锁单条占位项（V4.2.0：知识库已提平顶栏第四域，底栏撤项）',
       (tester) async {
     await pumpApp(tester);
 
     final cases = <String, String>{
-      '知识库': 'knowledge',
       '餐饮': 'dining',
       '衣橱': 'wardrobe',
     };

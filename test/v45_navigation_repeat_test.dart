@@ -401,12 +401,19 @@ void main() {
   // ═══════════════ 批次 4 ①②：导航调整（底栏 5→4 / 日程上移） ═══════════════
 
   group('批次 4①②：生活区底栏 5→4，日程上移概览层', () {
-    test('生活区模块注册表 = 4 项，不再有「日程」', () {
+    test('生活区模块注册表 = 3 项，不再有「日程」（V4.2.0：知识库也已撤下）',
+        () {
       final modules = modulesOf(InventoryDomain.life);
-      expect(modules, hasLength(4));
+      expect(modules, hasLength(3));
       expect(modules.map((m) => m.label).toList(),
-          <String>['仓储', '知识库', '餐饮', '衣橱']);
+          <String>['仓储', '衣橱', '餐饮']);
       expect(modules.any((m) => m.label == '日程'), isFalse);
+      expect(modules.any((m) => m.label == '知识库'), isFalse,
+          reason: 'V4.2.0 知识库提平顶栏第四域，不占底栏');
+    });
+
+    test('知识域模块注册表 = 0 项（知识系统区不占底栏）', () {
+      expect(modulesOf(InventoryDomain.knowledge), isEmpty);
     });
 
     test('工作区模块注册表 = 1 项（单按钮底栏）', () {

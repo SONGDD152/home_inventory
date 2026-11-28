@@ -443,7 +443,8 @@ void main() {
 
   // ============ 七、导航（widget） ============
 
-  testWidgets('V4.0 导航：顶栏三选一 + 概览隐藏底栏 + 底栏按域渲染',
+  testWidgets('V4.0 导航：顶栏三选一 + 概览隐藏底栏 + 底栏按域渲染'
+      '（V4.2.0：顶栏四栏 [概览][生活][工作][知识]，生活底栏 4→3）',
       (tester) async {
     final domains = fakeDomains();
     final hub = DomainHub(life: domains.life, work: domains.work);
@@ -453,19 +454,22 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // 顶栏三选一。
+    // 顶栏四栏（V4.2.0 三域骨架：知识库提平独立第三域，按钮文案「知识」）。
     expect(find.byKey(const Key('top_section_switch')), findsOneWidget);
     expect(find.text('概览'), findsOneWidget);
     expect(find.text('生活'), findsOneWidget);
     expect(find.text('工作'), findsOneWidget);
+    expect(find.text('知识'), findsOneWidget);
 
-    // 生活区底栏四项固定全显示（V4.1 批次 4：日程上移概览层，5 → 4）。
+    // 生活区底栏三栏固定全显示（V4.2.0：知识库撤下底栏，4 → 3；
+    // 顺序按 PM 原话：仓储 / 衣橱 / 餐饮）。
     final nav = tester.widget<BottomNavigationBar>(
       find.byKey(const Key('home_bottom_nav')),
     );
-    expect(nav.items.length, 4);
+    expect(nav.items.length, 3);
     expect(nav.items[0].label, '仓储');
-    expect(nav.items[3].label, '衣橱');
+    expect(nav.items[1].label, '衣橱');
+    expect(nav.items[2].label, '餐饮');
 
     // 切到工作区：底栏按需长出（本轮只有工作仓储）。
     // Flutter 的 BottomNavigationBar 要求至少两项 → 单模块域用单按钮底栏。

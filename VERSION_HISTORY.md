@@ -1068,3 +1068,26 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - **版号链定稿（构想简报十二，PM 拍板）**：+33 三域骨架（4.2.0 里程碑）→ +34 全系统备份 → +35 数据管理页签 → +36 知识库功能（含知识系统区完整实现）。此前「顺延链待 PM 确认」状态解除。
 - **两份文档合并口径**：构想简报=产品层（指导 UI 与交互）；buddy《V4.2 知识库调研总集》=技术层（4 主表+FTS、接口拆分、备份口径、搜索方案）。+36 开工时合并落地。
 - **buddy 审阅标注的待落点（开工 +36 前必须定死）**：① 树形三层落表方式（学科/主题建表 vs entries 层级列）② 成熟度/一句话核心/模板字段列设计 ③ 学科/主题 CRUD 进 Writer 的接口扩口 ④ **日报「单份跨域」= 现有分域日报口径变更**（影响 daily_reports/导出/概览日报签，须明确落哪版）⑤ +33 骨架版建壳不建 knowledge.db（建议口径待确认）。
+
+### V4.2.0 三域骨架里程碑留档（2026-11-28）· versionCode 32 → 33
+
+> **依据**：PM 2026-11-28 终审拍板「顶栏四栏 + 生活区底栏三栏」+《知识系统构想简报（PM 终审版）》十二节版号链。知识库从生活区底栏占位项提平为**顶栏第四栏独立第三域「知识系统」**（按钮文案「知识」）。
+
+### 改造逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | `InventoryDomain` 加 `knowledge`（id='knowledge'，label='知识系统'，fileName='knowledge.db'）；`domainCapabilities[knowledge]={}` 全空（不开放仓储/提醒，写路径天然被拒） | `lib/data/domain.dart` |
+| 2 | DomainHub **注册表化**：life/work 具名参数保留 + `additionalInstances` 注册新域；`instanceOf`/禁写循环/重建连接全改查表；切库守卫五步流程一字不动；加第五域=构造加一项 | `lib/domain/domain_hub.dart` |
+| 3 | 知识域**壳实例** `ShellDomainInstance`（无连接无仓储句柄，repository 访问即抛 ArgumentError「知识系统建设中」；在飞恒 0，守卫零等待）——骨架版**建壳不建库**（PM 拍板⑤） | `lib/domain/domain_instance.dart` |
+| 4 | 顶栏四栏 [概览][生活][工作][知识]，segments 按「概览 + InventoryDomain.values」**注册表驱动渲染**；`_TopSection` 加 domain 字段；`_switchSection` 泛化（`_execRepo` 仅在开放仓储的域重指，绕开壳实例抛点） | `lib/ui/home_page.dart` |
+| 5 | 生活底栏三栏 仓储/衣橱/餐饮（PM 原话顺序），「知识库」撤下底栏；`modulesOf(knowledge)` 空列表；零模块域→主体给域壳页、无底栏、抽屉只有标题 | `lib/ui/home_module.dart` / `home_page.dart` |
+| 6 | **概览不展示知识系统**：`_agendaBlocks` 按能力开关过滤（v55 测试实锤拦截——改造中概览曾渲染出 `overview_block_knowledge`，违反 PM「概览不展示知识系统任何信息」拍板，已修死） | `lib/ui/overview_page.dart` |
+| 7 | 组合根注册壳实例 | `lib/main.dart` |
+
+### 测试与发布
+
+- 新增 `test/v55_three_domain_skeleton_test.dart` 15 条（域定义/能力开关全空/壳实例抛点/Hub 注册表+未注册抛错/第五域留位/顶栏四栏驱动渲染/知识壳页+无底栏/知识域抽屉只有标题/知识→生活回切数据完好/概览无知识信息/组合根源码级锁）；旧断言改口径一条未删（home_page_test 3 条、v40 导航 1 条、v45 注册表 1 条），另加知识域注册表 1 条。**全量 676/676 全绿，analyze 0 error / 0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=33 versionName=4.2.0；55,426,157 字节；sha256 `4cd4a4708d66eba30b432e8d022148fad4e659eb4b321d8c6532f06efb17ad9f`；签名 c1647f33… 不变，可覆盖安装。
+- 线上核验：页面 200 含 V4.2.0/versionCode=33/sha/v420.apk；APK 直链 200，线上 sha 与本地逐字一致；不带 sharecode 403。V4.1.7 入历史索引（APK 保留在线，sha 复核一致）。
+- **需求链（PM 拍板）**：+33 三域骨架（本版）→ +34 全系统备份 → +35 数据管理页签 → +36 知识库功能（含知识系统区完整实现；开工前须落 v5 施工图定死树形落表/列设计/Writer 扩口/日报单份跨域口径）。

@@ -8,6 +8,7 @@ import 'data/domain.dart';
 import 'data/inventory_database.dart';
 import 'data/report_state_store.dart';
 import 'domain/domain_hub.dart';
+import 'domain/domain_instance.dart';
 import 'domain/overview_reader.dart';
 import 'domain/reminder_source.dart';
 import 'domain/reminder_sources.dart';
@@ -22,12 +23,23 @@ import 'ui/home_page.dart';
 /// 生活域沿用 `home_inventory.db`（路径不变，用户既有数据天然保留），
 /// 工作域新建 `work_inventory.db`。两域共用同一套引擎代码，
 /// 由 [DomainHub] 统一把守切域（切库守卫）。
+///
+/// **V4.2.0 三域骨架（PM 2026-11-28 终审拍板）**：知识系统提平为顶栏
+/// 第四栏独立第三域——**只建壳不建库**（`ShellDomainInstance`：无连接、
+/// 无仓储句柄，repository 访问即抛；能力开关全空）。knowledge.db 与
+/// schema 随 +36 知识库功能版落地。
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final life = InventoryDatabase(domain: InventoryDomain.life);
   final work = InventoryDatabase(domain: InventoryDomain.work);
-  final hub = DomainHub(life: life, work: work);
+  final hub = DomainHub(
+    life: life,
+    work: work,
+    additionalInstances: <InventoryDomain, DomainInstance>{
+      InventoryDomain.knowledge: ShellDomainInstance(),
+    },
+  );
 
   // 日报服务：每天第一次打开 App 时检查昨天有没有日报，没有就补生成
   // （判据：已处理过的日期集合，按设备本地日期；系统时间回拨不重复补生成）。

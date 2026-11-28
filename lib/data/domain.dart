@@ -24,6 +24,23 @@ enum InventoryDomain {
     label: '工作区',
     storageLabel: '工作',
     fileName: 'work_inventory.db',
+  ),
+
+  /// 知识域（V4.2.0 三域骨架，2026-11-28 PM 终审拍板）：顶栏第四栏
+  /// 「知识」，全名「知识系统」，与生活/工作平级的独立第三域。
+  ///
+  /// **独立物理分库**（`knowledge.db`，三域互不交叉，沿用 v13 分库铁律），
+  /// 但**骨架版只建壳不建库**（PM 2026-11-28 拍板⑤）：`fileName` 只是
+  /// 域定义数据，骨架版没有任何代码路径打开这个文件——库文件与 schema
+  /// （4 主表 + FTS）随 +36 知识库功能版落地。
+  ///
+  /// 能力开关全空（`domainCapabilities` 不开放任何能力）：无仓储、无提醒、
+  /// 无备份（+34 才按三域口径设计），点顶栏进「建设中」壳页。
+  knowledge(
+    id: 'knowledge',
+    label: '知识系统',
+    storageLabel: '知识',
+    fileName: 'knowledge.db',
   );
 
   const InventoryDomain({
@@ -106,6 +123,14 @@ const Map<InventoryDomain, Set<DomainCapability>> domainCapabilities =
     DomainCapability.storage,
     DomainCapability.reminders,
   },
+
+  /// 知识域：**能力开关全空**（V4.2.0 三域骨架）。
+  ///
+  /// 知识域本轮只挂壳页——不开放仓储、不开放提醒、无备份。
+  /// 这是产品口径的地基（不是 if 补丁）：任何写路径问
+  /// [domainSupports] 都得到 false，写请求天然被拒。
+  /// 知识库功能版（+36）开放能力时改这里，不动调用方。
+  InventoryDomain.knowledge: <DomainCapability>{},
 };
 
 /// 某域是否开放某能力。

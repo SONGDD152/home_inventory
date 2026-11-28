@@ -4,10 +4,10 @@ import '../data/domain.dart';
 import '../data/inventory_repository.dart';
 import 'domain_instance.dart';
 
-/// V4.0：域中枢——管两本账 + 切库守卫。
+/// V4.0：域中枢——管各域的账本（注册表制）+ 切库守卫。
 ///
-/// PM 2026-11-26 拍板**物理分库**（方案 B）：生活域与工作域各持独立 `.db`，
-/// 互不相通。本类是两域实例的持有者，也是**切域时唯一的把关人**：
+/// PM 2026-11-26 拍板**物理分库**（方案 B）：各域各持独立 `.db`，
+/// 互不相通。本类是各域实例的持有者，也是**切域时唯一的把关人**：
 ///
 /// 切换流程（顺序不可乱）：
 ///  ① 置「切换中」→ **写操作直接拒绝**（不静默重试，静默重试可能写进错库）；
@@ -19,17 +19,32 @@ import 'domain_instance.dart';
 ///
 /// **超时不是静默降级**：超时计数 [switchTimeoutCount] 累加并在概览页对用户可见。
 class DomainHub {
+  /// V4.2.0 三域骨架：**注册表制**——域实例进 `_instances` 查表，
+  /// `instanceOf` / 三元判断全改查表；**加第五域 = 构造时往
+  /// [additionalInstances] 加一项**，守卫流程与界面零改动。
+  ///
+  /// `life` / `work` 具名参数保留（V4.0 起的组合根与测试口径不变），
+  /// 知识域等新增域经 [additionalInstances] 注册。
   DomainHub({
-    required this.life,
-    required this.work,
+    required DomainInstance life,
+    required DomainInstance work,
+    Map<InventoryDomain, DomainInstance> additionalInstances =
+        const <InventoryDomain, DomainInstance>{},
     this.switchTimeout = const Duration(seconds: 3),
-  });
+  }) : _instances = <InventoryDomain, DomainInstance>{
+         InventoryDomain.life: life,
+         InventoryDomain.work: work,
+         ...additionalInstances,
+       };
 
-  /// 生活域仓储实例（沿用 `home_inventory.db`，用户既有数据天然保留）。
-  final DomainInstance life;
+  /// 域实例注册表（域 → 实例；切库守卫与实例查找的唯一事实来源）。
+  final Map<InventoryDomain, DomainInstance> _instances;
 
-  /// 工作域仓储实例（`work_inventory.db`，新建）。
-  final DomainInstance work;
+  /// 生活域实例（兼容 getter，V4.0 起 OverviewReader 组合根口径）。
+  DomainInstance get life => _instances[InventoryDomain.life]!;
+
+  /// 工作域实例（兼容 getter）。
+  DomainInstance get work => _instances[InventoryDomain.work]!;
 
   /// 切库等待旧查询收尾的超时上限（元宝批注：3 秒）。
   final Duration switchTimeout;
@@ -55,7 +70,8 @@ class DomainHub {
 
   /// 当前域的实例（需要访问域特有能力时用）。
   DomainInstance get current =>
-      _current == InventoryDomain.life ? life : work;
+      _instances[_current] ??
+      (throw ArgumentError('域未注册实例：${_current.id}'));
 
   /// 是否正在切域。
   bool get isSwitching => _switching;
@@ -70,9 +86,10 @@ class DomainHub {
   InventoryRepository repositoryOf(InventoryDomain domain) =>
       instanceOf(domain).repository;
 
-  /// 指定域的实例。
+  /// 指定域的实例（注册表查表；未注册抛 ArgumentError）。
   DomainInstance instanceOf(InventoryDomain domain) =>
-      domain == InventoryDomain.life ? life : work;
+      _instances[domain] ??
+      (throw ArgumentError('域未注册实例：${domain.id}'));
 
   /// 订阅域变化（切换完成 / 超时计数变化时回调，界面据此全量刷新）。
   void addListener(VoidCallback listener) {
@@ -96,10 +113,11 @@ class DomainHub {
     if (target == _current && !_dirty) return;
 
     _switching = true;
-    // 切换期间两库都禁写：旧域的写要拒（它马上就不是当前账了），
+    // 切换期间所有库都禁写：旧域的写要拒（它马上就不是当前账了），
     // 新域的写也要拒（切换没完成，落点还不确定）。
-    life.setWritesBlocked(true);
-    work.setWritesBlocked(true);
+    for (final instance in _instances.values) {
+      instance.setWritesBlocked(true);
+    }
     _notify();
 
     try {
@@ -131,17 +149,19 @@ class DomainHub {
       _current = target;
     } finally {
       // ⑤ 解除写闸门。
-      life.setWritesBlocked(false);
-      work.setWritesBlocked(false);
+      for (final instance in _instances.values) {
+        instance.setWritesBlocked(false);
+      }
       _switching = false;
       _notify();
     }
   }
 
-  /// 强制重建两库连接（脏连接自愈）。
+  /// 强制重建所有库连接（脏连接自愈；壳实例的 reopen 是空操作）。
   Future<void> _rebuildConnections() async {
-    debugPrint('V4.0 切库守卫：重建两库连接（脏连接自愈）。');
-    await life.reopen();
-    await work.reopen();
+    debugPrint('V4.0 切库守卫：重建库连接（脏连接自愈）。');
+    for (final instance in _instances.values) {
+      await instance.reopen();
+    }
   }
 }

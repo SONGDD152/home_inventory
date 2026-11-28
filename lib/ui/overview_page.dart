@@ -454,6 +454,11 @@ class _OverviewPageState extends State<OverviewPage>
   List<_AgendaBlock> _agendaBlocks() {
     final blocks = <_AgendaBlock>[];
     for (final domain in InventoryDomain.values) {
+      // V4.2.0 三域骨架：**概览只聚合生活+工作两本账**（PM 2026-11-28
+      // 终审拍板「概览不展示知识系统的任何信息」）。知识域能力开关全空，
+      // 不开仓储的域不进概览——按能力开关过滤（地基口径，不是 if 补丁），
+      // 将来新域开放仓储时自动进入概览，知识域永远不进。
+      if (!domainSupports(domain, DomainCapability.storage)) continue;
       final items = <TodoAgendaItem>[];
       // **按条目 id 去重**——同一个条目只渲染一次。
       //

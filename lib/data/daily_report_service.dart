@@ -8,6 +8,7 @@ import '../domain/todo_state_writer.dart';
 import 'domain.dart';
 import 'docx_writer.dart';
 import 'inventory_repository.dart';
+import 'knowledge_database.dart';
 import 'reminder_repository.dart';
 import 'report_state_store.dart';
 import 'todo_state.dart';
@@ -41,6 +42,7 @@ class DailyReportService {
     this.todoReader,
     this.todoReaders = const <InventoryDomain, TodoStateReader>{},
     this.todoSources = const <ReminderSource>[],
+    this.knowledgeReader,
     ReportStateStore? stateStore,
   }) : stateStore = stateStore ?? InMemoryReportStateStore();
 
@@ -73,6 +75,12 @@ class DailyReportService {
 
   /// 催办源（提供催办条目）。
   final List<ReminderSource> todoSources;
+
+  /// V4.3（+37）：知识库读口（null = 无知识库能力 → 日报不出知识段）。
+  ///
+  /// 日报单份跨域（PM 拍板）：知识系统段与生活/工作内容共处一份日报，
+  /// **有则显示、无则不出现**；前缀「小本本-…」由导出层负责。
+  final KnowledgeDatabase? knowledgeReader;
 
   /// 判据状态存储。
   final ReportStateStore stateStore;
@@ -179,9 +187,18 @@ class DailyReportService {
     }
     buffer.writeln();
 
+    // ②′ 知识系统段（+37，PM 拍板：单份跨域日报；有则显示、无则不出现）。
+    final knowledgeLines = await _knowledgeSectionLines(date);
+    if (knowledgeLines.isNotEmpty) {
+      buffer.writeln('## 今日学习');
+      for (final line in knowledgeLines) {
+        buffer.writeln(line);
+      }
+      buffer.writeln();
+    }
+
     // ② 当日仓储动态
-    buffer.writeln('## 仓储动态');
-    final dayStart = DateTime(date.year, date.month, date.day);
+    buffer.writeln('## 仓储动态');    final dayStart = DateTime(date.year, date.month, date.day);
     final dayEnd = dayStart.add(const Duration(days: 1));
     final startMs = dayStart.millisecondsSinceEpoch;
     final endMs = dayEnd.millisecondsSinceEpoch;
@@ -220,6 +237,54 @@ class DailyReportService {
     }
 
     return buffer.toString();
+  }
+
+  /// 知识段行（[date] 当天 learned_at 的条目；前缀用模板名区分，如
+  /// 「写作手法拆解·《白夜行》」）。条目格式：标题 + 来源 + 一句话核心 +
+  /// 成熟度 🟤🟡🔴。没有知识库能力或当天没条目 → 空列表（段不出现）。
+  Future<List<String>> _knowledgeSectionLines(DateTime date) async {
+    final reader = knowledgeReader;
+    if (reader == null) return const <String>[];
+    final dayStart = DateTime(date.year, date.month, date.day);
+    final dayEnd = dayStart.add(const Duration(days: 1));
+    final rows = await reader.timeline(
+      dayStartMs: dayStart.millisecondsSinceEpoch,
+      dayEndMs: dayEnd.millisecondsSinceEpoch,
+    );
+    final lines = <String>[];
+    for (final row in rows) {
+      final title = row['title'] as String? ?? '';
+      final source = row['source'] as String?;
+      final core = row['core_summary'] as String? ?? '';
+      final m = row['maturity'] as int?;
+      final template = row['template'] as String?;
+      final fruit = m == 2 ? '🔴' : m == 1 ? '🟡' : '🟤';
+      final prefix = (template ?? '').isEmpty
+          ? ''
+          : '${_templateLabel(template!)}·';
+      final parts = <String>[
+        '- $prefix$title $fruit',
+        if ((source ?? '').isNotEmpty) '（来源：$source）',
+        if (core.isNotEmpty) '——$core',
+      ];
+      lines.add(parts.join(' '));
+    }
+    return lines;
+  }
+
+  /// 模板名（与知识页创作区口径一致）。
+  static String _templateLabel(String key) {
+    switch (key) {
+      case 'technique':
+        return '写作手法拆解';
+      case 'scene':
+        return '情景描写积累';
+      case 'material':
+        return '素材本';
+      case 'practice':
+        return '我的写作练习';
+    }
+    return key;
   }
 
   /// 取全部催办条目（source + state 配对 + 排序），**不做日期过滤**。
@@ -389,6 +454,16 @@ class DailyReportService {
       }
     }
     lines.add(const DocxLine(''));
+
+    // 知识系统段（+37）：有则显示、无则不出现。
+    final knowledgeLines = await _knowledgeSectionLines(date);
+    if (knowledgeLines.isNotEmpty) {
+      lines.add(const DocxLine('今日学习'));
+      for (final line in knowledgeLines) {
+        lines.add(DocxLine(line.replaceFirst(RegExp(r'^-\s+'), '· ')));
+      }
+      lines.add(const DocxLine(''));
+    }
 
     // 仓储动态
     final content = await buildContent(date);

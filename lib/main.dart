@@ -6,9 +6,11 @@ import 'package:flutter/material.dart';
 import 'data/daily_report_service.dart';
 import 'data/domain.dart';
 import 'data/inventory_database.dart';
+import 'data/knowledge_database.dart';
 import 'data/report_state_store.dart';
 import 'domain/domain_hub.dart';
 import 'domain/domain_instance.dart';
+import 'domain/knowledge_domain_instance.dart';
 import 'domain/overview_reader.dart';
 import 'domain/reminder_source.dart';
 import 'domain/reminder_sources.dart';
@@ -33,11 +35,15 @@ Future<void> main() async {
 
   final life = InventoryDatabase(domain: InventoryDomain.life);
   final work = InventoryDatabase(domain: InventoryDomain.work);
+  // V4.3（+37 知识库功能）：知识域从壳形态转正——knowledge.db 首建
+  // （schemaVersion=14，六表），种子 9 学科 + 创作表达 4 主题幂等写入。
+  // 知识读写走 KnowledgeDatabase 独立接口（不塞 InventoryRepository）。
+  final knowledge = KnowledgeDatabase();
   final hub = DomainHub(
     life: life,
     work: work,
     additionalInstances: <InventoryDomain, DomainInstance>{
-      InventoryDomain.knowledge: ShellDomainInstance(),
+      InventoryDomain.knowledge: KnowledgeDomainInstance(store: knowledge),
     },
   );
 
@@ -67,12 +73,15 @@ Future<void> main() async {
       // 工作区进行中/明日前瞻全部丢失（真机 2026-11-28 打回）。
       ScheduleReminderSource(work, InventoryDomain.work),
     ],
+    // V4.3（+37）：日报知识段——单份跨域日报的知识系统段（有则显示）。
+    knowledgeReader: knowledge,
   );
 
   runApp(HomeInventoryApp(
     database: life,
     hub: hub,
     reportService: reportService,
+    knowledgeStore: knowledge,
   ));
 
   // 补生成不阻塞首帧：失败也不影响 App（日报只是附加功能）。
@@ -94,6 +103,7 @@ class HomeInventoryApp extends StatelessWidget {
     required this.database,
     this.hub,
     this.reportService,
+    this.knowledgeStore,
   });
 
   final InventoryDatabase database;
@@ -103,6 +113,9 @@ class HomeInventoryApp extends StatelessWidget {
 
   /// V4.0 日报服务（null = 无日报能力）。
   final DailyReportService? reportService;
+
+  /// V4.3（+37）知识库读写口（null = 知识域保持壳页）。
+  final KnowledgeDatabase? knowledgeStore;
 
   @override
   Widget build(BuildContext context) {
@@ -115,6 +128,7 @@ class HomeInventoryApp extends StatelessWidget {
         repository: database,
         hub: hub,
         reportService: reportService,
+        knowledgeStore: knowledgeStore,
       ),
     );
   }

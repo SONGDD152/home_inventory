@@ -1173,3 +1173,28 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - **PM 真机验收全过**：数据管理签入口正确、四区纵向滚动无 tab、系统区三域 JSON 含 knowledge 空壳、生活/工作区备份恢复+Excel+Word 导出可达、知识区按钮置灰、散落入口撤干净、+33/+34 无回归。**V4.2.3（+36）正式关账。AI 不代签，签 = PM。**
 - **下一步解锁：+37 知识库功能**。开工回执七点已由元宝补第 7 点（创作表达区）全数落定（2026-11-28）。
 - **+37 开工口径落定（buddy 自主决策留档）**：① 备份枚举 9→15 = 6 张主表（nodes/entries/tags/entry_tags/links/entry_meta），**FTS 不进备份枚举**（虚拟表可从主表全量重建，备份只存真数据——否则 15 对不上）；② **knowledge.db 首建 schemaVersion=14**（含 15 张表），life/work 保持 v13 不动——分域版本号独立演进，旧版 app 恢复新备份走「版本过高拒绝」既有校验链，两库齐平旧口径由分域版本号取代。
+
+### V4.3.0 知识库功能版留档（2026-11-28）· versionCode 36 → 37
+
+> **依据**：PM +37 开工回执（2026-11-28 元宝代笔，七点全落定：备份枚举 9→15、updateNodeTitle 补口、deleteNode 软删边界、search_text 跨表落点、种子只进 knowledge.db、全系统备份填实、创作表达区第 7 点补完）。
+
+### 实现逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **knowledge.db 首建**（schemaVersion=14，分域版本号独立演进，life/work 保持 v13 不动）：六表 knowledge_nodes（自引用树 parent_id + node_type + maturity + is_system）/ knowledge_entries（source/core_summary/learned_at/template/**search_text 派生列**）/ tags / entry_tags / links / entry_meta | `lib/data/knowledge_database.dart`（新建） |
+| 2 | **知识域实例转正**：`KnowledgeDomainInstance` 取代壳实例（repository 照旧抛「知识系统不开放仓储账目」——语音路径照旧被能力开关拦；知识读写走 store 独立接口，铁律「新能力拆独立接口」）；能力开关增 `knowledgeLibrary` | `lib/domain/knowledge_domain_instance.dart`（新建）/ `domain.dart` / `domain_instance.dart`（删壳类）/ `main.dart` |
+| 3 | **种子幂等**：9 学科 + 创作表达 4 主题（is_system=1 可改名不可删）；判重把软删行算「已存在」——**用户删掉的根节点不被 seed 复活** | knowledge_database.dart `_ensureSeed` |
+| 4 | **Writer 九写口**：addSubject/addTopic（只挂学科，三层封顶）/addEntry（core_summary 强制非空、挂 topic）/updateNodeTitle（entry 改名后 search_text 同步重算不留脏索引）/updateEntry/deleteNode（**整棵子树软删**，links 边不软删 JOIN 过滤恢复接回）/moveNode（防环+深度校验）/setMaturity（practice 锁死🔴）/creativeTopics | 同上 |
+| 5 | **搜索**：search_text 派生列（标题+一句话核心+来源）+ LIKE 检索——**技术偏离留档：FTS5 在 Android 系统 SQLite 上大量真机不可用**（ROM 未编译），改派生列方案，接口语义不变，数据量级（个人笔记）LIKE 足够 | 同上 / 简报如实报 |
+| 6 | **知识系统页三页签**：今日学习摘要（时间线 learned_at 倒序）/ 知识系统（树视图：果实数标记 (n🟤 m🟡 k🔴)、空态引导、搜索）/ 创作表达（4 模板卡片动态表单：technique/scene/material/practice；practice 成熟度锁🔴+字数自动统计只读；详情页按模板分行显示、空字段不占位不留空行） | `lib/ui/knowledge_page.dart`（新建）/ `home_page.dart` 零模块域分支 |
+| 7 | **全系统备份 knowledge 分区填实**：exportAll 真数据六表（FTS/派生列不进备份，恢复后 `_rebuildSearchText` 全量重建）；restoreAll 校验上限按域独立（knowledge 14 / 仓储 13）；未注入 store 的形态维持 +36 壳口径（空壳跳过/带数据礼貌拒绝）；报数「N 学科 / M 条目」 | `lib/domain/full_system_backup.dart` |
+| 8 | **日报单份跨域 · 知识段**：`knowledgeReader` 注入；buildContent/buildDocx 增「今日学习」段——**有则显示、无则不出现**；条目=模板前缀（如「写作手法拆解·《白夜行》」）+标题+成熟度🟤🟡🔴+来源+一句话核心；导出前缀「小本本-…」照旧 | `lib/data/daily_report_service.dart` / `main.dart` |
+
+### 测试与发布
+
+- 新增 `test/v58_knowledge_library_test.dart` 12 条：建库 v14+种子/幂等+软删不复活/三层封顶错层拒绝/一句话核心非空/改名后 search_text 重算/moveNode 防环+深度/子树软删不进搜索+links 边不软删/系统主题不可删学科可删/创作区模板 meta 落表+空字段不占位/practice 成熟度锁死/全系统备份往返+报数「N 学科 / M 条目」/日报知识段两态。旧断言按 +37 口径改写**一条未删**（v55 壳实例段 8 处转建库版、能力开关 1 条）。v51/v53 版号锁升 4.3.0+37。**全量 706/706 全绿（694 旧条 + 12 新增），analyze 0 error / 0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=37 versionName=4.3.0；56,065,685 字节；sha256 `a5ed618beddf6fd2a20b77ab7e12f4459e3ca7acb91fdbc6da3b2bae898df320`；签名 c1647f33… 不变，可覆盖安装。
+- 线上核验：页面含 V4.3.0 与 sha、APK 直链 200 且线上 sha 逐字一致、无 sharecode 403、v423 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
+- **范围如实**：FTS5→派生列 LIKE 为技术方案偏离（台账留档，简报如实报）；创作区 4 模板不做内容推荐不自动填字段；meta 表只服务知识域不扩 life/work；versionName 4.3.0 为 buddy 建议（里程碑功能版，回执只定 versionCode=37），已随本版上线。
+- 需求链：+37 知识库功能（本版）→ +38 及以后（未排）。

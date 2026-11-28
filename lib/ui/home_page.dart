@@ -7,6 +7,7 @@ import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
 import '../data/item.dart';
+import '../data/knowledge_database.dart';
 import '../data/normalize.dart';
 import '../data/phrase_parser.dart';
 import '../data/reminder.dart';
@@ -23,6 +24,7 @@ import 'data_management_page.dart';
 import 'daily_report_page.dart';
 import 'home_module.dart';
 import 'item_list_page.dart';
+import 'knowledge_page.dart';
 import 'location_list_page.dart';
 import 'loan_list_page.dart';
 import 'overview_page.dart';
@@ -48,6 +50,7 @@ class HomePage extends StatefulWidget {
     this.title = '小本本',
     this.hub,
     this.reportService,
+    this.knowledgeStore,
   });
 
   final InventoryRepository repository;
@@ -58,6 +61,9 @@ class HomePage extends StatefulWidget {
 
   /// V4.1 批次 2：日报服务（null = 无日报能力，概览页不显示日报入口）。
   final DailyReportService? reportService;
+
+  /// V4.3（+37）：知识库读写口（null = 无知识库能力，知识域保持壳页）。
+  final KnowledgeDatabase? knowledgeStore;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -2416,10 +2422,16 @@ class _HomePageState extends State<HomePage> {
           dataManagementTab: _buildDataManagementTab(),
         );
       }
-      // V4.2.0 三域骨架：**零模块域**（知识系统）——不进模块分派，
-      // 直接给域壳页（建设中占位，不做假功能；库与功能随 +36 落地）。
-      // 注册表制：modulesOf 返回空的域自动走这条，加域零改动。
+      // V4.3（+37 知识库功能）：零模块域（知识系统）——能力开关开放
+      // knowledgeLibrary 且组合根注入了 KnowledgeDatabase → 知识库页
+      //（三页签：今日学习摘要 / 知识系统树视图 / 创作表达）。
+      // 未注入 store（单测/降级）→ 保持「建设中」壳页，不做假功能。
       if (_modules.isEmpty) {
+        if (_domain == InventoryDomain.knowledge &&
+            widget.knowledgeStore != null &&
+            domainSupports(_domain, DomainCapability.knowledgeLibrary)) {
+          return KnowledgePage(store: widget.knowledgeStore!);
+        }
         return BuildingPlaceholderPage(
           label: _domain.label,
           text: '${_domain.label}建设中，敬请期待',

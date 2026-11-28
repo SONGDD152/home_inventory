@@ -106,6 +106,9 @@ enum DomainCapability {
 
   /// 仓储账目（两个域都开放，这是 App 的本行）。
   storage,
+
+  /// 知识库读写（V4.3 +37 起对 knowledge 域开放）。
+  knowledgeLibrary,
 }
 
 /// 各域的能力开关。
@@ -124,13 +127,16 @@ const Map<InventoryDomain, Set<DomainCapability>> domainCapabilities =
     DomainCapability.reminders,
   },
 
-  /// 知识域：**能力开关全空**（V4.2.0 三域骨架）。
+  /// 知识域：V4.3（+37）起**只开放知识库能力**。
   ///
-  /// 知识域本轮只挂壳页——不开放仓储、不开放提醒、无备份。
-  /// 这是产品口径的地基（不是 if 补丁）：任何写路径问
-  /// [domainSupports] 都得到 false，写请求天然被拒。
-  /// 知识库功能版（+36）开放能力时改这里，不动调用方。
-  InventoryDomain.knowledge: <DomainCapability>{},
+  /// 仍不开放仓储/提醒（语音路径问 [domainSupports] 对 storage/reminders
+  /// 依旧得到 false，写请求天然被拒）；知识库读写走独立接口
+  /// `KnowledgeDatabase`（不塞 InventoryRepository，铁律「新能力拆独立接口」）。
+  /// UI 入口问 [domainSupports](knowledge, knowledgeLibrary) 决定渲染
+  /// 知识页还是「建设中」壳页。
+  InventoryDomain.knowledge: <DomainCapability>{
+    DomainCapability.knowledgeLibrary,
+  },
 };
 
 /// 某域是否开放某能力。

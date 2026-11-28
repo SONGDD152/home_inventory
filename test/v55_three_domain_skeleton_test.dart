@@ -5,10 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:home_inventory/data/domain.dart';
+import 'package:home_inventory/data/knowledge_database.dart';
 import 'package:home_inventory/domain/domain_hub.dart';
 import 'package:home_inventory/domain/domain_instance.dart';
+import 'package:home_inventory/domain/knowledge_domain_instance.dart';
 import 'package:home_inventory/ui/home_module.dart';
 import 'package:home_inventory/ui/home_page.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'fake_domain_repository.dart';
 
@@ -23,16 +26,29 @@ String stripLineComments(String path) {
   return buffer.toString();
 }
 
+/// V4.3（+37）：知识域测试实例——内存库（ffi），不落盘、互不干扰。
+KnowledgeDomainInstance testKnowledgeInstance() {
+  sqfliteFfiInit();
+  return KnowledgeDomainInstance(
+    store: KnowledgeDatabase(
+      injectedFactory: databaseFactoryFfi,
+      injectedPath: ':memory:',
+    ),
+  );
+}
+
 /// V55：三域骨架专项测试（V4.2.0 里程碑，PM 2026-11-28 终审拍板）。
 ///
 /// PM 原话口径锁死：
 /// * 顶栏四栏 [概览][生活][工作][知识]——知识库提平独立第三域
 ///   （全名「知识系统」，按钮文案「知识」），注册表驱动渲染；
 /// * 生活区底栏三栏 仓储/衣橱/餐饮（衣橱/餐饮建设中占位，抽屉跟随）；
-/// * 知识系统区不占底栏、无底栏模块，点顶栏进「建设中」壳页；
+/// * 知识系统区不占底栏、无底栏模块（+37 起主体为知识库页三页签，
+///   本文件锁的导航/底栏/抽屉口径不变；主体内容由 v58 专项覆盖）；
 /// * 概览不展示知识系统的任何信息（只聚合生活+工作两本账）;
-/// * 知识域独立物理分库、能力开关全空；骨架版**建壳不建库**（拍板⑤）
-///   ——`ShellDomainInstance` 无仓储句柄，repository 访问即抛。
+/// * 知识域独立物理分库；+33 骨架版建壳不建库，**+37 转正为建库版**
+///   （`KnowledgeDomainInstance`：仓储句柄照旧不开放、repository 访问即抛，
+///   知识读写走 `KnowledgeDatabase` 独立接口——铁律「新能力拆独立接口」）。
 void main() {
   // ============ 一、域定义与能力开关（纯 Dart） ============
 
@@ -45,11 +61,19 @@ void main() {
         reason: '独立物理分库的文件名已在域定义里定死（骨架版不打开它）');
   });
 
-  test('V55 知识域能力开关全空：不开放仓储、不开放提醒', () {
-    for (final capability in DomainCapability.values) {
-      expect(domainSupports(InventoryDomain.knowledge, capability), isFalse,
-          reason: '知识域 ${capability.name} 必须不开放（骨架版只建壳）');
-    }
+  test('V55 知识域能力开关：+37 起只开放知识库，仍不开放仓储/提醒', () {
+    expect(domainSupports(InventoryDomain.knowledge, DomainCapability.storage),
+        isFalse,
+        reason: '知识域不开放仓储（语音路径照旧被能力开关拦掉）');
+    expect(
+        domainSupports(InventoryDomain.knowledge, DomainCapability.reminders),
+        isFalse,
+        reason: '知识域不开放提醒');
+    expect(
+        domainSupports(
+            InventoryDomain.knowledge, DomainCapability.knowledgeLibrary),
+        isTrue,
+        reason: '+37 起开放知识库读写（独立接口 KnowledgeDatabase）');
   });
 
   test('V55 生活/工作能力开关不受三域改造影响', () {
@@ -73,30 +97,33 @@ void main() {
         reason: '知识系统区不占底栏、无底栏模块');
   });
 
-  // ============ 二、壳实例（建壳不建库） ============
+  // ============ 二、知识域实例（+37 建库版，取代壳形态） ============
 
-  test('V55 壳实例：无仓储句柄，repository 访问即抛 ArgumentError', () {
-    final shell = ShellDomainInstance();
-    expect(shell.domainId, 'knowledge');
-    expect(shell.activeOperations, 0, reason: '壳无在飞操作，切库守卫零等待');
+  test('V55 知识域实例：不开放仓储句柄，repository 访问即抛 ArgumentError', () {
+    final instance = testKnowledgeInstance();
+    expect(instance.domainId, 'knowledge');
+    expect(instance.activeOperations, 0,
+        reason: '未执行写路径时在飞为 0，切库守卫零等待');
     expect(
-      () => shell.repository,
+      () => instance.repository,
       throwsArgumentError,
     );
     expect(
-      () => shell.repository,
+      () => instance.repository,
       throwsA(isA<ArgumentError>()
           .having((e) => '${e.message}', 'message', contains('知识系统'))),
       reason: '报错文案带「知识系统」，UI 层友好中文可展示',
     );
   });
 
-  test('V55 壳实例：禁写/关闭/重连都是空操作（无连接可管）', () async {
-    final shell = ShellDomainInstance();
-    shell.setWritesBlocked(true);
-    shell.setWritesBlocked(false);
-    await shell.close();
-    await shell.reopen();
+  test('V55 知识域实例：禁写/关闭/重连管理真实连接（内存库全链安全）', () async {
+    final instance = testKnowledgeInstance();
+    instance.setWritesBlocked(true);
+    instance.setWritesBlocked(false);
+    await instance.store.open(); // 建库 + 种子（幂等）。
+    await instance.close();
+    await instance.reopen();
+    await instance.close();
   });
 
   // ============ 三、DomainHub 注册表 ============
@@ -104,7 +131,7 @@ void main() {
   test('V55 DomainHub 注册表：知识域经 additionalInstances 注册即可查表',
       () async {
     final domains = fakeDomains();
-    final shell = ShellDomainInstance();
+    final shell = testKnowledgeInstance();
     final hub = DomainHub(
       life: domains.life,
       work: domains.work,
@@ -130,7 +157,7 @@ void main() {
     expect(
       () => hub.instanceOf(InventoryDomain.knowledge),
       throwsArgumentError,
-      reason: '组合根忘了注册知识域壳实例时，宁可当场炸也不静默指错库',
+      reason: '组合根忘了注册知识域实例时，宁可当场炸也不静默指错库',
     );
   });
 
@@ -158,7 +185,7 @@ void main() {
       life: domains.life,
       work: domains.work,
       additionalInstances: <InventoryDomain, DomainInstance>{
-        InventoryDomain.knowledge: ShellDomainInstance(),
+        InventoryDomain.knowledge: testKnowledgeInstance(),
       },
     );
 
@@ -186,7 +213,7 @@ void main() {
       life: domains.life,
       work: domains.work,
       additionalInstances: <InventoryDomain, DomainInstance>{
-        InventoryDomain.knowledge: ShellDomainInstance(),
+        InventoryDomain.knowledge: testKnowledgeInstance(),
       },
     );
 
@@ -213,7 +240,7 @@ void main() {
       life: domains.life,
       work: domains.work,
       additionalInstances: <InventoryDomain, DomainInstance>{
-        InventoryDomain.knowledge: ShellDomainInstance(),
+        InventoryDomain.knowledge: testKnowledgeInstance(),
       },
     );
 
@@ -244,7 +271,7 @@ void main() {
       life: domains.life,
       work: domains.work,
       additionalInstances: <InventoryDomain, DomainInstance>{
-        InventoryDomain.knowledge: ShellDomainInstance(),
+        InventoryDomain.knowledge: testKnowledgeInstance(),
       },
     );
 
@@ -284,7 +311,7 @@ void main() {
       life: domains.life,
       work: domains.work,
       additionalInstances: <InventoryDomain, DomainInstance>{
-        InventoryDomain.knowledge: ShellDomainInstance(),
+        InventoryDomain.knowledge: testKnowledgeInstance(),
       },
     );
 
@@ -309,11 +336,11 @@ void main() {
 
   // ============ 五、源码级锁 ============
 
-  test('V55 源码级锁：组合根注册知识域壳实例（漏注册 = instanceOf 当场炸）', () {
+  test('V55 源码级锁：组合根注册知识域实例（漏注册 = instanceOf 当场炸）', () {
     final code = stripLineComments('lib/main.dart');
-    expect(code, contains('ShellDomainInstance()'),
-        reason: '组合根必须注册知识域壳实例');
-    expect(code, contains('InventoryDomain.knowledge: ShellDomainInstance()'),
+    expect(code, contains('KnowledgeDomainInstance(store: knowledge)'),
+        reason: '组合根必须注册知识域实例（+37 建库版）');
+    expect(code, contains('InventoryDomain.knowledge:'),
         reason: '注册键必须是知识域（写错键 = 知识域未注册）');
   });
 }

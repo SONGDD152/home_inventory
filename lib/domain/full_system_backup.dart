@@ -1,6 +1,7 @@
 import '../data/domain.dart';
 import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
+import '../data/knowledge_database.dart';
 
 /// V4.2.1（+34）：**全系统备份**——生活区 + 工作区两本账打包成**一份 JSON**。
 ///
@@ -42,10 +43,20 @@ import '../data/inventory_repository.dart';
 ///   文案都明确指路，不静默。
 class FullSystemBackup {
   /// 只收开放仓储能力的域 → 仓储（生产：life + work）。
-  FullSystemBackup({required Map<InventoryDomain, InventoryRepository> repositories})
-      : _repositories = Map<InventoryDomain, InventoryRepository>.of(repositories);
+  ///
+  /// [knowledgeStore] 非空 = +37 建库版，knowledge 分区导出真数据；
+  /// null = +36 壳形态，knowledge 分区恒空壳（行为与 +36 一字不差）。
+  FullSystemBackup({
+    required Map<InventoryDomain, InventoryRepository> repositories,
+    KnowledgeDatabase? knowledgeStore,
+  })  : _repositories =
+            Map<InventoryDomain, InventoryRepository>.of(repositories),
+        _knowledgeStore = knowledgeStore;
 
   final Map<InventoryDomain, InventoryRepository> _repositories;
+
+  /// 知识库读写口（null = 未建库形态，knowledge 分区恒空壳）。
+  final KnowledgeDatabase? _knowledgeStore;
 
   /// 全系统备份的类型标识（顶层 `kind` 字段）。
   static const String kindFullSystem = 'full_system';
@@ -63,7 +74,7 @@ class FullSystemBackup {
   /// 三域 JSON）。恢复校验按此白名单放行，未知的分区仍拒。
   List<InventoryDomain> get partitionDomains => InventoryDomain.values;
 
-  /// 知识壳分区：只带归属标识，不带任何表键（+35 不建库、+36 建库前恒壳）。
+  /// 知识壳分区：只带归属标识，不带任何表键（未注入 knowledgeStore 时的兜底）。
   Map<String, Object?> _knowledgeShellPartition() => <String, Object?>{
         'app': 'home_inventory',
         'domain': InventoryDomain.knowledge.id,
@@ -73,7 +84,7 @@ class FullSystemBackup {
   /// 导出全系统备份。
   ///
   /// 纯读取不改库；任何一域导出失败即整体失败（不让用户拿到半份备份）。
-  /// 知识域恒输出壳分区（+35 不建库不接 Writer——PM 终审边界）。
+  /// +37 建库版：knowledge 分区导出六表真数据；未注入 store 时仍输出壳分区。
   Future<Map<String, Object?>> exportAll() async {
     final entries = <String, Object?>{};
     for (final domain in partitionDomains) {
@@ -81,6 +92,9 @@ class FullSystemBackup {
       if (repo != null &&
           domainSupports(domain, DomainCapability.storage)) {
         entries[domain.id] = await repo.exportBackup();
+      } else if (domain == InventoryDomain.knowledge &&
+          _knowledgeStore != null) {
+        entries[domain.id] = await _knowledgeStore.exportBackup();
       } else {
         entries[domain.id] = _knowledgeShellPartition();
       }
@@ -166,23 +180,32 @@ class FullSystemBackup {
         );
       }
       final schemaVersion = (bodyMap['schemaVersion'] as num?)?.toInt();
-      if (schemaVersion == null ||
-          schemaVersion > InventoryDatabase.currentSchemaVersion) {
+      // 版本上限**按域独立**：knowledge.db 分域版本号（+37 起 v14），
+      // 仓储两库 v13——分域版本号各自演进（台账 2026-11-28 留档）。
+      final maxVersion = domain == InventoryDomain.knowledge
+          ? KnowledgeDatabase.version
+          : InventoryDatabase.currentSchemaVersion;
+      if (schemaVersion == null || schemaVersion > maxVersion) {
         throw ArgumentError.value(
           schemaVersion,
           'schemaVersion',
           '分区（${domain.label}）的备份版本高于当前应用支持的数据库版本'
-              '（${InventoryDatabase.currentSchemaVersion}）',
+              '（$maxVersion）',
         );
       }
       validated[domain] = bodyMap;
     }
 
     // 校验全过 → 逐域落库（delegate 单域恢复，收口全继承）。
-    // 知识壳分区：+35 不建库，空壳跳过；壳分区若混进表键（未来版本导出）
-    // 明确拒绝——数据还在文件里，升级到知识库功能版即可恢复，不静默丢弃。
+    // 知识分区：+37 建库版真数据恢复（delegate KnowledgeDatabase.restoreBackup）；
+    // 未注入 store 时维持 +36 口径——空壳跳过、带表键明确拒绝指路升级。
     for (final entry in validated.entries) {
       if (!_repositories.containsKey(entry.key)) {
+        if (entry.key == InventoryDomain.knowledge &&
+            _knowledgeStore != null) {
+          await _knowledgeStore.restoreBackup(entry.value);
+          continue;
+        }
         final extraKeys = entry.value.keys
             .where((k) =>
                 k != 'app' && k != 'domain' && k != 'schemaVersion')
@@ -224,10 +247,19 @@ class FullSystemBackup {
   }
 
   String _describeDomain(InventoryDomain domain, Map<String, Object?> body) {
-    // 知识壳分区（+35 不建库）：恒无表键，报一行状态而不是逐表清点。
-    if (domain == InventoryDomain.knowledge &&
-        !body.containsKey(InventoryDatabase.tableItems)) {
-      return '知识系统：暂无数据（备份通道已就绪，知识库建库后自动纳入）';
+    // 知识分区（+37）：带 nodes 表 → 报「N 学科 / M 条目」；
+    // 空壳（无任何表键）→ 报一行状态。
+    if (domain == InventoryDomain.knowledge) {
+      if (!body.containsKey(KnowledgeDatabase.tableNodes)) {
+        return '知识系统：暂无数据（备份通道已就绪，知识库建库后自动纳入）';
+      }
+      int nodeCount(String type) {
+        final rows = body[KnowledgeDatabase.tableNodes] as List? ?? const [];
+        return rows.whereType<Map>().where((r) => r['node_type'] == type).length;
+      }
+
+      return '知识系统：${nodeCount('subject')} 学科 / '
+          '${nodeCount('entry')} 条目';
     }
     int countOf(String table) => (body[table] as List?)?.length ?? 0;
     final parts = <String>[

@@ -1026,3 +1026,32 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 
 - **纯序号 +32（4.1.7）**：v53（测试）必加「仓储动态/账目快照两段存在且非空」断言；改名版真机演练关账后开工。
 - 全系统备份 +33（4.1.8）→ 数据管理页签 +34（4.1.9）→ 知识库 +35（4.2.0）。
+
+### V4.1.7 备份恢复修复版留档（2026-11-28）· versionCode 31 → 32
+
+> **触发**：改名迁移演练 PM 真机验机打回——「旧包导出的 JSON 恢复到新包，工作区日程等数据未完整导入（生活区正常）」。PM 指令：定位修复导出/导入管道，出补丁版；修复后 PM 重走演练核对清单，全过才关账。
+
+### 根因定位（两条，都实锤）
+
+| # | 根因 | 层 | 证据 |
+|---|---|---|---|
+| 1 | **恢复成功后首页不刷新**：概览/日程签数据只在 initState 读一次，`_push(BackupPage)` 返回无 setState——恢复完成返回首页看到的是**恢复前的内存数据**（新装包=空库），体感=「导入后数据丢了」。生活区「正常」只是因为切域走了 `_switchSection` 全量刷新 | UI 层 | `backup_page.dart` 无 onRestored 传递；`home_page.dart` `_push` 无返回刷新 |
+| 2 | **恢复收口抹掉软删物品数量**：`restoreBackup` 收口对全部物品跑 `_syncItemTotal`，软删物品的关联也是软删 → SUM(活跃位置)=0 → 备份里保真的 quantity 被改写成 0 | 数据层 | v54 往返测试实锤：电钻备份 quantity=1，恢复后 0 |
+
+> **注意**：备份 JSON 本身（exportBackup 9 表全量含软删行）与恢复落库（按原 id 重插）经 9 表逐行逐列比对**全保真**——丢的是「界面没刷新」的体感 + 软删 quantity 一处真实改写。
+
+### 修复逐条
+
+| # | 修复 | 落点 |
+|---|---|---|
+| 1 | BackupPage 加 `onRestored` 参数并转发 BackupActions；home_page 备份入口传 `_onBackupRestored`（setState 清 result/notice → body 重建 → 概览页重读库） | `backup_page.dart` / `home_page.dart` |
+| 2 | 恢复收口**跳过软删行**——软删物品 quantity 按备份原样落地（回收站恢复另有收口） | `inventory_database.dart` restoreBackup |
+| 3 | 恢复完成 SnackBar 带**行数明细**（物品/日程/催办状态/借出/日报），核对清单当场有数字可对；老备份缺表**点名提示**「导出较早不含 X，无法找回」，不再静默按空表处理 | `backup_actions.dart` `_restoreResultText` |
+
+### 测试与发布
+
+- 新增 `test/v54_backup_roundtrip_test.dart`（工作区全类型数据 9 表逐行逐列往返保真 + 导出行字段==表全部列防模型吞列）；`backup_page_test.dart` 增 3 条（行数提示/缺表点名/onRestored 必达）；v51/v53 版号断言同步 4.1.7+32。**全量 660/660 全绿，analyze 0 error/0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=32 versionName=4.1.7；55,426,349 字节；sha256 `33d23b4ff77d9fe62b7fdcada0a4c5ca354682a52edc783cc95687e60b1da5ac`；签名 c1647f33… 不变。
+- 线上核验：页面 200 含 V4.1.7/versionCode=32/sha/v417.apk；APK 直链 200，线上 sha 与本地逐字一致；不带 sharecode 403。V4.1.6 入历史索引。
+- **版号链顺延（待 PM 确认）**：+32 被本补丁占用，原排定纯序号版顺延——纯序号+33 → 全系统备份+34 → 数据管理页签+35 → 知识库+36。
+- **演练重跑口径**：PM 按下载页五步重走演练；恢复完成提示直接报行数，两边数字对上再逐项核对；全过才关账，真机签=PM。

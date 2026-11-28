@@ -2089,7 +2089,13 @@ class _HomePageState extends State<HomePage> {
                 subtitle: const Text('导出 JSON / 从文件恢复'),
                 onTap: () {
                   Navigator.of(context).pop();
-                  _push(BackupPage(repository: _execRepo, domain: _domain));
+                  _push(BackupPage(
+                    repository: _execRepo,
+                    domain: _domain,
+                    // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
+                    // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
+                    onRestored: _onBackupRestored,
+                  ));
                 },
               ),
               // V3.7：借出管理（元宝决策③A，排最后；不动五模块底栏）。
@@ -2391,8 +2397,20 @@ class _HomePageState extends State<HomePage> {
     _push(DailyReportPage(service: service));
   }
 
-  /// V4.0：提醒源注册表（统一 [ReminderSource] 接口，概览代码不因新增源而改）。
+  /// V4.1.7（演练打回）：备份页恢复成功后强制刷新首页。
   ///
+  /// 恢复=清空重灌整本账，首页内存里的概览/催办/日程/仓储列表**全部陈旧**
+  /// （新装包场景=全空）——不刷新就是「导入后数据丢了」的体感真相。
+  /// setState 让 body 整体重建，概览页（initState 读库）随之重新加载。
+  Future<void> _onBackupRestored() async {
+    if (!mounted) return;
+    setState(() {
+      _result = null;
+      _notice = null;
+    });
+  }
+
+  /// V4.0：提醒源注册表（统一 [ReminderSource] 接口，概览代码不因新增源而改）。
   /// V4.1：**域必填**——两个源必须显式声明自己属于哪本账，
   /// 否则生活区与工作区的源共用同一个 id / displayName，
   /// 概览拿它当 Map key 时会互相覆盖（V4.0 的 E1 bug）。

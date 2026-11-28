@@ -18,6 +18,7 @@ class BackupPage extends StatelessWidget {
     required this.repository,
     this.gateway,
     this.domain = InventoryDomain.life,
+    this.onRestored,
   });
 
   final InventoryRepository repository;
@@ -27,6 +28,14 @@ class BackupPage extends StatelessWidget {
 
   /// 备份交互网关；生产默认系统实现，测试注入假网关。
   final BackupGateway? gateway;
+
+  /// V4.1.7（演练打回）：恢复成功后的回调——**必须让首页刷新**。
+  ///
+  /// 演练真机打回的根因之一：恢复=清空重灌整本账，但首页的概览/日程签
+  /// 数据只在 initState 读一次，恢复完返回首页看到的还是**恢复前的
+  /// 内存数据**（新装包=空库），体感就是「导入后数据丢了」。
+  /// 生活区「正常」只是因为切域走了 _switchSection 的全量刷新。
+  final Future<void> Function()? onRestored;
 
   @override
   Widget build(BuildContext context) {
@@ -53,6 +62,7 @@ class BackupPage extends StatelessWidget {
               gateway: gateway,
               compact: false,
               domain: domain,
+              onRestored: onRestored,
             ),
           ],
         ),

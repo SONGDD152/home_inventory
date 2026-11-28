@@ -1,0 +1,38 @@
+name: home_inventory
+description: 小本本 APP 第一阶段数据层：物品位置的本地持久化。不含语音与界面。
+publish_to: none
+version: 4.1.6+31
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sqflite: ^2.4.6
+  path: ^1.9.1
+  share_plus: ^10.1.4
+  file_picker: ^8.3.7
+  path_provider: ^2.1.5
+  # V3.6 Excel 导出：纯 Dart 包（无原生插件），不触碰 lifecycle override 冲突区。
+  excel: ^4.0.6
+  # V4.1.4 月历阴历/节日/节气：纯 Dart 无第三方依赖，本地算不联网。
+  # 依赖解析后必须 diff pubspec.lock，除本包外零变动（护 lifecycle 2.0.24 override）。
+  lunar: ^1.7.9
+
+# lifecycle 2.0.35 要求 compileSdk>=36，与 file_picker 8.3.7（android-34）包内冲突；
+# 锁定 2.0.24（compileSdk 34，硬编码）使二者一致，API 无差异。
+# 解除条件：file_picker 升级到其 android 模块 compileSdk>=36 且传递依赖
+# 一致的版本后，可删除本 override（届时跑一次 release 构建验证
+# checkReleaseAarMetadata 通过）。在此之前禁止 flutter pub upgrade 盲升。
+dependency_overrides:
+  flutter_plugin_android_lifecycle: 2.0.24
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+  sqflite_common_ffi: ^2.4.7
+
+flutter:
+  uses-material-design: true

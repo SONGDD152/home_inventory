@@ -37,9 +37,9 @@ void main() {
     expect(offenders, isEmpty, reason: 'D2 拍板：全改「小本本」，一处不残留');
   });
 
-  test('源码级锁④：版号 4.1.6+31（改名占 +31，纯序号顺延 +32）', () {
+  test('源码级锁④：版号 4.1.7+32（V4.1.7 备份恢复修复补丁版）', () {
     final pubspec = File('pubspec.yaml').readAsStringSync();
-    expect(pubspec, contains('version: 4.1.6+31'));
+    expect(pubspec, contains('version: 4.1.7+32'));
     expect(pubspec, contains('name: home_inventory'),
         reason: 'pubspec name 是 Dart 包名，刻意不动（改动=全仓 import 连锁）');
   });

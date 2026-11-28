@@ -2655,12 +2655,17 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
       //    否则会破坏用户已分的布局，如「阳台1客厅2」被平均成「阳台2客厅1」）。
       //  * v8 及更早备份：位置无 quantity（补默认 1），需把 items.quantity
       //    按迁移同款口径分配到位置，再 sync，才不丢校准则。
+      //  * V4.1.7（演练打回）：**软删行跳过 sync**——软删物品的关联也全是
+      //    软删，SUM(活跃位置)=0 会把备份里保真的 quantity 抹成 0，
+      //    回收站恢复后就剩 0 个。软删行的 quantity 是「删除那一刻的快照」，
+      //    按备份原样落地；回收站恢复物品时另有收口重算。
       final legacy = backupVersion < 9;
       final restoredItems = await txn.query(
         tableItems,
-        columns: <String>[columnId, columnQuantity],
+        columns: <String>[columnId, columnQuantity, columnIsDeleted],
       );
       for (final row in restoredItems) {
+        if ((row[columnIsDeleted] as num?)?.toInt() == 1) continue;
         final itemId = row[columnId] as int;
         if (legacy) {
           final total = (row[columnQuantity] as num?)?.toInt() ?? 1;

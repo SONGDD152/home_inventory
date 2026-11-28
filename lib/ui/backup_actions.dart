@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../data/backup_gateway.dart';
 import '../data/domain.dart';
+import '../data/inventory_database.dart';
 import '../data/inventory_repository.dart';
 
 /// 备份/恢复/Excel 导出操作块（可复用）。
@@ -186,8 +187,15 @@ class _BackupActionsState extends State<BackupActions> {
       await widget.repository.restoreBackup(data);
       await widget.onRestored?.call();
       if (!mounted) return;
+      // V4.1.7（演练打回）：恢复提示必须带**行数明细**——
+      // 「导入后数据丢了」不能再靠事后翻页面感知，恢复那一刻
+      // 就把各本账进了多少行报出来，演练核对清单直接有数字可对。
+      // 老备份缺表（低版本导出）也在这一刻明确点名，不再静默按空表处理。
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('恢复完成。')),
+        SnackBar(
+          duration: const Duration(seconds: 6),
+          content: Text(_restoreResultText(data)),
+        ),
       );
     } on FormatException catch (e) {
       if (!mounted) return;
@@ -209,6 +217,40 @@ class _BackupActionsState extends State<BackupActions> {
     }
     if (!mounted) return;
     setState(() => _busy = false);
+  }
+
+  // ---------- 恢复结果提示 ----------
+
+  /// 恢复完成的提示文案：核心账行数 + 缺表点名。
+  ///
+  /// 只统计用户能看懂的账：物品 / 日程 / 催办状态 / 借出 / 日报。
+  /// 备份里缺的表（低版本导出，恢复时按空表处理）逐个点名——
+  /// 「这份备份里没有」必须直说，不许静默。
+  String _restoreResultText(Map<String, dynamic> data) {
+    int countOf(String table) => (data[table] as List?)?.length ?? 0;
+    final parts = <String>[
+      '物品 ${countOf(InventoryDatabase.tableItems)} 条',
+      '日程 ${countOf(InventoryDatabase.tableReminders)} 条',
+      '催办状态 ${countOf(InventoryDatabase.tableTodoStates)} 条',
+      '借出 ${countOf(InventoryDatabase.tableLoans)} 条',
+      '日报 ${countOf(InventoryDatabase.tableDailyReports)} 条',
+    ];
+    const missingLabels = <String, String>{
+      InventoryDatabase.tableReminders: '日程',
+      InventoryDatabase.tableDailyReports: '日报',
+      InventoryDatabase.tableTodoStates: '催办状态',
+      InventoryDatabase.tableLoans: '借出记录',
+      InventoryDatabase.tableBorrowers: '借阅人',
+      InventoryDatabase.tableItemDiscards: '废弃流水',
+    };
+    final missing = missingLabels.entries
+        .where((e) => !data.containsKey(e.key))
+        .map((e) => e.value)
+        .toList();
+    final head = '恢复完成：${parts.join('、')}。';
+    return missing.isEmpty
+        ? head
+        : '$head注意：这份备份导出较早，不含${missing.join('、')}，这部分数据无法从这份备份找回。';
   }
 
   // ---------- 界面 ----------

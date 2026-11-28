@@ -135,6 +135,99 @@ void main() {
     expect(find.byKey(const Key('restore_backup')), findsOneWidget,
         reason: '页面仍在，未崩溃');
   });
+
+  // ── V54（V4.1.7 演练打回）：恢复提示带行数、缺表点名、onRestored 必达 ──
+
+  testWidgets('V54 恢复完成提示带行数明细（核对清单直接有数字可对）', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'domain': 'work',
+      'schemaVersion': 13,
+      'items': <Object?>[<String, Object?>{}, <String, Object?>{}],
+      'locations': <Object?>[<String, Object?>{}],
+      'item_locations': <Object?>[],
+      'borrowers': <Object?>[],
+      'loans': <Object?>[<String, Object?>{}],
+      'item_discards': <Object?>[],
+      'reminders': <Object?>[
+        <String, Object?>{},
+        <String, Object?>{},
+        <String, Object?>{},
+      ],
+      'daily_reports': <Object?>[],
+      'todo_states': <Object?>[<String, Object?>{}],
+    }));
+    await pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('物品 2 条'), findsOneWidget);
+    expect(find.textContaining('日程 3 条'), findsOneWidget);
+    expect(find.textContaining('催办状态 1 条'), findsOneWidget);
+    // 全表齐 → 不出「缺表」提醒。
+    expect(find.textContaining('导出较早'), findsNothing);
+  });
+
+  testWidgets('V54 老备份缺表：恢复成功但明确点名缺什么（不许静默）', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    // 低版本结构：没有 reminders / daily_reports / todo_states 键。
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'schemaVersion': 5,
+      'items': <Object?>[],
+      'locations': <Object?>[],
+      'item_locations': <Object?>[],
+    }));
+    await pumpPage(tester, repo: repo, gateway: gateway);
+
+    await tester.tap(find.byKey(const Key('restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repo.restoreCalls, 1);
+    expect(find.textContaining('导出较早'), findsOneWidget);
+    expect(find.textContaining('日程'), findsOneWidget);
+    expect(find.textContaining('催办状态'), findsOneWidget);
+    expect(find.textContaining('无法从这份备份找回'), findsOneWidget);
+  });
+
+  testWidgets('V54 恢复成功必调 onRestored（首页刷新链路的关键一跳）', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'domain': 'work',
+      'schemaVersion': 13,
+      'items': <Object?>[],
+      'locations': <Object?>[],
+      'item_locations': <Object?>[],
+      'reminders': <Object?>[],
+      'todo_states': <Object?>[],
+    }));
+    var restored = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: BackupPage(
+        repository: repo,
+        gateway: gateway,
+        onRestored: () async => restored++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(restored, 1, reason: '恢复成功必须通知调用方刷新（首页内存态全陈旧）');
+  });
 }
 
 /// 校验拒绝模拟：restoreBackup 抛 ArgumentError（与生产仓储校验一致）。

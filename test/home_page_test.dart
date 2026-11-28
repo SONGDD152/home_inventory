@@ -1335,7 +1335,8 @@ void main() {
     expect(find.text('语音记账'), findsOneWidget);
     expect(find.text('位置管理'), findsOneWidget);
     expect(find.text('物品明细'), findsOneWidget);
-    expect(find.text('数据备份与恢复'), findsOneWidget);
+    // V4.2.2（+35）：入口收拢升级为「数据管理」页签。
+    expect(find.text('数据管理'), findsOneWidget);
   });
 
   testWidgets('抽屉：点「物品明细」进入明细页（底部操作区可见）', (tester) async {
@@ -1364,14 +1365,17 @@ void main() {
         reason: '空库显示空态引导');
   });
 
-  testWidgets('抽屉：点「数据备份与恢复」进入备份页', (tester) async {
+  testWidgets('抽屉：点「数据管理」进入数据管理页签', (tester) async {
     await pumpApp(tester);
     await tester.tap(find.byKey(const Key('open_drawer')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('drawer_backup')));
     await tester.pumpAndSettle();
 
-    expect(find.text('数据备份与恢复'), findsOneWidget);
+    expect(find.text('数据管理'), findsOneWidget);
+    // V4.2.2（+35）：分区操作搬进「分区备份」签，切签后可见。
+    await tester.tap(find.text('分区备份'));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('export_backup')), findsOneWidget);
   });
 

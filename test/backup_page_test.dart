@@ -390,7 +390,7 @@ void main() {
     expect(lifeRepo.restoreCalls, 0, reason: '校验拒绝时不得落库');
     expect(workRepo.restoreCalls, 0);
     expect(find.textContaining('恢复失败'), findsOneWidget);
-    expect(find.textContaining('请到对应区域的「数据备份与恢复」页恢复'),
+    expect(find.textContaining('请到对应区域的「数据管理 → 分区备份」页签恢复'),
         findsOneWidget, reason: '指路分区入口');
     expect(find.byKey(const Key('full_restore_backup')), findsOneWidget,
         reason: '页面仍在，未崩溃');

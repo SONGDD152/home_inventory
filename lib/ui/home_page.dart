@@ -18,8 +18,8 @@ import '../domain/reminder_editor.dart';
 import '../domain/reminder_source.dart';
 import '../domain/reminder_sources.dart';
 import '../domain/todo_state_writer.dart';
-import 'backup_page.dart';
 import 'calibration_page.dart';
+import 'data_management_page.dart';
 import 'daily_report_page.dart';
 import 'home_module.dart';
 import 'item_list_page.dart';
@@ -2108,25 +2108,38 @@ class _HomePageState extends State<HomePage> {
                   _push(ItemListPage(repository: _execRepo, domain: _domain));
                 },
               ),
+              // V4.2.2（+35）：抽屉入口收拢升级——「数据备份与恢复」单页
+              // 变「数据管理」页签（全系统备份/分区备份/导出 Excel/
+              // 回收站与清理四块）。旧 BackupPage 类保留为子页，
+              // key `drawer_backup` 不变（选中态/旧断言语义不受影响）。
               ListTile(
                 key: const Key('drawer_backup'),
                 leading: const Icon(Icons.backup_outlined),
-                title: const Text('数据备份与恢复'),
-                subtitle: const Text('导出 JSON / 从文件恢复'),
-                onTap: () {
+                title: const Text('数据管理'),
+                subtitle: const Text('备份恢复 / 导出 Excel / 回收站'),
+                onTap: () async {
                   Navigator.of(context).pop();
-                  _push(BackupPage(
-                    repository: _execRepo,
-                    domain: _domain,
-                    // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
-                    // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
-                    onRestored: _onBackupRestored,
-                    // V4.2.1（+34）：全系统备份（生活+工作一份文件）。
-                    // 只在多域模式提供；单测注入单仓储时不显示全系统区。
-                    fullSystem: widget.hub == null
-                        ? null
-                        : FullSystemBackup(repositories: _storageRepositories()),
-                  ));
+                  await Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => DataManagementPage(
+                        repository: _execRepo,
+                        domain: _domain,
+                        // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
+                        // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
+                        onRestored: _onBackupRestored,
+                        // V4.2.1（+34）：全系统备份（生活+工作一份文件）。
+                        // 只在多域模式提供；单测注入单仓储时不显示全系统区。
+                        fullSystem: widget.hub == null
+                            ? null
+                            : FullSystemBackup(
+                                repositories: _storageRepositories()),
+                      ),
+                    ),
+                  );
+                  // V4.2.2（+35）兜底刷新：页签内回收站恢复/彻底删除/
+                  // 全部清空都改了库；恢复本身有 onRestored 即时回调，
+                  // 返回后再刷一次是幂等兜底（V4.1.7 同款链路）。
+                  await _onBackupRestored();
                 },
               ),
               // V3.7：借出管理（元宝决策③A，排最后；不动五模块底栏）。

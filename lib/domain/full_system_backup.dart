@@ -89,7 +89,8 @@ class FullSystemBackup {
       throw ArgumentError.value(
         data['kind'],
         'kind',
-        '这是分区备份（单个区域的文件），请到对应区域的「数据备份与恢复」页恢复',
+        '这是分区备份（单个区域的文件），'
+        '请到对应区域的「数据管理 → 分区备份」页签恢复',
       );
     }
     // ③ domains 映射。

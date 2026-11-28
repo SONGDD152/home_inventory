@@ -1119,3 +1119,26 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - aapt2 实测：`com.danfeng.xiaobenben` versionCode=34 versionName=4.2.1；55,442,741 字节；sha256 `b6b3d28b35e05919aa0f4a902081b56bcc92622f6306b8fe95cdf58df35342a2`；签名 c1647f33… 不变，可覆盖安装。
 - **如实说明**：调研时提的「偏好落盘缺口」经核查不成立——全 app 无 SharedPreferences，唯一用户设置（月历农历开关）为内存态、默认开，无可落盘之物，本版不虚增该范围。
 - 需求链：+34（本版）→ +35 数据管理页签 → +36 知识库功能（开工前落 v5 施工图）。
+
+### V4.2.2 数据管理页签版留档（2026-11-28）· versionCode 34 → 35
+
+> **依据**：PM 开工边界（2026-11-28 拍板）——「把抽屉里『数据备份与恢复』单页，收拢升级为数据管理页签，承载备份/恢复/导出/清理等数据类操作」。红线：不建知识域表、不改备份 JSON 格式（formatVersion:1、domains.life/work 九表结构不动）、不碰签名/下载页/sha 链路。
+
+### 实现逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **数据管理页签**：抽屉入口升级「数据管理」（key `drawer_backup` 不变），TabBar 四签：全系统备份（推荐）/分区备份/导出 Excel/回收站与清理 | `lib/ui/data_management_page.dart`（新建） |
+| 2 | **全系统区原样搬入**：+34 的 FullSystemBackupPanel 一字不改进签①；fullSystem=null（单域注入）时显示提示，与 BackupPage 同口径 | 同上 |
+| 3 | **BackupPage 重构为 BackupPageBody**：无 Scaffold 主体抽出，分区备份签与旧 BackupPage 共用；BackupPage 类原样保留（AppBar+body），路由/旧测试全兼容 | `lib/ui/backup_page.dart` |
+| 4 | **导出 Excel / 回收站=入口跳转**：签③跳物品明细页（底部导出/长按分享照旧）、签④跳 TrashPage（恢复/彻底删/全部清空照旧），**取数与清理逻辑一行没重写** | 同上 |
+| 5 | **返回兜底刷新**：抽屉 push 数据管理页 await 返回后调 `_onBackupRestored()`——页签内回收站恢复/彻底删/全部清空都改库，V4.1.7 同款链路幂等兜底（恢复本身仍有 onRestored 即时回调） | `lib/ui/home_page.dart` |
+| 6 | **误装指路文案校准**：分区文件误入全系统入口 →「请到对应区域的『数据管理 → 分区备份』页签恢复」（原指「数据备份与恢复」页已无抽屉直达入口，指路不更新会变死路） | `lib/domain/full_system_backup.dart` |
+
+### 测试与发布
+
+- 新增 `test/v57_data_management_tab_test.dart` 5 条：四签结构/签①全系统面板默认可达/签②分区按钮可达/签③跳明细页/签④跳回收站。`home_page_test.dart` 抽屉 2 条断言改「数据管理」保行数；`backup_page_test.dart` 指路断言同步。**全量 691/691 全绿（686 旧条一条未删 + 5 新增），analyze 0 error / 0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=35 versionName=4.2.2；55,475,505 字节；sha256 `97bd99c94c6b07901761723a9d228d00aefbc70692fcc7d6944ab92de7a51f06`；签名 c1647f33… 不变，可覆盖安装。
+- 线上核验：页面含 V4.2.2 与 sha、APK 直链 200 且 sha 逐字一致、无 sharecode 403、v421 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
+- **范围如实**：本版只做收拢搬运，+34 行为一字不改；日报老六块口径未动（变更挂 +36）；无 schema 变更。
+- 需求链：+35（本版）→ +36 知识库功能（v5 施工图已收档，开工前落 7 点回执）。

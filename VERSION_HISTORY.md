@@ -1198,3 +1198,29 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - 线上核验：页面含 V4.3.0 与 sha、APK 直链 200 且线上 sha 逐字一致、无 sharecode 403、v423 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
 - **范围如实**：FTS5→派生列 LIKE 为技术方案偏离（台账留档，简报如实报）；创作区 4 模板不做内容推荐不自动填字段；meta 表只服务知识域不扩 life/work；versionName 4.3.0 为 buddy 建议（里程碑功能版，回执只定 versionCode=37），已随本版上线。
 - 需求链：+37 知识库功能（本版）→ +38 及以后（未排）。
+
+### V4.3.1 返工+借出补丁版留档（2026-11-29）· versionCode 37 → 38
+
+> **依据**：PM +37 真机验收未过返工通知（3/6 硬伤、4/5/10 待复验）+ 借出模块两 Bug 紧急补丁回执 + P0/P1/P2 性能与数据安全清单（PM 经 AskUserQuestion 拍板「P0 并入 +38，P1/P2 放 +39」）。版号矛盾（PM 回执初写「versionCode 保持 37 热修」撞「升号不热修」铁律）以 AskUserQuestion 让 PM 亲拍：并入 +38、versionCode=38、签名不变、全量测试一条不删。
+
+### 实现逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **借出补丁①·位置查询合并借出状态**：查询合并 getActiveLoansForItem 未还借出（与借出管理页同源 loans 一张表）；三态文案——无借出纯位置 / 在库 0「已借给X（借出日~到期日），当前在库 0，原存放：…」+「借出中，不在库」（不列位置行）/ 部分借出分开列「在库 N 个 + 借出未还 M 个」 | `lib/ui/home_page.dart`（_queryLoans/_queryQty/_queryResultText）/ `inventory_database.dart` / `inventory_repository.dart` |
+| 2 | **借出补丁②·「标记全部归还」防护**：按钮改名 + 二次确认弹窗（「确认将 X（N个）标记为已归还？此操作不可撤销」）+ 归还时间可改（默认当天，支持日期/日期时间两种格式、未来时间拒绝）+ 归还恢复源位置；returnLoan 加 returnedAt 参数（仅还清写 returned_at） | `lib/ui/loan_list_page.dart` / `inventory_database.dart` |
+| 3 | **位置恢复·from_location_id**：Loan 加 fromLocationId（借出时从哪个位置扣数落库）；归还优先恢复源位置（显式 toLocationId > 源位置 > 主位置回退链）；**schema v13→v14**（幂等加列 _addColumnIfMissing；旧记录/旧备份 null 回退主位置；legacy 无 loans 表的极端路径探表跳过） | `lib/data/item.dart` / `inventory_database.dart` |
+| 4 | **+37 硬伤一返工·界面删除入口**：主题行「⋮」PopupMenuButton（系统预置拦「不可删」、有子条目拦「先清空或转移」、空主题确认弹窗）+ 条目长按删除 + 条目详情页删除弹窗文案统一（「删除后从知识树隐藏，数据保留在本地备份，不可在界面恢复。」） | `lib/ui/knowledge_page.dart` |
+| 5 | **+37 硬伤二返工·知识区解锁**：数据管理签按钮从硬编码置灰变动态（注入 knowledgeStore 即解锁）；_shareKnowledgeBackup/_restoreKnowledge 落地；组合根 home_page 注入 knowledgeStore——**V4.1.5 同款「接线缺失」教训第三次现身（组合根没传 store，fake 测不出）** | `lib/ui/data_management_page.dart` / `home_page.dart` |
+| 6 | **P0-1·备份内档轮转**：BackupArchiver（应用私有文档目录/backups，文件名秒级时间戳倒序取 keepCount=3 之后物理删）；导出/分享成功后同步留内档并轮转（轮转时 SnackBar 报「备份轮转，删除最旧备份 xxx（本地保留最近 3 份）」）；**archiver=null=不轮转（测试形态），生产组合根两构造点注入**——面板内 `?? BackupArchiver()` 兜底写法会在测试环境炸 path_provider，全量回归拦截 | `lib/domain/backup_archiver.dart`（新建）/ `full_system_backup_panel.dart` / `backup_page.dart`（BackupPage/BackupPageBody 透传参数）/ `data_management_page.dart` |
+| 7 | **P0-2·备份完整性校验**：BackupIntegrity（外键悬空/returned_qty 穿账/空名/知识域 parent_id·node_id 悬空，按本仓真实表清单）；exportAll/分区保存/分享前 ensureValid，ArgumentError→SnackBar「数据异常，暂不备份，请联系排查（共 N 处）」，坏数据绝不落盘 | `lib/domain/backup_integrity.dart`（新建）/ `full_system_backup.dart` / `backup_actions.dart` / `full_system_backup_panel.dart` |
+
+### 测试与发布
+
+- 新增 v59 借出补丁 13 条（源位置落库/位置恢复源≠主/旧记录回退/归还时间+未来拒绝/迁移 v13→v14/getActiveLoansForItem/备份往返/弹窗三态 widget/查询合并三态）+ v60 返工 7 条（纯 Dart _FakeKnowledgeStore——真 ffi 库与 FakeAsync 不同步卡死老坑复现，StackOverflow 无限递归被 catch 吞掉一例：deleteNodeSync 递归条件误写）+ v61 备份安全 9 条（轮转 4 次剩 3/未超不动/非 json 不动/真实库零误报/外键悬空/穿账/文案/知识悬空/坏数据网关零写入）。旧断言按 +38 口径改写**一条未删**：v46 schema 锁 v14 + loans 14 列、v51/v53 版号锁 4.3.1+38。
+- **全量回归拦下两处真 bug + 一处测试脆弱**：① 面板 `?? BackupArchiver()` 兜底炸 path_provider（成功文案被顶掉）→ null=不轮转+组合根注入；② v14 迁移在无 loans 表 legacy 路径炸 → 探表跳过（V3.11 locationTables 同款防御模式）；③ v51 固定日期 2026-11-28 撞跨午夜（done_at=真实 now，today 已过去→done 区恒空，昨日全绿属日期巧合）→ _today() 真实当天零点，产品口径本身无 bug。
+- **全量 735/735 全绿（706 旧 + 29 新），analyze 0 error / 0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=38 versionName=4.3.1；56,262,293 字节；sha256 `d9ae77829f55dd6832236a500c76cd0e469b772bca6d407d71ceff180f3066b6`；签名 c1647f33… 不变，可覆盖安装。commit 4b35be0。
+- 线上核验：页面含 V4.3.1 与 sha、APK 直链 200（56,262,293 字节）且线上 sha 逐字一致、无 sharecode 403、v430 历史链 200；二维码 516×516 重新生成并 zxingcpp 解码校验。
+- **范围如实**：P1/P2（分页 50 条/搜索 100 上限/文本 2000 字提示/备份大小提示/数据概况页）记 +39；本仓无餐饮/衣橱表（元宝模板串行修正，按真实表清单校验）、无评论区（映射现有文本框记 +39）；备份轮转只删**内档目录**备份文件（SAF 用户自选位置 App 无权清理，留档说明）。
+- 需求链：+38 返工+借出补丁版（本版）→ +39 P1/P2 性能与数据安全二批（已排入）。

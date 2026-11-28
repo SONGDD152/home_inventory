@@ -136,9 +136,11 @@ void main() {
 
   test('V55 注册表留位：加第五域 = additionalInstances 加一项即可查到', () {
     final domains = fakeDomains();
-    final fifth = FakeDomainInstance(FakeDomainRepository(), domainId: 'fifth');
-    // 第五域的枚举值尚不存在，这里用 Map 直查表模拟 instanceOf 的路径
+    // 第五域的枚举值尚不存在，先造实例证明「构造可扩展」，注册表路径
     //（枚举加值后同一构造即可注册）。锁的是「注册表制」这个结构。
+    final fifth = FakeDomainInstance(FakeDomainRepository(), domainId: 'fifth');
+    expect(fifth.domainId, 'fifth',
+        reason: '第五域实例可构造——加枚举值+additionalInstances 即接入');
     final registry = <InventoryDomain, DomainInstance>{
       InventoryDomain.life: domains.life,
       InventoryDomain.work: domains.work,

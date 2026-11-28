@@ -12,6 +12,7 @@ import '../data/phrase_parser.dart';
 import '../data/reminder.dart';
 import '../data/reminder_repository.dart';
 import '../domain/domain_hub.dart';
+import '../domain/full_system_backup.dart';
 import '../domain/overview_reader.dart';
 import '../domain/reminder_editor.dart';
 import '../domain/reminder_source.dart';
@@ -2120,6 +2121,11 @@ class _HomePageState extends State<HomePage> {
                     // V4.1.7（演练打回）：恢复=清空重灌整本账，首页内存态
                     // 全部陈旧，必须强制重建（概览/日程签/仓储页重读库）。
                     onRestored: _onBackupRestored,
+                    // V4.2.1（+34）：全系统备份（生活+工作一份文件）。
+                    // 只在多域模式提供；单测注入单仓储时不显示全系统区。
+                    fullSystem: widget.hub == null
+                        ? null
+                        : FullSystemBackup(repositories: _storageRepositories()),
                   ));
                 },
               ),
@@ -2413,6 +2419,21 @@ class _HomePageState extends State<HomePage> {
   ///
   /// **写边界不受影响**：每个写口的能力面仍然只有「写 `todo_states`」，
   /// 入参仍然只有 sourceType + sourceId，拿不到任何仓储句柄。
+  /// V4.2.1（+34）：开放仓储能力的域 → 仓储句柄（全系统备份用）。
+  ///
+  /// **先按能力开关过滤再碰 repository**——知识域壳实例的 repository
+  /// 访问即抛，过滤必须在前（V4.2.0 教训：任何域遍历都要先短路壳实例）。
+  Map<InventoryDomain, InventoryRepository> _storageRepositories() {
+    final hub = widget.hub;
+    if (hub == null) return const <InventoryDomain, InventoryRepository>{};
+    final repos = <InventoryDomain, InventoryRepository>{};
+    for (final domain in InventoryDomain.values) {
+      if (!domainSupports(domain, DomainCapability.storage)) continue;
+      repos[domain] = hub.instanceOf(domain).repository;
+    }
+    return repos;
+  }
+
   Map<InventoryDomain, TodoStateWriter> _todoWriters() {
     final hub = widget.hub;
     if (hub == null) return const <InventoryDomain, TodoStateWriter>{};

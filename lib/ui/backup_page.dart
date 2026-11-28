@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../data/backup_gateway.dart';
 import '../data/domain.dart';
 import '../data/inventory_repository.dart';
+import '../domain/full_system_backup.dart';
 import 'backup_actions.dart';
+import 'full_system_backup_panel.dart';
 
 /// 数据备份与恢复页：抽屉直达的独立入口。
 ///
@@ -19,6 +21,7 @@ class BackupPage extends StatelessWidget {
     this.gateway,
     this.domain = InventoryDomain.life,
     this.onRestored,
+    this.fullSystem,
   });
 
   final InventoryRepository repository;
@@ -37,8 +40,16 @@ class BackupPage extends StatelessWidget {
   /// 生活区「正常」只是因为切域走了 _switchSection 的全量刷新。
   final Future<void> Function()? onRestored;
 
+  /// V4.2.1（+34）：全系统备份服务（生活+工作一份文件）。
+  ///
+  /// null = 不显示全系统区（单测注入单域仓储时的旧行为）；
+  /// 非空 = 页面顶部追加「全系统备份」区。分区备份/恢复**原样保留**：
+  /// 旧单域备份文件仍然只从分区入口恢复。
+  final FullSystemBackup? fullSystem;
+
   @override
   Widget build(BuildContext context) {
+    final fullSystem = this.fullSystem;
     return Scaffold(
       appBar: AppBar(title: const Text('数据备份与恢复')),
       body: SingleChildScrollView(
@@ -46,9 +57,34 @@ class BackupPage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            const Text('备份与恢复',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
+            // V4.2.1（+34）：全系统区置顶——一份文件管两本账，迁移场景
+            // 这是首选入口；分区备份下沉为「进阶」用途。
+            if (fullSystem != null) ...<Widget>[
+              const Text('全系统备份（推荐）',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              const Text(
+                '把生活区和工作区两本账打包成一份 JSON 文件，'
+                '一次导出、一次恢复，迁移不用来回切区域。',
+                style: TextStyle(fontSize: 13, color: Colors.grey),
+              ),
+              const SizedBox(height: 8),
+              FullSystemBackupPanel(
+                service: fullSystem,
+                gateway: gateway,
+                onRestored: onRestored,
+              ),
+              const SizedBox(height: 24),
+              const Divider(),
+              const SizedBox(height: 16),
+              const Text('分区备份（单个区域）',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+            ] else ...<Widget>[
+              const Text('备份与恢复',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+            ],
             const Text(
               '备份会把全部物品和位置打包成一个 JSON 文件。'
               '导出文件将通过系统对话框保存到您选择的位置（如下载、文档等）；'

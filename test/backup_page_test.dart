@@ -3,8 +3,10 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:home_inventory/data/domain.dart';
 import 'package:home_inventory/data/inventory_repository.dart';
 import 'package:home_inventory/data/item.dart';
+import 'package:home_inventory/domain/full_system_backup.dart';
 import 'package:home_inventory/ui/backup_page.dart';
 
 import 'item_list_page_test.dart' show FakeBackupGateway, FakeListRepository;
@@ -227,6 +229,171 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(restored, 1, reason: '恢复成功必须通知调用方刷新（首页内存态全陈旧）');
+  });
+
+  // ══════════ V4.2.1（+34）全系统备份 ══════════
+
+  testWidgets('V56 渲染：传 fullSystem 时显示全系统区（导出/恢复两键）', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]),
+        lifeRepo = FakeListRepository(const <ItemWithLocations>[]),
+        workRepo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    await tester.pumpWidget(MaterialApp(
+      home: BackupPage(
+        repository: repo,
+        gateway: gateway,
+        fullSystem: FullSystemBackup(
+          repositories: <InventoryDomain, InventoryRepository>{
+            InventoryDomain.life: lifeRepo,
+            InventoryDomain.work: workRepo,
+          },
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('全系统备份（推荐）'), findsOneWidget);
+    expect(find.byKey(const Key('full_export_backup')), findsOneWidget);
+    expect(find.byKey(const Key('full_restore_backup')), findsOneWidget);
+    // 分区备份原样保留（旧单域备份文件仍从分区入口恢复）。
+    expect(find.byKey(const Key('export_backup')), findsOneWidget);
+    expect(find.byKey(const Key('restore_backup')), findsOneWidget);
+  });
+
+  testWidgets('V56 全系统导出：两域 exportBackup 各调一次，合成一份 kind=full_system',
+      (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]),
+        lifeRepo = FakeListRepository(const <ItemWithLocations>[]),
+        workRepo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    await tester.pumpWidget(MaterialApp(
+      home: BackupPage(
+        repository: repo,
+        gateway: gateway,
+        fullSystem: FullSystemBackup(
+          repositories: <InventoryDomain, InventoryRepository>{
+            InventoryDomain.life: lifeRepo,
+            InventoryDomain.work: workRepo,
+          },
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('full_export_backup')));
+    await tester.pumpAndSettle();
+
+    expect(lifeRepo.exportCalls, 1, reason: '生活区导出一次');
+    expect(workRepo.exportCalls, 1, reason: '工作区导出一次');
+    final written = jsonDecode(utf8.decode(gateway.lastSavedBytes!))
+        as Map<String, Object?>;
+    expect(written['kind'], 'full_system');
+    expect((written['domains']! as Map<String, Object?>).keys.toSet(),
+        <String>{'life', 'work'});
+    expect(find.textContaining('含生活区+工作区'), findsOneWidget);
+  });
+
+  testWidgets('V56 全系统恢复：合法文件 → 两域各恢复一次 + 行数提示 + onRestored',
+      (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]),
+        lifeRepo = FakeListRepository(const <ItemWithLocations>[]),
+        workRepo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'kind': 'full_system',
+      'formatVersion': 1,
+      'domains': <String, Object?>{
+        'life': <String, Object?>{
+          'app': 'home_inventory',
+          'domain': 'life',
+          'schemaVersion': 13,
+          'items': <Object?>[
+            <String, Object?>{'id': 1, 'name': '梯子', 'quantity': 4},
+          ],
+          'locations': <Object?>[],
+          'item_locations': <Object?>[],
+        },
+        'work': <String, Object?>{
+          'app': 'home_inventory',
+          'domain': 'work',
+          'schemaVersion': 13,
+          'items': <Object?>[],
+          'locations': <Object?>[],
+          'item_locations': <Object?>[],
+        },
+      },
+    }));
+    var restored = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: BackupPage(
+        repository: repo,
+        gateway: gateway,
+        fullSystem: FullSystemBackup(
+          repositories: <InventoryDomain, InventoryRepository>{
+            InventoryDomain.life: lifeRepo,
+            InventoryDomain.work: workRepo,
+          },
+        ),
+        onRestored: () async => restored++,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('full_restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('full_restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(lifeRepo.restoreCalls, 1, reason: '生活区恢复一次');
+    expect(workRepo.restoreCalls, 1, reason: '工作区恢复一次');
+    expect(lifeRepo.lastRestored?['domain'], 'life',
+        reason: '恢复内容按域分发，不许串库');
+    expect(workRepo.lastRestored?['domain'], 'work');
+    expect(restored, 1, reason: '全系统恢复成功同样必须触发首页刷新');
+    expect(find.textContaining('生活区：物品 1 条'), findsOneWidget,
+        reason: '行数提示逐域分行（页面说明文案不含冒号，不会误匹配）');
+  });
+
+  testWidgets('V56 全系统恢复：单域文件误入 → 明确报错不落库', (tester) async {
+    final repo = FakeListRepository(const <ItemWithLocations>[]),
+        lifeRepo = FakeListRepository(const <ItemWithLocations>[]),
+        workRepo = FakeListRepository(const <ItemWithLocations>[]);
+    final gateway = FakeBackupGateway();
+    gateway.registerFile(jsonEncode(<String, Object?>{
+      'app': 'home_inventory',
+      'domain': 'life',
+      'schemaVersion': 13,
+      'items': <Object?>[],
+      'locations': <Object?>[],
+      'item_locations': <Object?>[],
+    }));
+    await tester.pumpWidget(MaterialApp(
+      home: BackupPage(
+        repository: repo,
+        gateway: gateway,
+        fullSystem: FullSystemBackup(
+          repositories: <InventoryDomain, InventoryRepository>{
+            InventoryDomain.life: lifeRepo,
+            InventoryDomain.work: workRepo,
+          },
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('full_restore_backup')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('full_restore_confirm')));
+    await tester.pumpAndSettle();
+
+    expect(lifeRepo.restoreCalls, 0, reason: '校验拒绝时不得落库');
+    expect(workRepo.restoreCalls, 0);
+    expect(find.textContaining('恢复失败'), findsOneWidget);
+    expect(find.textContaining('请到对应区域的「数据备份与恢复」页恢复'),
+        findsOneWidget, reason: '指路分区入口');
+    expect(find.byKey(const Key('full_restore_backup')), findsOneWidget,
+        reason: '页面仍在，未崩溃');
   });
 }
 

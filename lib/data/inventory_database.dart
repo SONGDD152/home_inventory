@@ -2541,6 +2541,16 @@ class InventoryDatabase implements InventoryRepository, ReminderRepository,
     if (data['app'] != 'home_inventory') {
       throw ArgumentError.value(data, 'data', '不是本应用的备份文件');
     }
+    // V4.2.1（+34）：全系统文件误入分区恢复入口 → 明确指路，不让
+    // 「备份缺少 items 数据」这种底层报错糊用户一脸。
+    if (data['kind'] == 'full_system') {
+      throw ArgumentError.value(
+        data['kind'],
+        'kind',
+        '这是全系统备份（生活+工作一份文件），'
+            '请在备份页用「全系统恢复」入口恢复',
+      );
+    }
     // V4.0：跨域误恢复必须拦住（分库后这是"覆盖另一本账"级别的事故）。
     // ① 备份带域标识且与本库不一致 → 拒绝，文案直说哪本账。
     // ② 备份无域标识（旧版备份）→ 归生活库；工作库拒绝接收。

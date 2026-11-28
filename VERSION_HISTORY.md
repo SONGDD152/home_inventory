@@ -1097,3 +1097,25 @@ APK 存名 `home-inventory-v414.apk`，直链带 sharecode；二维码 516×516 
 - **PM 真机验收全过**：顶栏四栏（概览默认首屏/生活/工作/知识）、知识壳页无底栏、生活底栏三栏（仓储/衣橱/餐饮）、概览无知识系统信息、记账/日程/催办/备份照旧可用。**V4.2.0（+33）正式关账。AI 不代签，签 = PM。**
 - **PM 附记**：日报单份跨域口径（含知识系统段）挂 +36 待办，不卡 +33——与此前拍板一致（④日报单份跨域落 +36）。
 - **下一步解锁：+34 全系统备份**。需求链：+33（已关账）→ +34 全系统备份 → +35 数据管理页签 → +36 知识库功能（开工前落 v5 施工图：树形落表/列设计/Writer 扩口/日报单份跨域）。
+
+### V4.2.1 全系统备份版留档（2026-11-28）· versionCode 33 → 34
+
+> **依据**：PM 需求链 +33→+36（构想简报十二）中「+34 全系统备份」；V4.1.6 改名迁移演练实锤痛点（两域两份文件、导两轮导两份、漏域风险）。
+
+### 实现逐条
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **全系统备份服务**：`FullSystemBackup`——`exportAll()` 把生活+工作两库各 `exportBackup()` 打包成一份 `{app, kind:'full_system', formatVersion, exportedAt, domains:{life:{…}, work:{…}}}`；域条目沿用单域备份原结构，恢复逐域 delegate `restoreBackup`（V4.1.7 收口全继承，**一行不重写**）；只收开放 `storage` 能力的域（knowledge 壳域永不出现） | `lib/domain/full_system_backup.dart`（新建，独立能力不塞 InventoryRepository 接口） |
+| 2 | **恢复校验前置**：结构/域归属（key↔domain 双向一致）/schemaVersion 逐条先验，全过才开始写第一本账——任一分区非法**整体拒绝不落库**（不出现半截状态） | 同上 |
+| 3 | **互拒指路**：单域文件进全系统入口 →「这是分区备份…请到对应区域恢复」；全系统文件进分区入口 →「请在备份页用『全系统恢复』入口恢复」 | `full_system_backup.dart` / `inventory_database.dart` restoreBackup |
+| 4 | **UI**：备份页顶部新增「全系统备份（推荐）」区（导出/全系统恢复两键 + 交互模式与分区对齐：点击=保存到手机、长按=分享、确认框、错误明确提示）；分区备份区下沉保留 | `lib/ui/full_system_backup_panel.dart`（新建）/ `backup_page.dart` |
+| 5 | **组合根**：抽屉备份入口传 `FullSystemBackup(repositories: _storageRepositories())`（先能力开关过滤再碰 repository，V4.2.0 壳实例教训沿用） | `lib/ui/home_page.dart` |
+| 6 | **恢复提示逐域分行**：「生活区：物品 X 条、日程 Y 条…」+ 缺表点名（V4.1.7 行数口径的跨域版） | `full_system_backup.dart` restoreResultText |
+
+### 测试与发布
+
+- 新增 `test/v56_full_system_backup_test.dart` 6 条：**双真库造满数据 → 一份 JSON 往返 → 双新库恢复 → 每域 9 表逐行逐列保真**（含软删行）；互拒×2；未知分区/错位/版本过高全拒；**校验前置（合法分区也不动）**；domains 口径。`backup_page_test.dart` 增 4 条 widget（全系统区渲染/双域导出合成/恢复分发不串库+onRestored 必达/单域误入不落库）。v51/v53 版号断言同步 4.2.1+34。**全量 686/686 全绿，analyze 0 error / 0 warning（5 条既有 info）**。
+- aapt2 实测：`com.danfeng.xiaobenben` versionCode=34 versionName=4.2.1；55,442,741 字节；sha256 `b6b3d28b35e05919aa0f4a902081b56bcc92622f6306b8fe95cdf58df35342a2`；签名 c1647f33… 不变，可覆盖安装。
+- **如实说明**：调研时提的「偏好落盘缺口」经核查不成立——全 app 无 SharedPreferences，唯一用户设置（月历农历开关）为内存态、默认开，无可落盘之物，本版不虚增该范围。
+- 需求链：+34（本版）→ +35 数据管理页签 → +36 知识库功能（开工前落 v5 施工图）。
